@@ -91,6 +91,7 @@ AIOps/
 │       ├── api.py                   # 路由聚合
 │       ├── core/                    # 核心模块
 │       └── domains/                 # 领域层（扁平自包含）
+│           ├── auth/                # 认证授权（User ORM、JWT、RBAC）
 │           ├── prompts/
 │           ├── agents/
 │           ├── knowledge/
@@ -106,8 +107,14 @@ AIOps/
 │       ├── domains/                 # 与后端 domains 严格对齐
 │       ├── shared/                  # 共享层
 │       └── views/                   # 页面
-├── specs/
-│   └── openapi.yaml                 # OpenAPI 3.1 规范
+├── specs/                           # 横切关注点 + 契约规范
+│   ├── openapi.yaml                 # OpenAPI 3.1 规范
+│   ├── errors.spec.md               # 错误处理（统一格式/状态码/AppError）
+│   ├── security.spec.md             # 安全（JWT/RBAC/CORS/限流/密钥）
+│   ├── testing.spec.md              # 测试（四层金字塔/覆盖率门槛/CI 门禁）
+│   ├── migration.spec.md            # 数据库迁移（ORM 真源/Alembic/漂移）
+│   ├── deployment.spec.md           # 部署（镜像/K8s/健康检查）
+│   └── observability.spec.md        # 可观测性（日志/追踪/指标/告警）
 └── ops/
     ├── Dockerfile.backend
     ├── Dockerfile.frontend
@@ -139,6 +146,53 @@ AIOps/
 
 - **本地开发**：docker compose up（PostgreSQL + Redis + Backend + Frontend）
 - **生产部署**：K8s 极简 manifest（见 ops/k8s/）
+
+## 7. 横切关注点规范
+
+跨领域的横切契约统一收敛到 `specs/` 目录，作为全栈强制规范。各领域 SPEC.md 与 agents.md 均须引用并遵循。
+
+| 关注点 | 规范文件 | 核心约束 |
+|--------|----------|----------|
+| 错误处理 | [`specs/errors.spec.md`](specs/errors.spec.md) | 统一响应 `{error, message, detail}`；HTTP 状态码 400/401/403/404/409/422/429/500；`AppError` 基类 + 子类；`RequestValidationError` 改写为统一格式；全局 500 兜底；前端 `client.ts` 统一抛 `ApiError` |
+| 安全 | [`specs/security.spec.md`](specs/security.spec.md) | JWT Bearer（默认 24h）；RBAC（admin/user）；CORS 禁止 `*`+credentials；Redis 滑动窗口限流（默认 100/min，LLM 20/min）；bcrypt 密码；文件上传白名单 + 50MB；API Key 仅服务端；Secret 经 K8s 注入 |
+| 测试 | [`specs/testing.spec.md`](specs/testing.spec.md) | 四层金字塔（L1 pytest/L2 schemathesis/L3 Playwright/L4 LLM-as-Judge）；L1 覆盖率 ≥ 80%（`--cov-fail-under=80`）；L1–L3 必须 100% 通过阻断合并，L4 > 0.85；factory pattern 测试数据 |
+| 数据库迁移 | `specs/migration.spec.md` | ORM（`Base.metadata`）为单一真源；Alembic autogenerate；`init.sql` 仅扩展/种子/索引；CI 一致性校验；已知漂移修复清单（eval_* 表、users ORM） |
+| 部署 | `specs/deployment.spec.md` | 多阶段镜像 + 非 root（UID 1000）+ HEALTHCHECK；前端 nginx 托管 `dist/` 禁 dev server；K8s 2+ replicas + HPA + PDB + probe；Secret/ConfigMap 分离；`/health` 端点 |
+| 可观测性 | `specs/observability.spec.md` | JSON 结构化日志（timestamp/level/logger/message/request_id/user_id/latency_ms）；每请求 request_id 追踪；指标（请求数/延迟/错误率/LLM token 与成本）；告警（错误率 >5%、P99 >2s、成本超阈值）；前端监控 |
+
+> 凡涉及上述关注点的实现，必须先读对应 `specs/*.spec.md`，代码中引用其条款编号。
+
+## 8. Success Criteria
+
+项目交付与每次迭代的成功标准（可量化、可验收）：
+
+### 8.1 功能完整性
+- 六大核心领域（Prompt Studio、Agent Orchestrator、Knowledge Base、Model Router、Conversation Analytics、Eval Suite）均具备 CRUD 与各自核心能力，且与 `specs/openapi.yaml` 契约一致。
+- 关键用户路径（登录 → 创建 Prompt → 版本管理 → 回滚）E2E 通过。
+
+### 8.2 质量门槛
+- **L1 单元测试**：覆盖率 ≥ 80%，100% 通过（`pytest --cov-fail-under=80`）。
+- **L2 契约测试**：schemathesis 覆盖所有端点，100% 通过。
+- **L3 E2E 测试**：关键路径 100% 通过，针对 `vite build` 产物运行。
+- **L4 LLM-as-Judge**：得分 > 0.85。
+- **错误一致性**：所有非 2xx 响应符合 `errors.spec.md` 统一格式，无 `{detail:[...]}` 残留。
+
+### 8.3 安全基线
+- 认证授权（JWT + RBAC）落地，401/403 边界正确。
+- 生产 CORS 无 `*` + credentials；LLM API Key 不触达前端；CI secret 扫描通过。
+
+### 8.4 可部署性
+- 镜像多阶段、非 root、含 HEALTHCHECK；前端生产由 nginx 托管静态文件。
+- K8s 部署：backend/frontend 均 2+ replicas、HPA、PDB、liveness/readiness probe、资源限制就绪；`/health` 返回 status + version。
+
+### 8.5 可观测性
+- 生产日志为结构化 JSON，含 request_id 贯穿链路。
+- 请求数/延迟/错误率/LLM token 与成本指标已采集；错误率 >5%、P99 >2s、LLM 成本超阈值告警已配置。
+
+### 8.6 工程纪律
+- 每个 PR：diff < 200 行，引用 SPEC 条款，eval 通过。
+- 数据库 schema 无漂移（ORM vs DB 一致性校验通过）。
+- 横切关注点变更先更新 `specs/*.spec.md`，再更新 eval，再更新代码。
 
 ---
 

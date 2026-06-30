@@ -2,7 +2,7 @@
 name = "aiops-console-backend"
 version = "0.1.0-alpha"
 description = "AIOps Console — AI 原生运营控制台后端"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 readme = "SPEC.md"
 license = { text = "Proprietary" }
 authors = [{ name = "AIOps Team" }]
