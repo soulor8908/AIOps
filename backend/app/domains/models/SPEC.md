@@ -27,11 +27,13 @@
 
 ## Success Criteria (Eval)
 - [ ] direct 策略仅返回 primary
+- [ ] round_robin 策略在 active 候选中按调用次序轮转，primary 仍居首
 - [ ] least_cost 按 (input+output) 单价升序排列候选
 - [ ] latency 策略按 priority 升序（priority 越小视为延迟越低）
 - [ ] primary 失败时按候选列表降级，并在响应中标记 `fallback_used`
 - [ ] 成本计算精度到 6 位小数（`quantize(0.000001)`）
 - [ ] 所有候选均失败时抛 `LLMError` 并附 last_error
+- [ ] provider 为 `azure_openai`/`custom` 且未配置 `api_base` 时调用前抛 `LLMError`（避免静默失败）
 
 ## Data Models
 - ORM `ModelConfig`（`model_configs` 表）：`id`(UUID)、`alias`(unique)、`provider`、`model_name`、`api_base`、`api_key_env`、`max_tokens`(默认 4096)、`temperature`(默认 0.7)、`cost_per_1k_input`(Numeric(10,6))、`cost_per_1k_output`(Numeric(10,6))、`is_active`(默认 True)、`priority`(默认 100)、`created_at`、`updated_at`

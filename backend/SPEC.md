@@ -47,13 +47,13 @@ app/
 | POST | `/prompts` | 创建 Prompt（含初始 version） |
 | GET | `/prompts/{id}` | 获取详情 |
 | PUT | `/prompts/{id}` | 更新元信息 |
-| DELETE | `/prompts/{id}` | 软删除 |
+| DELETE | `/prompts/{id}` | 硬删除（级联 versions） |
 | GET | `/prompts/{id}/versions` | 版本列表 |
 | POST | `/prompts/{id}/versions` | 新增版本 |
 | POST | `/prompts/{id}/versions/{vid}/rollback` | 回滚到指定版本 |
 | GET | `/prompts/{id}/diff?from=v1&to=v2` | 版本 diff |
 
-- **约束**: 单 Prompt 最大 100 版本，内容 ≤ 64KB
+- **约束**: 单 Prompt 最大 100 版本，内容 ≤ 64KB；删除为硬删除（级联 versions），与 `prompts/SPEC.md`§Constraints 一致
 - **ORM**: `Prompt`（name, description, current_version_id, versions 关系）+ `PromptVersion`（prompt_id, version_num, content, variables）
 
 ### 3.2 Agent Orchestrator (`/api/v1`)

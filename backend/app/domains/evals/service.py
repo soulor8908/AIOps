@@ -74,12 +74,18 @@ async def run_eval(
 
     results: list[CaseResult] = []
     pass_count = 0
-    for case in run.cases:
-        actual = await _predict(predict_fn, case)
-        result = await _judge_case(run.judge_type, case, actual)
-        results.append(result)
-        if result.passed:
-            pass_count += 1
+    try:
+        for case in run.cases:
+            actual = await _predict(predict_fn, case)
+            result = await _judge_case(run.judge_type, case, actual)
+            results.append(result)
+            if result.passed:
+                pass_count += 1
+    except Exception:
+        run.status = EvalStatus.ERROR.value
+        run.finished_at = datetime.now(timezone.utc)
+        await session.flush()
+        raise
 
     run.results = [r.model_dump(mode="json") for r in results]
     run.pass_count = pass_count

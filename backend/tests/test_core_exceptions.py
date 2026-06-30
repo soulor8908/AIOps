@@ -2,8 +2,9 @@
 
 覆盖：
 - 各子类的 status_code 正确
-- 各子类的 error_code 正确
-- 带 detail 的错误
+- 各子类的 error_code 正确（对齐 `errors.spec.md`§4 命名）
+- ``to_response`` 输出（detail 为 None 时省略）
+- TokenExpiredError 继承 AuthenticationError 但 error_code 不同
 - 字符串表示
 """
 
@@ -18,6 +19,8 @@ from app.core.exceptions import (
     ConflictError,
     LLMError,
     NotFoundError,
+    RateLimitError,
+    TokenExpiredError,
     ValidationError,
 )
 
@@ -31,8 +34,10 @@ from app.core.exceptions import (
         (NotFoundError, 404),
         (ValidationError, 422),
         (AuthenticationError, 401),
+        (TokenExpiredError, 401),
         (AuthorizationError, 403),
         (ConflictError, 409),
+        (RateLimitError, 429),
         (LLMError, 502),
     ],
 )
@@ -42,7 +47,7 @@ def test_app_error_status_code(exc_cls: type[AppError], expected_status: int) ->
     assert exc.status_code == expected_status
 
 
-# ===================== error_code =====================
+# ===================== error_code（对齐 errors.spec.md§4） =====================
 
 @pytest.mark.parametrize(
     "exc_cls, expected_code",
@@ -50,9 +55,11 @@ def test_app_error_status_code(exc_cls: type[AppError], expected_status: int) ->
         (AppError, "internal_error"),
         (NotFoundError, "not_found"),
         (ValidationError, "validation_error"),
-        (AuthenticationError, "authentication_error"),
-        (AuthorizationError, "authorization_error"),
+        (AuthenticationError, "token_invalid"),
+        (TokenExpiredError, "token_expired"),
+        (AuthorizationError, "permission_denied"),
         (ConflictError, "conflict"),
+        (RateLimitError, "rate_limited"),
         (LLMError, "llm_error"),
     ],
 )
@@ -77,19 +84,58 @@ def test_app_error_without_detail_defaults_none() -> None:
     assert exc.detail is None
 
 
+# ===================== to_response（errors.spec.md§2/§5.1） =====================
+
+def test_to_response_includes_detail_when_present() -> None:
+    """detail 非 None 时 to_response 包含 detail 字段。"""
+    exc = NotFoundError("资源不存在", detail="agent_id=abc-123")
+    resp = exc.to_response()
+    assert resp == {
+        "error": "not_found",
+        "message": "资源不存在",
+        "detail": "agent_id=abc-123",
+    }
+
+
+def test_to_response_omits_detail_when_none() -> None:
+    """detail 为 None 时 to_response 必须省略 detail 键，禁止返回 null。"""
+    exc = LLMError("llm 失败")
+    resp = exc.to_response()
+    assert resp == {"error": "llm_error", "message": "llm 失败"}
+    assert "detail" not in resp
+
+
+def test_to_response_uses_overridden_message() -> None:
+    """子类默认 message 可被构造参数覆盖。"""
+    exc = NotFoundError()
+    assert exc.to_response()["message"] == "资源不存在"
+    exc2 = NotFoundError("agent 不存在")
+    assert exc2.to_response()["message"] == "agent 不存在"
+
+
+# ===================== 继承 =====================
+
 def test_app_error_inheritance() -> None:
     """所有子类继承 AppError。"""
     for exc_cls in [
         NotFoundError,
         ValidationError,
         AuthenticationError,
+        TokenExpiredError,
         AuthorizationError,
         ConflictError,
+        RateLimitError,
         LLMError,
     ]:
         exc = exc_cls("msg")
         assert isinstance(exc, AppError)
         assert isinstance(exc, Exception)
+
+
+def test_token_expired_caught_as_authentication_error() -> None:
+    """TokenExpiredError 继承 AuthenticationError，可被父类 except 捕获。"""
+    with pytest.raises(AuthenticationError):
+        raise TokenExpiredError("expired")
 
 
 # ===================== str/repr =====================

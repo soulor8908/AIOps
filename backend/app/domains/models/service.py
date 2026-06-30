@@ -25,6 +25,8 @@ from app.domains.models.models import (
     RoutingStrategy,
 )
 
+_round_robin_index: dict[str, int] = {}
+
 
 async def create_model(session: AsyncSession, payload: ModelConfigCreate) -> ModelConfig:
     """创建模型配置。alias 唯一冲突由 DB 约束保证。"""
@@ -106,6 +108,10 @@ async def route_model(
     # primary 排首位
     if primary in candidates:
         candidates.remove(primary)
+    if strategy == RoutingStrategy.ROUND_ROBIN and candidates:
+        shift = _round_robin_index.get(alias, 0) % len(candidates)
+        _round_robin_index[alias] = _round_robin_index.get(alias, 0) + 1
+        candidates = candidates[shift:] + candidates[:shift]
     return [primary, *candidates]
 
 
@@ -119,6 +125,9 @@ async def chat_completion(
     messages = [Message(role=m.role, content=m.content) for m in request.messages]
     last_error: Exception | None = None
     for idx, config in enumerate(candidates):
+        if config.provider in ("azure_openai", "custom") and not config.api_base:
+            last_error = LLMError(f"模型 {config.alias} 未配置 api_base")
+            continue
         llm_config = _to_llm_config(config, request)
         client = LLMClient(llm_config)
         try:

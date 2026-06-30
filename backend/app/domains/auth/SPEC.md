@@ -28,14 +28,14 @@
 - token 黑名单 / 主动吊销（alpha 版不做，依赖短过期 + refresh 轮换）
 
 ## Success Criteria (Eval)
-- [ ] 未认证请求访问受保护路由 → 401，`error="authentication_error"`
+- [ ] 未认证请求访问受保护路由 → 401，`error="token_invalid"`（与 `errors.spec.md`§4 错误码一致）
 - [ ] 登录成功 → 200，返回 `access_token` + `token_type="bearer"`（并含 `refresh_token`、`expires_in`）
-- [ ] access token 过期 → 401，`error_code="token_expired"`
-- [ ] refresh token 过期或无效 → 401，`error_code="token_expired"` / `"authentication_error"`
+- [ ] access token 过期 → 401，`error="token_expired"`（`verify_token` 单独捕获 `ExpiredSignatureError` 抛 `TokenExpiredError`）
+- [ ] refresh token 过期或无效 → 401，`error="token_expired"` / `"token_invalid"`
 - [ ] 密码哈希不可逆：库中仅存 bcrypt hash，`verify_password` 可校验、不可还原
 - [ ] 并发登录无竞态：同一账号并发签发 token 不互相破坏
-- [ ] 注册 email 重复 → 409，`error_code="conflict"`
-- [ ] 非 admin 访问 admin 路由 → 403，`error_code="authorization_error"`
+- [ ] 注册 email 重复 → 409，`error="conflict"`
+- [ ] 非 admin 访问 admin 路由 → 403，`error="permission_denied"`
 
 ## Data Models
 - 持久层：`users` 表（见 `init.sql` / `DATA.spec.md`）。ORM `User` 映射该表，含 `is_admin: bool`。
@@ -67,19 +67,19 @@
 ## Auth Dependencies
 - `get_current_user(token=Depends(oauth2_scheme)) -> User`
   - 解析 Bearer token → `verify_token` → 按 `sub`(user_id) 查 `users` 表
-  - 未带 / 无效 token → `AuthenticationError`（401，`error_code="authentication_error"`）
-  - token 过期 → `AuthenticationError`（401，`error_code="token_expired"`；需在 `verify_token` 中捕获 `jose.ExpiredSignatureError` 单独标记）
+  - 未带 / 无效 token → `AuthenticationError`（401，`error_code="token_invalid"`）
+  - token 过期 → `TokenExpiredError`（401，`error_code="token_expired"`；需在 `verify_token` 中捕获 `jose.ExpiredSignatureError` 单独标记）
   - 用户不存在 / `is_active=false` → `AuthenticationError`（401）
 - `get_current_admin(user=Depends(get_current_user)) -> User`
   - 在 `get_current_user` 基础上校验 `is_admin=true`
-  - 非 admin → `AuthorizationError`（403，`error_code="authorization_error"`）
+  - 非 admin → `AuthorizationError`（403，`error_code="permission_denied"`）
 - 上述依赖注入到各领域 router 的受保护端点。
 
 ## Error Cases
-- 未带 / 无效 token → 401 `authentication_error`
+- 未带 / 无效 token → 401 `token_invalid`
 - token 过期 → 401 `token_expired`
-- 用户不存在 / 已停用 → 401 `authentication_error`
+- 用户不存在 / 已停用 → 401 `token_invalid`
 - 注册 email 重复 → 409 `conflict`
 - 注册密码 < 8 → 422 `validation_error`
-- 非 admin 访问受保护写操作 → 403 `authorization_error`
-- 统一错误体：`{error, message, detail}`（与 `main.py` 全局处理器一致）
+- 非 admin 访问受保护写操作 → 403 `permission_denied`
+- 统一错误体：`{error, message, detail}`（与 `main.py` 全局处理器一致，遵循 `errors.spec.md`§2/§4）

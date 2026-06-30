@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections import deque
 from typing import Any, Protocol
 
 from app.core.exceptions import LLMError
@@ -170,17 +171,45 @@ async def execute_workflow_dag(
     agent_runner: Any,
     entry_input: str,
 ) -> ExecutionResult:
-    """极简 DAG 执行：拓扑序执行节点，传递上下文。"""
+    """DAG 执行：从 entry 节点沿 edges BFS 遍历，逐节点执行并传递上下文。"""
     if not nodes:
         raise LLMError("工作流无节点")
     if len(nodes) > 50:
         raise LLMError("DAG 节点数超 50 上限")
+    node_map = {node["id"]: node for node in nodes}
+    if edges:
+        adjacency: dict[str, list[str]] = {nid: [] for nid in node_map}
+        for edge in edges:
+            src = edge.get("source")
+            tgt = edge.get("target")
+            if src in adjacency and tgt in node_map:
+                adjacency[src].append(tgt)
+        entry_id = next(
+            (n["id"] for n in nodes if n.get("is_entry")), nodes[0]["id"]
+        )
+        order: list[str] = []
+        visited: set[str] = set()
+        queue: deque[str] = deque([entry_id])
+        while queue:
+            node_id = queue.popleft()
+            if node_id in visited:
+                continue
+            visited.add(node_id)
+            order.append(node_id)
+            for tgt in adjacency.get(node_id, []):
+                if tgt not in visited:
+                    queue.append(tgt)
+        if not order:
+            order = [nodes[0]["id"]]
+    else:
+        order = [node["id"] for node in nodes]
     context: dict[str, str] = {"__input__": entry_input}
     traces: list[ExecutionTrace] = []
-    for idx, node in enumerate(nodes):
+    for idx, node_id in enumerate(order):
+        node = node_map[node_id]
         node_input = context.get("__input__", "")
         result = await agent_runner(node, node_input)
-        context[node["id"]] = result.final_answer
+        context[node_id] = result.final_answer
         context["__input__"] = result.final_answer
         traces.extend(result.traces)
         traces.append(ExecutionTrace(

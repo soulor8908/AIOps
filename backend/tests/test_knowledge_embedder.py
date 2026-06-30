@@ -179,11 +179,13 @@ async def test_embed_batch() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         call_count["n"] += 1
         body = __import__("json").loads(request.content)
-        # 每条文本返回不同向量
-        idx = call_count["n"] - 1
-        return httpx.Response(200, json={
-            "data": [{"embedding": [float(idx)] * EMBEDDING_DIM}],
-        })
+        # 按输入顺序为每条文本返回不同向量
+        inputs = body["input"]
+        data = [
+            {"embedding": [float(i)] * EMBEDDING_DIM}
+            for i in range(len(inputs))
+        ]
+        return httpx.Response(200, json={"data": data})
 
     texts = ["first", "second", "third"]
     with _patch_embedder_http(handler), \
@@ -191,7 +193,7 @@ async def test_embed_batch() -> None:
         results = await embed_batch(texts)
 
     assert len(results) == 3
-    assert call_count["n"] == 3  # 逐条调用
+    assert call_count["n"] == 1  # 单次批量调用
     assert results[0][0] == 0.0
     assert results[1][0] == 1.0
     assert results[2][0] == 2.0

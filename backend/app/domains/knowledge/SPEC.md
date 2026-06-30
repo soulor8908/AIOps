@@ -36,7 +36,7 @@
 - ORM `KnowledgeBase`（`knowledge_bases` 表）：`id`(UUID)、`name`、`description`、`embedding_model`(默认 text-embedding-3-small)、`chunk_size`(默认 800)、`chunk_overlap`(默认 100)、`created_at`、`updated_at`；`documents` 关系（cascade all, delete-orphan）
 - ORM `Document`（`documents` 表）：`id`(UUID)、`knowledge_base_id`(FK, CASCADE)、`title`、`source_uri`、`mime_type`、`size_bytes`、`chunk_count`、`status`(pending/processing/ready/failed)、`created_at`、`updated_at`
 - ORM `Chunk`（`chunks` 表）：`id`(UUID)、`document_id`(FK, CASCADE)、`knowledge_base_id`(FK, CASCADE)、`chunk_index`、`content`、`embedding`(Vector(1536))、`token_count`、`metadata`(JSONB)、`created_at`
-- Schemas：`KnowledgeBaseCreate` / `KnowledgeBaseOut` / `DocumentOut` / `SearchQuery`(query/top_k/score_threshold) / `SearchResult`(chunk_id/document_id/content/score/metadata) / `RAGQuery`(question/top_k)
+- Schemas：`KnowledgeBaseCreate` / `KnowledgeBaseOut` / `DocumentOut` / `SearchQuery`(query/top_k/score_threshold) / `SearchResult`(chunk_id/document_id/content/score/metadata) / `RAGQuery`(question/top_k) / `RAGResponse`(answer/sources/usage)
 - `chunker.py`：`chunk_text` 固定长度按字符切分（中文友好），`step = chunk_size - overlap`；`ChunkResult`(index/content/token_count)；`_estimate_tokens` 粗估（CJK 按字 + ASCII 按词）
 - `embedder.py`：`embed_text` / `embed_batch` 调 OpenAI Embeddings API，失败回退 `_zero_vector`；`OPENAI_API_KEY` 未配置时直接返回零向量
 

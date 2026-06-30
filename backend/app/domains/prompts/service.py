@@ -98,6 +98,15 @@ async def create_version(
     session: AsyncSession, prompt_id: uuid.UUID, payload: PromptVersionCreate
 ) -> PromptVersion:
     """新增版本。version_num 自增。超 100 抛 ConflictError。"""
+    lock_stmt = (
+        select(Prompt)
+        .where(Prompt.id == prompt_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    prompt = (await session.execute(lock_stmt)).scalar_one_or_none()
+    if prompt is None:
+        raise NotFoundError(f"Prompt {prompt_id} 不存在")
     count_stmt = select(func.count()).select_from(PromptVersion).where(
         PromptVersion.prompt_id == prompt_id
     )
@@ -118,7 +127,6 @@ async def create_version(
     )
     session.add(version)
     await session.flush()
-    prompt = await get_prompt(session, prompt_id)
     prompt.current_version_id = version.id
     await session.flush()
     return version

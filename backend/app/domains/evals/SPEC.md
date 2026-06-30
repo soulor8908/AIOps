@@ -28,6 +28,7 @@
 ## Success Criteria (Eval)
 - [ ] `create_eval` 拒绝空 cases
 - [ ] `run_eval` 状态流转 pending → running → passed/failed
+- [ ] `run_eval` 任一 case 抛异常时状态置为 `error` 并附 `finished_at`
 - [ ] `score = pass_count / total`，`PASSED` 当 `score ≥ 0.85`
 - [ ] `judge_exact` 归一化空白后精确匹配
 - [ ] `judge_llm` 输出无法解析 JSON 时返回 passed=False / score=0（不抛错）
@@ -41,7 +42,7 @@
 - ORM `EvalRun`（`eval_runs` 表）：`id`(UUID)、`name`、`description`、`rules`(JSONB)、`cases`(JSONB)、`judge_type`、`status`、`results`(JSONB)、`pass_count`、`fail_count`、`score`(Float)、`started_at`、`finished_at`、`created_at`、`updated_at`
 - Schemas：`EvalCaseInput` / `EvalRuleInput` / `EvalRunCreate` / `CaseResult`(case_name/input/expected/actual/passed/score/reason) / `EvalRunOut`
 - `judge.py`：`JudgeResult`(passed/score/reason)、`judge_exact`、`judge_contains`、`judge_llm`(async, 解析 JSON)、`judge_semantic`(async, 复用 `embed_text` + 余弦)、`_normalize`（去多余空白 + lower）、`_cosine`
-- service 关键行为：`create_eval` 写入 pending run；`run_eval` 置 running → 遍历 cases 调 `_predict` + `_judge_case` → 写 results/pass_count/fail_count/score → 置 passed/failed；`_predict` 默认回退 `case.actual` 或 `case.expected`
+- service 关键行为：`create_eval` 写入 pending run；`run_eval` 置 running → 遍历 cases 调 `_predict` + `_judge_case` → 写 results/pass_count/fail_count/score → 置 passed/failed；`_predict` 默认回退 `case.actual` 或 `case.expected`；任一 case 判定抛异常时 `run.status=error`、`finished_at=now()` 并重新抛出
 
 ## API Endpoints
 前缀 `/api/v1/evals`

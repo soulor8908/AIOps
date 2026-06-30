@@ -48,13 +48,15 @@ import app.main as app_main
 # 强制无 LLM API key，避免 embedder / LLMClient 发起真实网络请求。
 settings.openai_api_key = ""
 settings.anthropic_api_key = ""
-# 确保 lifespan 中 ``if settings.debug: await init_db()`` 执行建表。
-settings.debug = True
+# debug=False 使 Starlette ServerErrorMiddleware 走自定义 Exception handler
+# 而非明文 traceback（errors.spec.md§5.4）。建表由 lifespan 无条件执行。
+settings.debug = False
+app.debug = False
 
 
 def _import_all_orm_models() -> None:
     """触发所有领域 ORM 注册，保证 ``Base.metadata`` 完整。"""
-    from app.domains import agents, analytics, evals, knowledge, models, prompts  # noqa: F401
+    from app.domains import agents, analytics, auth, evals, knowledge, models, prompts  # noqa: F401
 
 
 @pytest.fixture

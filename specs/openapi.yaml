@@ -9,6 +9,7 @@ servers:
 - {url: 'https://api.aiops.local', description: Production}
 tags:
 - {name: meta, description: 系统元信息 — 健康检查、根路径}
+- {name: auth, description: 认证授权 — 注册 / 登录 / 当前用户 / token 刷新}
 - {name: prompts, description: Prompt Studio — 版本化 Prompt 管理、回滚、diff}
 - {name: agents, description: Agent Orchestrator — Agent 定义与执行}
 - {name: workflows, description: 工作流 DAG 编排与执行}
@@ -17,6 +18,82 @@ tags:
 - {name: analytics, description: Conversation Analytics — 对话记录与质量分析}
 - {name: evals, description: Eval Suite — 规则测试与 LLM-as-judge 评估}
 paths:
+  /api/v1/auth/register:
+    post:
+      tags: [auth]
+      summary: Register
+      description: 用户注册。校验 email 唯一、密码最小 8 位后写入 users 表（bcrypt 哈希）。
+      operationId: register_api_v1_auth_register_post
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UserCreate'}
+      responses:
+        '201':
+          description: 注册成功，返回新建用户。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UserOut'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/UnprocessableEntity'}
+        '500': {$ref: '#/components/responses/InternalServerError'}
+  /api/v1/auth/token:
+    post:
+      tags: [auth]
+      summary: Token
+      description: 登录获取 token。接收 OAuth2PasswordRequestForm（username=email, password），校验 bcrypt 后签发 access + refresh token。
+      operationId: token_api_v1_auth_token_post
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: {$ref: '#/components/schemas/Body_token_api_v1_auth_token_post'}
+      responses:
+        '200':
+          description: 登录成功，返回 token 包。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Token'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '422': {$ref: '#/components/responses/UnprocessableEntity'}
+        '500': {$ref: '#/components/responses/InternalServerError'}
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      summary: Me
+      description: 获取当前登录用户信息。需携带 Bearer access token。
+      operationId: me_api_v1_auth_me_get
+      security:
+      - bearerAuth: []
+      responses:
+        '200':
+          description: 当前用户信息。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UserOut'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '500': {$ref: '#/components/responses/InternalServerError'}
+  /api/v1/auth/refresh:
+    post:
+      tags: [auth]
+      summary: Refresh
+      description: 使用 refresh token 换取新的 access token（并轮换 refresh token）。refresh token 过期或无效返回 401。
+      operationId: refresh_api_v1_auth_refresh_post
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RefreshRequest'}
+      responses:
+        '200':
+          description: 刷新成功，返回新 token 包。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Token'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '422': {$ref: '#/components/responses/UnprocessableEntity'}
+        '500': {$ref: '#/components/responses/InternalServerError'}
   /health:
     get:
       tags: [meta]
@@ -1048,15 +1125,73 @@ paths:
               schema: {$ref: '#/components/schemas/HTTPValidationError'}
         '500': {$ref: '#/components/responses/InternalServerError'}
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 'Authorization: Bearer <access_token>（HS256 JWT）'
   schemas:
     Error:
       type: object
-      required: [error, message, detail]
+      required: [error, message]
       properties:
-        error: {type: string, description: 错误类型标识（如 bad_request / not_found / validation_error / internal_error / token_expired）。}
+        error: {type: string, description: '错误码（snake_case）：not_found / validation_error / token_invalid / token_expired / permission_denied / conflict / rate_limited / llm_error / internal_error。'}
         message: {type: string, description: 面向用户的可读错误信息。}
-        detail: {description: 附加详情，结构随错误类型变化（可为字符串、数组或对象）。}
-      description: 统一错误响应体。
+        detail: {description: '附加详情（可为字符串、数组或对象）。detail 为 null 时省略该字段。'}
+      description: 统一错误响应体（遵循 errors.spec.md§2）。
+    UserCreate:
+      type: object
+      required: [email, username, password]
+      properties:
+        email: {type: string, format: email, title: Email}
+        username: {type: string, minLength: 1, maxLength: 64, title: Username}
+        full_name: {type: string, maxLength: 128, nullable: true, title: Full Name}
+        password: {type: string, minLength: 8, maxLength: 128, format: password, title: Password, description: 明文密码，落库前 bcrypt 哈希}
+      title: UserCreate
+      description: 注册入参。
+    UserOut:
+      type: object
+      required: [id, email, username, is_active, created_at, role]
+      properties:
+        id: {type: string, format: uuid, title: Id}
+        email: {type: string, format: email, title: Email}
+        username: {type: string, title: Username}
+        full_name: {type: string, nullable: true, title: Full Name}
+        is_active: {type: boolean, title: Is Active}
+        created_at: {type: string, format: date-time, title: Created At}
+        role:
+          type: string
+          enum: [admin, user]
+          title: Role
+          description: 由 users.is_admin 派生（is_admin=true → admin）。
+      title: UserOut
+      description: 用户对外视图。
+    Token:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in]
+      properties:
+        access_token: {type: string, title: Access Token}
+        refresh_token: {type: string, title: Refresh Token}
+        token_type: {type: string, default: bearer, title: Token Type}
+        expires_in: {type: integer, title: Expires In, description: access token 有效秒数}
+      title: Token
+      description: 登录 / 刷新返回的 token 包。
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: {type: string, minLength: 1, title: Refresh Token}
+      title: RefreshRequest
+      description: 刷新请求体。
+    Body_token_api_v1_auth_token_post:
+      type: object
+      required: [username, password]
+      properties:
+        username: {type: string, title: Username, description: email}
+        password: {type: string, format: password, title: Password}
+      title: Body_token_api_v1_auth_token_post
+      description: OAuth2PasswordRequestForm（application/x-www-form-urlencoded）。
     AgentCreate:
       properties:
         name: {type: string, maxLength: 128, minLength: 1, title: Name}
@@ -1901,13 +2036,48 @@ components:
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
+    Unauthorized:
+      description: 未认证或凭据无效（401 Unauthorized）。error 为 token_invalid 或 token_expired。
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Forbidden:
+      description: 无权限访问该资源（403 Forbidden）。error 为 permission_denied。
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
     NotFound:
       description: 资源不存在（404 Not Found）。
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
+    Conflict:
+      description: 资源冲突，如 email 或唯一字段重复（409 Conflict）。
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    TooManyRequests:
+      description: 请求频率超限（429 Too Many Requests）。error 为 rate_limited。
+      headers:
+        X-RateLimit-Limit:
+          description: 窗口内允许的请求总数。
+          schema: {type: integer}
+        X-RateLimit-Remaining:
+          description: 窗口内剩余请求数。
+          schema: {type: integer}
+        X-RateLimit-Reset:
+          description: 窗口重置时间（Unix 时间戳）。
+          schema: {type: integer}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
     UnprocessableEntity:
       description: 请求参数校验失败（422 Validation Error），统一错误格式。
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    BadGateway:
+      description: 上游 LLM 服务调用失败（502 Bad Gateway）。error 为 llm_error。
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}

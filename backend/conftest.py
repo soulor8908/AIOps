@@ -61,6 +61,17 @@ def _vector_to_json_sqlite(element: Any, compiler: Any, **kw: Any) -> str:
     return "JSON"
 
 
+# CITEXT 在 SQLite 上渲染为 TEXT（大小写不敏感由应用层 email.lower() 归一化保证）
+try:
+    from sqlalchemy.dialects.postgresql import CITEXT
+
+    @compiles(CITEXT, "sqlite")
+    def _citext_sqlite(element: Any, compiler: Any, **kw: Any) -> str:
+        return "TEXT"
+except ImportError:
+    pass
+
+
 # ---------- date_trunc UDF（analytics dashboard 按天聚合） ----------
 
 def _sqlite_date_trunc(unit: str, value: Any) -> str:
