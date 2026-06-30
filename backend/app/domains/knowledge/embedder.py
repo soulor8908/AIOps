@@ -1,0 +1,50 @@
+"""向量化封装 — 调用 OpenAI Embeddings API。
+
+失败回退零向量（保证文档上传不中断，向量检索时零向量自然排末位）。
+"""
+
+from __future__ import annotations
+
+import logging
+
+import httpx
+
+from app.core.config import settings
+from app.domains.knowledge.models import EMBEDDING_DIM
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_URL = "https://api.openai.com/v1/embeddings"
+
+
+async def embed_text(text: str, model: str = DEFAULT_EMBEDDING_MODEL) -> list[float]:
+    """对单段文本向量化。失败返回零向量。"""
+    if not settings.openai_api_key:
+        logger.warning("OPENAI_API_KEY 未配置，返回零向量")
+        return _zero_vector()
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                EMBEDDING_URL,
+                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                json={"model": model, "input": text},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return list(map(float, data["data"][0]["embedding"]))
+    except (httpx.HTTPError, KeyError, IndexError) as exc:
+        logger.error("向量化失败，回退零向量: %s", exc)
+        return _zero_vector()
+
+
+async def embed_batch(
+    texts: list[str], model: str = DEFAULT_EMBEDDING_MODEL
+) -> list[list[float]]:
+    """批量向量化。逐条调用（OpenAI 单次限 2048 输入，简化处理）。"""
+    return [await embed_text(t, model) for t in texts]
+
+
+def _zero_vector() -> list[float]:
+    """零向量（检索时 cosine 相似度最低，自然排末位）。"""
+    return [0.0] * EMBEDDING_DIM

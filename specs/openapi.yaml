@@ -1,0 +1,1529 @@
+openapi: 3.1.0
+info:
+  title: AIOps Console API
+  version: 0.1.0-alpha
+  description: |
+    AI 原生后台管理系统 API，覆盖 Prompt 管理、Agent 编排、知识库、模型路由、
+    对话分析与评估套件六大领域。
+
+    遵循 Agentic Engineering 哲学：Spec 即契约，类型即文档。
+  contact:
+    name: AIOps Console Team
+    url: https://github.com/aiops/console
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: http://localhost:8000/api/v1
+    description: Local development
+  - url: https://api.aiops.local/api/v1
+    description: Production
+
+tags:
+  - name: Prompts
+    description: Prompt Studio — 版本化 Prompt 管理、回滚、diff
+  - name: Agents
+    description: Agent Orchestrator — Agent 定义与执行
+  - name: Workflows
+    description: 工作流 DAG 编排与执行
+  - name: KnowledgeBases
+    description: 知识库 — 文档上传、分块、语义检索
+  - name: Models
+    description: Model Router — 多模型配置、路由、聊天补全
+  - name: Analytics
+    description: Conversation Analytics — 对话记录与质量分析
+  - name: Evals
+    description: Eval Suite — 规则测试与 LLM-as-judge
+
+paths:
+  /prompts:
+    get:
+      tags: [Prompts]
+      summary: 列出 Prompt
+      operationId: listPrompts
+      parameters:
+        - name: q
+          in: query
+          description: 名称或描述模糊搜索关键词
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: 返回条数上限
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+        - name: offset
+          in: query
+          description: 分页偏移量
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+      responses:
+        '200':
+          description: Prompt 列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PromptOut'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    post:
+      tags: [Prompts]
+      summary: 创建 Prompt
+      operationId: createPrompt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PromptCreate'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PromptOut'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /prompts/{prompt_id}:
+    parameters:
+      - $ref: '#/components/parameters/PromptId'
+    get:
+      tags: [Prompts]
+      summary: 获取 Prompt 详情
+      operationId: getPrompt
+      responses:
+        '200':
+          description: Prompt 详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PromptOut'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Prompts]
+      summary: 更新 Prompt 元数据
+      operationId: updatePrompt
+      description: 仅更新 name 与 description，不产生新版本。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                description:
+                  type: string
+                  maxLength: 512
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PromptOut'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    delete:
+      tags: [Prompts]
+      summary: 删除 Prompt
+      operationId: deletePrompt
+      responses:
+        '204':
+          description: 删除成功
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /prompts/{prompt_id}/versions:
+    parameters:
+      - $ref: '#/components/parameters/PromptId'
+    get:
+      tags: [Prompts]
+      summary: 列出 Prompt 的所有版本
+      operationId: listPromptVersions
+      responses:
+        '200':
+          description: 版本列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PromptVersionOut'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [Prompts]
+      summary: 创建 Prompt 新版本
+      operationId: createPromptVersion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+                  minLength: 1
+                  maxLength: 65536
+                variables:
+                  type: array
+                  items:
+                    type: string
+                    pattern: '^[a-zA-Z0-9_]+$'
+                  default: []
+      responses:
+        '201':
+          description: 新版本创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PromptVersionOut'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /prompts/{prompt_id}/versions/{version_id}/rollback:
+    parameters:
+      - $ref: '#/components/parameters/PromptId'
+      - $ref: '#/components/parameters/VersionId'
+    post:
+      tags: [Prompts]
+      summary: 回滚到指定版本
+      operationId: rollbackPromptVersion
+      description: 将指定版本设为当前版本，并产生新的版本号。
+      responses:
+        '200':
+          description: 回滚成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PromptOut'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /prompts/{prompt_id}/diff:
+    parameters:
+      - $ref: '#/components/parameters/PromptId'
+    get:
+      tags: [Prompts]
+      summary: 对比两个版本的差异
+      operationId: diffPromptVersions
+      parameters:
+        - name: from_version
+          in: query
+          required: true
+          schema:
+            type: integer
+        - name: to_version
+          in: query
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 版本差异
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  from_version:
+                    type: integer
+                  to_version:
+                    type: integer
+                  diff:
+                    type: string
+                    description: unified diff 文本
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /agents:
+    get:
+      tags: [Agents]
+      summary: 列出 Agent
+      operationId: listAgents
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: Agent 列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AgentOut'
+    post:
+      tags: [Agents]
+      summary: 创建 Agent
+      operationId: createAgent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentCreate'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentOut'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /agents/{agent_id}/execute:
+    parameters:
+      - $ref: '#/components/parameters/AgentId'
+    post:
+      tags: [Agents]
+      summary: 执行 Agent
+      operationId: executeAgent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [input]
+              properties:
+                input:
+                  type: string
+                  description: 用户输入
+                stream:
+                  type: boolean
+                  default: false
+                  description: 是否以流式返回
+      responses:
+        '200':
+          description: 执行结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionResult'
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE 流式响应
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /workflows:
+    get:
+      tags: [Workflows]
+      summary: 列出工作流
+      operationId: listWorkflows
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: 工作流列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WorkflowOut'
+    post:
+      tags: [Workflows]
+      summary: 创建工作流
+      operationId: createWorkflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkflowDef'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowOut'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /workflows/{workflow_id}/execute:
+    parameters:
+      - $ref: '#/components/parameters/WorkflowId'
+    post:
+      tags: [Workflows]
+      summary: 执行工作流
+      operationId: executeWorkflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [input]
+              properties:
+                input:
+                  type: string
+                stream:
+                  type: boolean
+                  default: false
+      responses:
+        '200':
+          description: 执行追踪
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionTrace'
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE 流式响应
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /knowledge-bases:
+    get:
+      tags: [KnowledgeBases]
+      summary: 列出知识库
+      operationId: listKnowledgeBases
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: 知识库列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/KnowledgeBaseOut'
+    post:
+      tags: [KnowledgeBases]
+      summary: 创建知识库
+      operationId: createKnowledgeBase
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KnowledgeBaseCreate'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KnowledgeBaseOut'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /knowledge-bases/{kb_id}/documents:
+    parameters:
+      - $ref: '#/components/parameters/KbId'
+    post:
+      tags: [KnowledgeBases]
+      summary: 上传文档到知识库
+      operationId: uploadDocument
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 文档文件（PDF/TXT/MD/DOCX，最大 50MB）
+      responses:
+        '202':
+          description: 上传成功，文档进入处理队列
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentOut'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /knowledge-bases/{kb_id}/search:
+    parameters:
+      - $ref: '#/components/parameters/KbId'
+    post:
+      tags: [KnowledgeBases]
+      summary: 语义搜索知识库
+      operationId: searchKnowledgeBase
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                top_k:
+                  type: integer
+                  default: 5
+                  minimum: 1
+                  maximum: 20
+                threshold:
+                  type: number
+                  format: float
+                  default: 0.7
+                  minimum: 0
+                  maximum: 1
+                  description: 相似度阈值，低于此分数的结果被过滤
+      responses:
+        '200':
+          description: 搜索结果
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SearchResult'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /models:
+    get:
+      tags: [Models]
+      summary: 列出模型配置
+      operationId: listModels
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: 模型配置列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ModelConfigOut'
+    post:
+      tags: [Models]
+      summary: 创建模型配置
+      operationId: createModel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelConfigCreate'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelConfigOut'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /models/{model_alias}/chat:
+    parameters:
+      - $ref: '#/components/parameters/ModelAlias'
+    post:
+      tags: [Models]
+      summary: 聊天补全
+      operationId: chatCompletion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: 聊天补全响应
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE 流式响应
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /analytics/conversations:
+    get:
+      tags: [Analytics]
+      summary: 列出对话记录
+      operationId: listConversations
+      parameters:
+        - name: start_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: end_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: agent_id
+          in: query
+          schema:
+            type: integer
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: 对话记录列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ConversationOut'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /analytics/dashboard:
+    get:
+      tags: [Analytics]
+      summary: 获取仪表盘指标
+      operationId: getDashboard
+      parameters:
+        - name: start_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: end_date
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: 仪表盘指标
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardMetrics'
+
+  /evals:
+    get:
+      tags: [Evals]
+      summary: 列出评估任务
+      operationId: listEvals
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: 评估任务列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/EvalRunOut'
+    post:
+      tags: [Evals]
+      summary: 创建评估任务
+      operationId: createEval
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvalRunCreate'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvalRunOut'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /evals/{eval_id}/run:
+    parameters:
+      - $ref: '#/components/parameters/EvalId'
+    post:
+      tags: [Evals]
+      summary: 执行评估任务
+      operationId: runEval
+      responses:
+        '202':
+          description: 评估任务已开始执行
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvalRunOut'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  parameters:
+    PromptId:
+      name: prompt_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    VersionId:
+      name: version_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    AgentId:
+      name: agent_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    WorkflowId:
+      name: workflow_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    KbId:
+      name: kb_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    ModelAlias:
+      name: model_alias
+      in: path
+      required: true
+      schema:
+        type: string
+    EvalId:
+      name: eval_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    LimitParam:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 20
+        minimum: 1
+        maximum: 100
+    OffsetParam:
+      name: offset
+      in: query
+      schema:
+        type: integer
+        default: 0
+        minimum: 0
+
+  responses:
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ValidationError:
+      description: 请求参数校验失败
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+
+    PromptCreate:
+      type: object
+      required: [name, content]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Prompt 名称
+        description:
+          type: string
+          maxLength: 512
+          description: Prompt 描述
+        content:
+          type: string
+          minLength: 1
+          maxLength: 65536
+          description: Prompt 模板内容（最大 64KB）
+        variables:
+          type: array
+          items:
+            type: string
+            pattern: '^[a-zA-Z0-9_]+$'
+          description: 模板变量名列表
+          default: []
+
+    PromptVersionOut:
+      type: object
+      required: [id, version_num, content, variables, created_at]
+      properties:
+        id:
+          type: integer
+        version_num:
+          type: integer
+          description: 版本号，从 1 递增
+        content:
+          type: string
+        variables:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+
+    PromptOut:
+      type: object
+      required: [id, name, current_version, version_count, created_at, updated_at]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+        current_version:
+          $ref: '#/components/schemas/PromptVersionOut'
+        version_count:
+          type: integer
+          description: 版本总数（最大 100）
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    AgentCreate:
+      type: object
+      required: [name, system_prompt, model_alias]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type: string
+          maxLength: 512
+        system_prompt:
+          type: string
+          maxLength: 65536
+        model_alias:
+          type: string
+          description: 关联的模型配置别名
+        tools:
+          type: array
+          items:
+            type: string
+          default: []
+          description: Agent 可调用的工具名称列表
+
+    AgentOut:
+      type: object
+      required: [id, name, system_prompt, model_alias, tools, created_at]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+        system_prompt:
+          type: string
+        model_alias:
+          type: string
+        tools:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+
+    AgentNode:
+      type: object
+      required: [id, name, agent_id]
+      properties:
+        id:
+          type: string
+          pattern: '^[a-zA-Z0-9_-]+$'
+          description: 节点唯一标识
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        agent_id:
+          type: integer
+          description: 关联的 Agent ID
+        system_prompt:
+          type: string
+          description: 节点级系统提示词（可覆盖 Agent 默认）
+        model_config_id:
+          type: integer
+          description: 节点级模型配置 ID
+        tools:
+          type: array
+          items:
+            type: string
+          default: []
+        next_nodes:
+          type: array
+          items:
+            type: string
+          default: []
+          description: 后继节点 ID 列表，构成 DAG 边
+        condition:
+          type: string
+          description: 路由条件表达式（可选）
+
+    WorkflowDef:
+      type: object
+      required: [name, nodes, entry_node]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentNode'
+          minItems: 1
+          maxItems: 50
+          description: 节点列表（DAG 最大 50 节点）
+        entry_node:
+          type: string
+          description: 入口节点 ID
+        max_rounds:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 10
+          description: 单次执行最大轮数
+
+    WorkflowOut:
+      type: object
+      required: [id, name, nodes, entry_node, max_rounds, created_at]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentNode'
+        entry_node:
+          type: string
+        max_rounds:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    ExecutionResult:
+      type: object
+      required: [trace_id, status, output, token_usage, latency_ms]
+      properties:
+        trace_id:
+          type: string
+          description: 执行追踪 ID
+        status:
+          type: string
+          enum: [success, failed, timeout]
+        output:
+          type: object
+          description: 执行输出（自由结构）
+        token_usage:
+          type: object
+          properties:
+            input_tokens:
+              type: integer
+            output_tokens:
+              type: integer
+            total_tokens:
+              type: integer
+        latency_ms:
+          type: integer
+          description: 执行耗时（毫秒）
+
+    ExecutionTrace:
+      type: object
+      required: [trace_id, workflow_id, status, spans, token_usage, latency_ms, created_at]
+      properties:
+        trace_id:
+          type: string
+        workflow_id:
+          type: integer
+        status:
+          type: string
+          enum: [running, success, failed, timeout]
+        spans:
+          type: array
+          items:
+            type: object
+            properties:
+              node_id:
+                type: string
+              agent_id:
+                type: integer
+              input:
+                type: object
+              output:
+                type: object
+              status:
+                type: string
+              start_time:
+                type: string
+                format: date-time
+              end_time:
+                type: string
+                format: date-time
+              token_usage:
+                type: object
+        token_usage:
+          type: object
+          properties:
+            input_tokens:
+              type: integer
+            output_tokens:
+              type: integer
+            total_tokens:
+              type: integer
+        latency_ms:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    KnowledgeBaseCreate:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type: string
+          maxLength: 512
+        embedding_model:
+          type: string
+          default: text-embedding-3-small
+          description: 嵌入模型名称
+        chunk_size:
+          type: integer
+          minimum: 256
+          maximum: 2048
+          default: 512
+          description: 分块大小（字符数）
+        chunk_overlap:
+          type: integer
+          minimum: 0
+          maximum: 512
+          default: 50
+          description: 分块重叠（字符数）
+
+    KnowledgeBaseOut:
+      type: object
+      required: [id, name, embedding_model, chunk_size, chunk_overlap, doc_count, created_at]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+        embedding_model:
+          type: string
+        chunk_size:
+          type: integer
+        chunk_overlap:
+          type: integer
+        doc_count:
+          type: integer
+          description: 文档总数
+        created_at:
+          type: string
+          format: date-time
+
+    DocumentOut:
+      type: object
+      required: [id, kb_id, filename, file_size, chunk_count, status, created_at]
+      properties:
+        id:
+          type: integer
+        kb_id:
+          type: integer
+        filename:
+          type: string
+        file_size:
+          type: integer
+          description: 文件大小（字节，最大 50MB）
+        chunk_count:
+          type: integer
+          description: 分块数量
+        status:
+          type: string
+          enum: [pending, processing, done, error]
+        created_at:
+          type: string
+          format: date-time
+
+    SearchResult:
+      type: object
+      required: [chunk_id, doc_id, content, score, metadata]
+      properties:
+        chunk_id:
+          type: string
+        doc_id:
+          type: integer
+        content:
+          type: string
+          description: 文本块内容
+        score:
+          type: number
+          format: float
+          description: 相似度分数（0-1）
+        metadata:
+          type: object
+          description: 文档元数据
+          additionalProperties: true
+
+    ModelConfigCreate:
+      type: object
+      required: [alias, provider_name, model_id]
+      properties:
+        alias:
+          type: string
+          pattern: '^[a-zA-Z0-9_-]+$'
+          description: 模型别名（用于路由调用）
+        provider_name:
+          type: string
+          enum: [openai, anthropic, azure, local]
+        model_id:
+          type: string
+          description: 供应商模型标识
+        temperature:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 2
+          default: 0.7
+        max_tokens:
+          type: integer
+          minimum: 1
+          maximum: 8192
+          default: 4096
+        cost_per_1k_input:
+          type: number
+          format: float
+          minimum: 0
+          description: 每 1k 输入 token 成本（美元）
+        cost_per_1k_output:
+          type: number
+          format: float
+          minimum: 0
+          description: 每 1k 输出 token 成本（美元）
+        routing_strategy:
+          type: string
+          enum: [direct, round_robin, least_cost, latency]
+          default: direct
+        fallback_models:
+          type: array
+          items:
+            type: string
+          default: []
+          description: 备选模型别名列表
+        quota_daily:
+          type: integer
+          default: 1000000
+          description: 每日 token 配额
+
+    ModelConfigOut:
+      type: object
+      required: [id, alias, provider_name, model_id, temperature, max_tokens, routing_strategy, fallback_models, quota_daily, enabled, created_at]
+      properties:
+        id:
+          type: integer
+        alias:
+          type: string
+        provider_name:
+          type: string
+          enum: [openai, anthropic, azure, local]
+        model_id:
+          type: string
+        temperature:
+          type: number
+          format: float
+        max_tokens:
+          type: integer
+        cost_per_1k_input:
+          type: number
+          format: float
+        cost_per_1k_output:
+          type: number
+          format: float
+        routing_strategy:
+          type: string
+          enum: [direct, round_robin, least_cost, latency]
+        fallback_models:
+          type: array
+          items:
+            type: string
+        quota_daily:
+          type: integer
+        enabled:
+          type: boolean
+          description: 是否启用
+        created_at:
+          type: string
+          format: date-time
+
+    Message:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [system, user, assistant, tool]
+        content:
+          type: string
+
+    ChatRequest:
+      type: object
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+          minItems: 1
+        temperature:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 2
+        max_tokens:
+          type: integer
+          minimum: 1
+          maximum: 8192
+        stream:
+          type: boolean
+          default: false
+          description: 是否流式返回
+
+    ChatResponse:
+      type: object
+      required: [id, content, model, usage, latency_ms]
+      properties:
+        id:
+          type: string
+          description: 响应 ID
+        content:
+          type: string
+          description: 补全内容
+        model:
+          type: string
+          description: 实际使用的模型标识
+        usage:
+          type: object
+          properties:
+            prompt_tokens:
+              type: integer
+            completion_tokens:
+              type: integer
+            total_tokens:
+              type: integer
+        latency_ms:
+          type: integer
+
+    ConversationOut:
+      type: object
+      required: [id, session_id, user_id, agent_id, model_alias, message_count, input_tokens, output_tokens, cost_usd, latency_ms, created_at]
+      properties:
+        id:
+          type: integer
+        session_id:
+          type: string
+        user_id:
+          type: string
+        agent_id:
+          type: integer
+        model_alias:
+          type: string
+        message_count:
+          type: integer
+        input_tokens:
+          type: integer
+        output_tokens:
+          type: integer
+        cost_usd:
+          type: number
+          format: float
+          description: 本次对话成本（美元）
+        latency_ms:
+          type: integer
+        quality_score:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: 对话质量评分
+        user_rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+          description: 用户评分（1-5 星）
+        created_at:
+          type: string
+          format: date-time
+
+    DashboardMetrics:
+      type: object
+      required: [total_conversations, total_tokens, total_cost_usd, avg_latency_ms, avg_quality_score, model_distribution, daily_stats]
+      properties:
+        total_conversations:
+          type: integer
+        total_tokens:
+          type: integer
+        total_cost_usd:
+          type: number
+          format: float
+        avg_latency_ms:
+          type: number
+          format: float
+        avg_quality_score:
+          type: number
+          format: float
+        model_distribution:
+          type: object
+          description: 模型调用分布（别名 -> 调用次数）
+          additionalProperties:
+            type: integer
+        daily_stats:
+          type: array
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+                format: date
+              conversations:
+                type: integer
+              tokens:
+                type: integer
+              cost_usd:
+                type: number
+                format: float
+
+    EvalRule:
+      type: object
+      required: [type, target]
+      properties:
+        type:
+          type: string
+          enum: [exact_match, contains, json_schema, regex]
+        target:
+          type: string
+          description: 校验目标字段路径（如 output.content）
+        expected:
+          description: 期望值（结构随 type 变化）
+        case_sensitive:
+          type: boolean
+          default: true
+
+    EvalJudge:
+      type: object
+      required: [criteria]
+      properties:
+        criteria:
+          type: string
+          maxLength: 2048
+          description: LLM-as-judge 评判标准描述
+        model_alias:
+          type: string
+          default: gpt-4o-mini
+          description: 评判所用模型别名
+        scale:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 5
+          description: 评分量程上限
+        threshold:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          default: 0.7
+          description: 通过阈值（归一化分数）
+
+    EvalRunCreate:
+      type: object
+      required: [prompt_version_id, model_alias, cases]
+      properties:
+        prompt_version_id:
+          type: integer
+          description: 被评估的 Prompt 版本 ID
+        model_alias:
+          type: string
+          description: 被评估的模型别名
+        cases:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          description: 测试用例输入列表
+        rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/EvalRule'
+          default: []
+        judges:
+          type: array
+          items:
+            $ref: '#/components/schemas/EvalJudge'
+          default: []
+
+    EvalRunOut:
+      type: object
+      required: [id, prompt_version_id, model_alias, status, pass_rate, avg_score, results, created_at]
+      properties:
+        id:
+          type: integer
+        prompt_version_id:
+          type: integer
+        model_alias:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, done, failed]
+        pass_rate:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: 通过率
+        avg_score:
+          type: number
+          format: float
+          description: 平均得分
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              case:
+                type: string
+              passed:
+                type: boolean
+              score:
+                type: number
+                format: float
+              output:
+                type: string
+              rule_results:
+                type: array
+                items:
+                  type: object
+              judge_results:
+                type: array
+                items:
+                  type: object
+        created_at:
+          type: string
+          format: date-time

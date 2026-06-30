@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1.6
+# AIOps Console — Frontend Image (Multi-stage)
+# Stage 1: build  Stage 2: runtime (dev server)
+
+# ---------- Stage 1: build ----------
+FROM node:20-alpine AS build
+
+WORKDIR /app
+
+# 先复制依赖声明，利用层缓存
+COPY frontend/package.json ./
+
+# 安装依赖（含 devDependencies 以支持构建）
+RUN npm install
+
+# 复制源码并构建产物
+COPY frontend/ ./
+RUN npm run build
+
+# ---------- Stage 2: runtime ----------
+FROM node:20-alpine AS runtime
+
+WORKDIR /app
+
+# 仅复制运行所需文件：manifest、构建产物、入口配置
+COPY --from=build /app/package.json ./
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/vite.config.ts ./
+COPY --from=build /app/tsconfig.json ./
+COPY --from=build /app/index.html ./
+COPY --from=build /app/src ./src
+
+# 暴露 Vite dev server 端口
+EXPOSE 5173
+
+# 运行开发服务器，监听所有网络接口
+CMD ["npm", "run", "dev", "--", "--host"]
