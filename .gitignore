@@ -39,3 +39,6 @@ Thumbs.db
 postgres_data/
 *.coverage
 .coverage
+frontend/coverage/
+frontend/playwright-report/
+frontend/test-results/
