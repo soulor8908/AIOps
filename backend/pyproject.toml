@@ -29,6 +29,8 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.7",
     "mypy>=1.13",
+    # L2 契约测试（schemathesis）：覆盖所有 OpenAPI 端点的状态码/schema 校验
+    "schemathesis>=3.36",
 ]
 
 [build-system]
@@ -41,9 +43,9 @@ include = ["app*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["app"]
+testpaths = ["app", "tests"]
 python_files = ["test_*.py"]
-addopts = "-ra -q"
+addopts = "-ra -q --cov=app --cov-fail-under=80 --cov-report=term-missing"
 
 [tool.ruff]
 line-length = 100

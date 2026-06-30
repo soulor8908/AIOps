@@ -26,7 +26,7 @@ export function setToken(token: string): void {
   }
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const url = `${API_BASE}${path}`;
   const res = await fetch(url, {
     ...options,
@@ -36,6 +36,9 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       ...options.headers,
     },
   });
+
+  // 401 表示 token 失效：清除本地 token，触发上层（路由守卫/用户 store）回到未认证态。
+  if (res.status === 401) setToken("");
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: res.statusText }));

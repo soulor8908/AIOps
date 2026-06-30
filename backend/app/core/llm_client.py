@@ -7,6 +7,7 @@ Understanding-First：所有逻辑可读，无黑盒。
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
@@ -36,6 +37,13 @@ class LLMConfig:
     temperature: float = 0.7
     max_tokens: int = 1024
 
+    def __post_init__(self) -> None:
+        """校验 temperature 在 [0, 2] 范围内。"""
+        if not 0.0 <= self.temperature <= 2.0:
+            raise ValueError(
+                f"temperature 必须在 0-2 之间，当前: {self.temperature}"
+            )
+
 
 @dataclass(slots=True)
 class LLMResponse:
@@ -45,6 +53,7 @@ class LLMResponse:
     tool_calls: list[dict[str, object]] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
     raw: dict[str, object] = field(default_factory=dict)
+    latency_ms: float = 0.0
 
 
 class LLMClient:
@@ -64,10 +73,13 @@ class LLMClient:
         handler = dispatch.get(self.config.provider)
         if handler is None:
             raise LLMError(f"不支持的 provider: {self.config.provider}")
+        start = time.monotonic()
         try:
-            return await handler(messages)
+            response = await handler(messages)
         except httpx.HTTPError as exc:
             raise LLMError(f"LLM HTTP 调用失败: {exc}") from exc
+        response.latency_ms = (time.monotonic() - start) * 1000
+        return response
 
     async def _call_openai(self, messages: list[Message]) -> LLMResponse:
         """OpenAI Chat Completions 完整实现。"""
