@@ -14,14 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.exceptions import AuthenticationError, ConflictError
-from app.core.security import (
+from app.core.jwt import (
     TOKEN_TYPE_REFRESH,
     create_access_token,
     create_refresh_token,
     decode_token,
-    hash_password,
-    verify_password,
 )
+from app.core.security import hash_password, verify_password
 from app.domains.auth.models import Token, User, UserCreate, UserOut
 
 

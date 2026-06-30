@@ -13,7 +13,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
-from app.core.security import get_current_user
+from app.core.deps import get_current_user
 from app.domains.auth.models import (
     RefreshRequest,
     Token,

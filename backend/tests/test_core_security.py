@@ -1,4 +1,4 @@
-"""core/security.py 单元测试 — JWT 签发/校验 + 密码哈希 + token 类型区分。
+"""core/jwt.py + core/security.py 单元测试 — JWT 签发/校验 + 密码哈希 + token 类型区分。
 
 覆盖：
 - create_access_token / create_refresh_token: 签发 JWT、payload 包含 sub/exp/type
@@ -16,17 +16,16 @@ from jose import jwt
 
 from app.core.config import settings
 from app.core.exceptions import AuthenticationError, TokenExpiredError
-from app.core.security import (
+from app.core.jwt import (
     ALGORITHM,
     TOKEN_TYPE_ACCESS,
     TOKEN_TYPE_REFRESH,
     create_access_token,
     create_refresh_token,
     decode_token,
-    hash_password,
-    verify_password,
     verify_token,
 )
+from app.core.security import hash_password, verify_password
 
 # ===================== create_access_token =====================
 

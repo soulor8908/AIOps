@@ -60,6 +60,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 # FastAPI 的 Depends()/Query()/Body() 等在默认参数中是框架约定，B008 误报
 "app/**/router.py" = ["B008"]
 "app/core/security.py" = ["B008"]
+"app/core/deps.py" = ["B008"]
 "app/domains/auth/router.py" = ["B008"]
 # 测试允许 B017 (pytest.raises(Exception))
 "tests/*" = ["B017"]

@@ -16,9 +16,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from app.core.security import (
-    create_access_token,
-)
+from app.core.jwt import create_access_token
 from app.domains.auth.models import User
 from tests.factories import UserFactory
 
