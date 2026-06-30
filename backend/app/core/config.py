@@ -49,7 +49,9 @@ class Settings(BaseSettings):
     secret_key: str = Field(default="change-me", alias="SECRET_KEY")
     jwt_expire_hours: int = Field(default=24, alias="JWT_EXPIRE_HOURS")
     # 兼容旧字段：若显式设置则覆盖 hours 计算；默认 None 表示由 hours 派生。
-    access_token_expire_minutes: int | None = Field(default=None, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
+    access_token_expire_minutes: int | None = Field(
+        default=None, alias="ACCESS_TOKEN_EXPIRE_MINUTES"
+    )
     refresh_token_expire_days: int = Field(default=7, alias="REFRESH_TOKEN_EXPIRE_DAYS")
     cors_origins: list[str] = Field(default_factory=_default_cors_origins, alias="CORS_ORIGINS")
 

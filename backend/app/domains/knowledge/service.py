@@ -58,7 +58,12 @@ async def list_kbs(
     session: AsyncSession, limit: int = 50, offset: int = 0
 ) -> list[KnowledgeBase]:
     """列出知识库。"""
-    stmt = select(KnowledgeBase).order_by(KnowledgeBase.created_at.desc()).limit(limit).offset(offset)
+    stmt = (
+        select(KnowledgeBase)
+        .order_by(KnowledgeBase.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
     return list((await session.execute(stmt)).scalars().all())
 
 

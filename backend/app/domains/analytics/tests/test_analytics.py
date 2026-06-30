@@ -15,8 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.database import Base
 from app.core.exceptions import NotFoundError
-from app.domains.analytics.models import Conversation, Message
 from app.domains.analytics import service
+from app.domains.analytics.models import Conversation, Message
 
 
 @pytest_asyncio.fixture

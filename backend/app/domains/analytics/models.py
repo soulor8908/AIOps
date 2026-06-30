@@ -18,7 +18,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
-
 # ===================== ORM =====================
 
 class Conversation(Base):
@@ -37,7 +36,9 @@ class Conversation(Base):
         "metadata", JSONB, nullable=False, default=dict
     )
     total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    total_cost: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=Decimal("0"))
+    total_cost: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), nullable=False, default=Decimal("0")
+    )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 

@@ -8,8 +8,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Literal
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from fastapi import Depends
@@ -22,6 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_session
 from app.core.exceptions import AuthenticationError, AuthorizationError, TokenExpiredError
+
+if TYPE_CHECKING:
+    from app.domains.auth.models import User
 
 ALGORITHM: Literal["HS256"] = "HS256"
 TOKEN_TYPE_ACCESS = "access"
@@ -50,7 +53,7 @@ def _encode(payload: dict[str, object]) -> str:
 
 def create_access_token(subject: str, expires_seconds: int | None = None) -> str:
     """签发 access token。subject 通常是 user_id 字符串。"""
-    expire = datetime.now(timezone.utc) + timedelta(
+    expire = datetime.now(UTC) + timedelta(
         seconds=expires_seconds or settings.access_token_expire_seconds
     )
     payload: dict[str, object] = {
@@ -63,7 +66,7 @@ def create_access_token(subject: str, expires_seconds: int | None = None) -> str
 
 def create_refresh_token(subject: str, expires_seconds: int | None = None) -> str:
     """签发 refresh token（默认 7d，可配置 `REFRESH_TOKEN_EXPIRE_DAYS`）。"""
-    expire = datetime.now(timezone.utc) + timedelta(
+    expire = datetime.now(UTC) + timedelta(
         seconds=expires_seconds or settings.refresh_token_expire_seconds
     )
     payload: dict[str, object] = {
@@ -108,7 +111,7 @@ def verify_token(token: str) -> str:
 async def get_current_user(
     token: str | None = Depends(oauth2_scheme),
     session: AsyncSession = Depends(get_session),
-):
+) -> User:
     """FastAPI 依赖：解析 Bearer token → 查 users 表 → 返回 User。
 
     延迟导入 User 避免与 ``app.domains.auth`` 形成顶层循环。
@@ -132,8 +135,8 @@ async def get_current_user(
 
 
 async def get_current_admin(
-    user=Depends(get_current_user),
-):
+    user: User = Depends(get_current_user),
+) -> User:
     """FastAPI 依赖：在 ``get_current_user`` 基础上校验 ``is_admin``。"""
     if not user.is_admin:
         raise AuthorizationError("需要管理员权限")

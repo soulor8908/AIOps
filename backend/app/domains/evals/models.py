@@ -18,10 +18,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
 
-
 # ===================== 枚举 =====================
 
-class JudgeType(str, enum.Enum):
+class JudgeType(enum.StrEnum):
     """判官类型。"""
 
     EXACT = "exact"
@@ -30,7 +29,7 @@ class JudgeType(str, enum.Enum):
     SEMANTIC = "semantic"
 
 
-class EvalStatus(str, enum.Enum):
+class EvalStatus(enum.StrEnum):
     """评估状态。"""
 
     PENDING = "pending"
@@ -50,7 +49,9 @@ class EvalRule(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
-    judge_type: Mapped[str] = mapped_column(String(32), nullable=False, default=JudgeType.EXACT.value)
+    judge_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=JudgeType.EXACT.value
+    )
     expected: Mapped[str | None] = mapped_column(Text)
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
@@ -95,8 +96,12 @@ class EvalRun(Base):
     description: Mapped[str | None] = mapped_column(Text)
     rules: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     cases: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
-    judge_type: Mapped[str] = mapped_column(String(32), nullable=False, default=JudgeType.EXACT.value)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default=EvalStatus.PENDING.value)
+    judge_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=JudgeType.EXACT.value
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=EvalStatus.PENDING.value
+    )
     results: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
     pass_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     fail_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

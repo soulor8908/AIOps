@@ -25,7 +25,9 @@ async def list_models(
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
 ) -> list[ModelConfigOut]:
-    configs = await service.list_models(session, active_only=active_only, limit=limit, offset=offset)
+    configs = await service.list_models(
+        session, active_only=active_only, limit=limit, offset=offset
+    )
     return [ModelConfigOut.model_validate(c) for c in configs]
 
 

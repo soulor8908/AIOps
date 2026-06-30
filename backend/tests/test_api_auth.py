@@ -18,12 +18,9 @@ from fastapi.testclient import TestClient
 
 from app.core.security import (
     create_access_token,
-    create_refresh_token,
 )
 from app.domains.auth.models import User
-from app.domains.auth.service import hash_password as svc_hash_password
 from tests.factories import UserFactory
-
 
 # ===================== register =====================
 

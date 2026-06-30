@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import LLMError, NotFoundError, ValidationError
 from app.core.llm_client import LLMClient, LLMConfig
-from app.core.config import settings
 from app.domains.evals.judge import (
     JudgeResult,
     judge_contains,
@@ -69,7 +69,7 @@ async def run_eval(
     """执行 eval。predict_fn(case) -> actual；默认用 expected 直接比对。"""
     run = await get_eval(session, eval_id)
     run.status = EvalStatus.RUNNING.value
-    run.started_at = datetime.now(timezone.utc)
+    run.started_at = datetime.now(UTC)
     await session.flush()
 
     results: list[CaseResult] = []
@@ -83,7 +83,7 @@ async def run_eval(
                 pass_count += 1
     except Exception:
         run.status = EvalStatus.ERROR.value
-        run.finished_at = datetime.now(timezone.utc)
+        run.finished_at = datetime.now(UTC)
         await session.flush()
         raise
 
@@ -92,7 +92,7 @@ async def run_eval(
     run.fail_count = len(results) - pass_count
     run.score = pass_count / len(results) if results else 0.0
     run.status = EvalStatus.PASSED.value if run.score >= 0.85 else EvalStatus.FAILED.value
-    run.finished_at = datetime.now(timezone.utc)
+    run.finished_at = datetime.now(UTC)
     await session.flush()
     return run
 
@@ -103,7 +103,7 @@ async def _predict(predict_fn: Any | None, case: dict[str, Any]) -> str:
         return str(case.get("actual", case.get("expected", "")))
     result = predict_fn(case)
     if hasattr(result, "__await__"):
-        result = await result  # type: ignore[assignment]
+        result = await result
     return str(result)
 
 
@@ -123,7 +123,7 @@ async def _judge_case(
         raise LLMError(f"未知判官类型: {judge_type}")
     result_or_coro = handler()
     if hasattr(result_or_coro, "__await__"):
-        judge_result: JudgeResult = await result_or_coro  # type: ignore[assignment]
+        judge_result: JudgeResult = await result_or_coro
     else:
         judge_result = result_or_coro
     return CaseResult(

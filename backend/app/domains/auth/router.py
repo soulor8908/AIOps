@@ -17,6 +17,7 @@ from app.core.security import get_current_user
 from app.domains.auth.models import (
     RefreshRequest,
     Token,
+    User,
     UserCreate,
     UserOut,
 )
@@ -55,7 +56,7 @@ async def login(
 
 
 @router.get("/me", response_model=UserOut)
-async def me(user=Depends(get_current_user)) -> UserOut:
+async def me(user: User = Depends(get_current_user)) -> UserOut:
     """获取当前登录用户信息。"""
     return to_user_out(user)
 

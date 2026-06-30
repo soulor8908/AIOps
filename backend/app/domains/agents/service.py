@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -126,7 +126,7 @@ async def execute_workflow(
 
 def _build_llm_config(model_alias: str) -> LLMConfig:
     """根据 model_alias 构造 LLMConfig（极简：默认走 openai）。"""
-    provider = "openai"
+    provider: Literal["openai", "anthropic", "local"] = "openai"
     model = settings.default_llm_model
     api_key = settings.openai_api_key
     alias_lower = model_alias.lower()

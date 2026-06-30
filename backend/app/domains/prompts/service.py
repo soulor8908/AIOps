@@ -12,7 +12,7 @@ import difflib
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -136,7 +136,7 @@ async def rollback_prompt(
     session: AsyncSession, prompt_id: uuid.UUID, version_id: uuid.UUID
 ) -> PromptVersion:
     """回滚：以目标版本内容创建新版本（追加式回滚，保留历史）。"""
-    prompt = await get_prompt(session, prompt_id)
+    await get_prompt(session, prompt_id)  # 校验 prompt 存在
     target_stmt = select(PromptVersion).where(
         PromptVersion.id == version_id, PromptVersion.prompt_id == prompt_id
     )

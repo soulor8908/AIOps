@@ -12,15 +12,9 @@ DB 隔离（StaticPool + monkeypatch init_db / engine）。
 
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime
 from typing import Any
-
-from pgvector.sqlalchemy import Vector
-from sqlalchemy import event
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.engine import Engine
-from sqlalchemy.ext.compiler import compiles
-
 
 # ---------- bcrypt / passlib 兼容性修复 ----------
 # passlib 1.7.4 与 bcrypt >= 4.1 存在两处不兼容：
@@ -30,6 +24,11 @@ from sqlalchemy.ext.compiler import compiles
 #    的静默截断行为（>72 字节自动截断），但 bcrypt 5.x 改为严格校验并抛出
 #    ValueError → 用包装函数恢复静默截断语义。
 import bcrypt as _bcrypt
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import event
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.engine import Engine
+from sqlalchemy.ext.compiler import compiles
 
 if not hasattr(_bcrypt, "__about__"):
     _bcrypt.__about__ = type("about", (), {"__version__": _bcrypt.__version__})
@@ -110,8 +109,5 @@ def _register_date_trunc(dbapi_connection: Any, connection_record: Any) -> None:
     raw = getattr(dbapi_connection, "_conn", dbapi_connection)
     create_fn = getattr(raw, "create_function", None)
     if create_fn is not None and callable(create_fn):
-        try:
+        with contextlib.suppress(Exception):
             create_fn("date_trunc", 2, _sqlite_date_trunc)
-        except Exception:
-            # 非 SQLite 连接或已注册，忽略
-            pass

@@ -29,7 +29,6 @@ from app.core.llm_client import (
     parse_tool_calls_json,
 )
 
-
 # ===================== 辅助函数 =====================
 
 def _make_client(config: LLMConfig, handler: Any) -> LLMClient:
@@ -385,7 +384,11 @@ async def test_llm_client_chat_raises_on_connect_error() -> None:
 
 def test_parse_tool_calls_valid() -> None:
     """解析有效的工具调用格式。"""
-    content = 'some text\n```tool_calls\n[{"name": "search", "args": {"q": "hello"}}]\n```\nmore text'
+    content = (
+        'some text\n```tool_calls\n'
+        '[{"name": "search", "args": {"q": "hello"}}]\n'
+        '```\nmore text'
+    )
     result = parse_tool_calls_json(content)
     assert len(result) == 1
     assert result[0]["name"] == "search"

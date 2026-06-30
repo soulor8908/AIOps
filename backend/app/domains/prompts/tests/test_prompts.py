@@ -6,19 +6,19 @@
 
 from __future__ import annotations
 
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.database import Base
+from app.domains.prompts import service
 from app.domains.prompts.models import (
     PromptCreate,
     PromptUpdate,
     PromptVersionCreate,
 )
-from app.domains.prompts import service
 
 
 @pytest_asyncio.fixture
@@ -67,7 +67,7 @@ async def test_rollback_creates_new_version(session: AsyncSession) -> None:
     # 通过 selectinload 预加载 versions，避免 async 懒加载触发 MissingGreenlet
     loaded = await service.get_prompt(session, prompt.id)
     v1 = loaded.versions[0]
-    v2 = await service.create_version(
+    await service.create_version(
         session, prompt.id, PromptVersionCreate(content="modified")
     )
     rolled = await service.rollback_prompt(session, prompt.id, v1.id)

@@ -15,15 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.database import Base
 from app.core.llm_client import LLMClient, LLMResponse
+from app.domains.agents import service
 from app.domains.agents.executor import AgentExecutor, _build_tool_prompt
 from app.domains.agents.models import (
-    Agent,
     AgentCreate,
-    ExecuteRequest,
     ToolDef,
     ToolType,
 )
-from app.domains.agents import service
 
 
 @pytest_asyncio.fixture

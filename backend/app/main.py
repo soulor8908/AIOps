@@ -16,12 +16,13 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.api import api_router
 from app.core.config import settings
@@ -68,7 +69,12 @@ app.add_middleware(
         "X-RateLimit-Remaining",
         "X-RateLimit-Reset",
     ],
-    expose_headers=["X-Request-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
+    expose_headers=[
+        "X-Request-ID",
+        "X-RateLimit-Limit",
+        "X-RateLimit-Remaining",
+        "X-RateLimit-Reset",
+    ],
 )
 
 
@@ -98,7 +104,7 @@ class RequestIDMiddleware:
         # 写入 scope["state"] 供下游 handler 读取（等价于 request.state.request_id）
         scope.setdefault("state", {})["request_id"] = request_id
 
-        async def send_with_request_id(message: Send) -> None:  # type: ignore[valid-type]
+        async def send_with_request_id(message: Message) -> None:
             if message["type"] == "http.response.start":
                 headers = message.get("headers", [])
                 # 移除上游可能已存在的同名头，避免重复
@@ -115,7 +121,7 @@ app.add_middleware(RequestIDMiddleware)
 
 # ===================== 异常处理器（errors.spec.md§5） =====================
 
-def _json_response(request: Request, status_code: int, content: dict) -> JSONResponse:
+def _json_response(request: Request, status_code: int, content: dict[str, Any]) -> JSONResponse:
     """构造统一 JSON 响应，并附 ``X-Request-ID`` 头。
 
     ``ServerErrorMiddleware`` 位于 ``RequestIDMiddleware`` 外层，异常处理器

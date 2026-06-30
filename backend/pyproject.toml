@@ -29,6 +29,8 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.7",
     "mypy>=1.13",
+    "types-python-jose",
+    "types-passlib",
     # L2 契约测试（schemathesis）：覆盖所有 OpenAPI 端点的状态码/schema 校验
     "schemathesis>=3.36",
 ]
@@ -54,8 +56,21 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.per-file-ignores]
+# FastAPI 的 Depends()/Query()/Body() 等在默认参数中是框架约定，B008 误报
+"app/**/router.py" = ["B008"]
+"app/core/security.py" = ["B008"]
+"app/domains/auth/router.py" = ["B008"]
+# 测试允许 B017 (pytest.raises(Exception))
+"tests/*" = ["B017"]
+"app/**/tests/*" = ["B017"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["pgvector.*"]
+ignore_missing_imports = true

@@ -15,20 +15,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.core.database import Base
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.llm_client import LLMResponse
+from app.domains.evals import service
 from app.domains.evals.judge import (
     judge_contains,
     judge_exact,
-    judge_semantic,
     judge_llm,
+    judge_semantic,
 )
 from app.domains.evals.models import (
     EvalCaseInput,
     EvalRunCreate,
-    EvalRuleInput,
     EvalStatus,
     JudgeType,
 )
-from app.domains.evals import service
 
 
 @pytest_asyncio.fixture
@@ -165,6 +164,7 @@ async def test_run_eval_failed_below_threshold(session: AsyncSession) -> None:
     result = await service.run_eval(session, run.id, predict_fn=predict)
     assert result.pass_count == 2
     assert result.fail_count == 1
+    assert result.score is not None
     assert result.score < 0.85
     assert result.status == EvalStatus.FAILED.value
 

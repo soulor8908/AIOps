@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,7 +52,7 @@ async def get_dashboard_metrics(
     session: AsyncSession, days: int = 7
 ) -> DashboardMetrics:
     """聚合仪表盘指标。默认统计最近 7 天。"""
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    since = datetime.now(UTC) - timedelta(days=days)
 
     total_conv = await _scalar(
         session, select(func.count()).select_from(Conversation)
@@ -64,7 +64,9 @@ async def get_dashboard_metrics(
     )
     total_cost = await _scalar(
         session,
-        select(func.coalesce(func.sum(Conversation.total_cost), Decimal("0"))).select_from(Conversation),
+        select(
+            func.coalesce(func.sum(Conversation.total_cost), Decimal("0"))
+        ).select_from(Conversation),
     )
 
     avg_msgs = float(total_msg) / float(total_conv) if total_conv else 0.0
@@ -110,7 +112,11 @@ async def _active_models(session: AsyncSession) -> list[dict[str, Any]]:
     )
     rows = (await session.execute(stmt)).all()
     return [
-        {"model": row.model_alias, "tokens": int(row.tokens or 0), "conversations": int(row.conversations)}
+        {
+            "model": row.model_alias,
+            "tokens": int(row.tokens or 0),
+            "conversations": int(row.conversations),
+        }
         for row in rows
     ]
 
@@ -134,7 +140,7 @@ async def _conversations_by_day(
         {
             # row.day 在 PG 为 datetime、SQLite UDF 为字符串；统一取前 10 字符 YYYY-MM-DD
             "date": str(row.day)[:10] if row.day is not None else "",
-            "count": int(row.count),
+            "count": int(cast(Any, row.count)),
             "tokens": int(row.tokens or 0),
         }
         for row in rows

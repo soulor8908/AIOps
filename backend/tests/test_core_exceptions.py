@@ -24,7 +24,6 @@ from app.core.exceptions import (
     ValidationError,
 )
 
-
 # ===================== status_code =====================
 
 @pytest.mark.parametrize(

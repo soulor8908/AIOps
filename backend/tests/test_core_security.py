@@ -28,7 +28,6 @@ from app.core.security import (
     verify_token,
 )
 
-
 # ===================== create_access_token =====================
 
 def test_create_access_token_returns_valid_jwt() -> None:

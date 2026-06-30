@@ -20,10 +20,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
 
-
 # ===================== 枚举 =====================
 
-class ModelProvider(str, enum.Enum):
+class ModelProvider(enum.StrEnum):
     """模型供应商。"""
 
     OPENAI = "openai"
@@ -33,7 +32,7 @@ class ModelProvider(str, enum.Enum):
     CUSTOM = "custom"
 
 
-class RoutingStrategy(str, enum.Enum):
+class RoutingStrategy(enum.StrEnum):
     """路由策略。"""
 
     DIRECT = "direct"
@@ -57,8 +56,12 @@ class ModelConfig(Base):
     api_key_env: Mapped[str | None] = mapped_column(String(64))
     max_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=4096)
     temperature: Mapped[float] = mapped_column(Float, nullable=False, default=0.7)
-    cost_per_1k_input: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False, default=Decimal("0"))
-    cost_per_1k_output: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False, default=Decimal("0"))
+    cost_per_1k_input: Mapped[Decimal] = mapped_column(
+        Numeric(10, 6), nullable=False, default=Decimal("0")
+    )
+    cost_per_1k_output: Mapped[Decimal] = mapped_column(
+        Numeric(10, 6), nullable=False, default=Decimal("0")
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())

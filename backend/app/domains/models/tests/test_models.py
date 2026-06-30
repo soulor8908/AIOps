@@ -17,15 +17,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.core.database import Base
 from app.core.exceptions import NotFoundError
 from app.core.llm_client import LLMResponse
+from app.domains.models import service
 from app.domains.models.models import (
-    ChatRequest,
     ChatMessage,
+    ChatRequest,
     ModelConfigCreate,
-    ModelProvider,
     ModelConfigUpdate,
+    ModelProvider,
     RoutingStrategy,
 )
-from app.domains.models import service
 
 
 @pytest_asyncio.fixture

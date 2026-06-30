@@ -6,11 +6,9 @@
 
 from __future__ import annotations
 
-import uuid
 from typing import Any
 
 from fastapi.testclient import TestClient
-
 
 # ===================== Auth =====================
 

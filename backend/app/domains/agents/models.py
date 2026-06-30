@@ -19,10 +19,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
 
-
 # ===================== 枚举 =====================
 
-class ToolType(str, enum.Enum):
+class ToolType(enum.StrEnum):
     """工具类型。"""
 
     SEARCH = "search"

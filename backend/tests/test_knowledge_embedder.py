@@ -16,7 +16,6 @@ from typing import Any
 from unittest.mock import patch
 
 import httpx
-import pytest
 
 from app.core.config import settings
 from app.domains.knowledge.embedder import (

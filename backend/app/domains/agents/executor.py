@@ -9,10 +9,10 @@ from __future__ import annotations
 import json
 import uuid
 from collections import deque
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from app.core.exceptions import LLMError
-from app.core.llm_client import LLMClient, Message, LLMResponse
+from app.core.llm_client import LLMClient, LLMResponse, Message
 from app.domains.agents.models import (
     Agent,
     ExecutionResult,
@@ -183,7 +183,7 @@ async def execute_workflow_dag(
             src = edge.get("source")
             tgt = edge.get("target")
             if src in adjacency and tgt in node_map:
-                adjacency[src].append(tgt)
+                adjacency[src].append(cast(str, tgt))
         entry_id = next(
             (n["id"] for n in nodes if n.get("is_entry")), nodes[0]["id"]
         )

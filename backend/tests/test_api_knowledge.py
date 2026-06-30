@@ -13,8 +13,8 @@ from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 
-from app.main import app  # noqa: F401
 from app.domains.knowledge import service as kb_service
+from app.main import app  # noqa: F401
 
 
 def _create_kb(

@@ -9,11 +9,11 @@ from __future__ import annotations
 import pytest
 
 from app.domains.knowledge.chunker import chunk_text
+from app.domains.knowledge.embedder import _zero_vector
 from app.domains.knowledge.models import (
     KnowledgeBaseCreate,
     SearchQuery,
 )
-from app.domains.knowledge.embedder import _zero_vector
 
 
 def test_chunk_text_basic() -> None:
