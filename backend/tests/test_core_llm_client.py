@@ -31,10 +31,12 @@ from app.core.llm_client import (
 
 # ===================== 辅助函数 =====================
 
-def _make_client(config: LLMConfig, handler: Any) -> LLMClient:
-    """构造使用 MockTransport 的 LLMClient。"""
+def _make_client(
+    config: LLMConfig, handler: Any, max_retries: int = 0
+) -> LLMClient:
+    """构造使用 MockTransport 的 LLMClient（默认 max_retries=0 避免单测慢重试）。"""
     transport = httpx.MockTransport(handler)
-    client = LLMClient(config)
+    client = LLMClient(config, max_retries=max_retries)
     # 替换内部 httpx.AsyncClient 为带 MockTransport 的实例
     client._http = httpx.AsyncClient(transport=transport)
     return client
@@ -430,3 +432,182 @@ def test_parse_tool_calls_no_closing_marker() -> None:
     result = parse_tool_calls_json(content)
     assert len(result) == 1
     assert result[0]["name"] == "x"
+
+
+# ===================== 重试 + 异常包装 =====================
+
+async def test_llm_client_retries_on_429() -> None:
+    """429 限流应重试，最终成功。"""
+    call_count = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        call_count["n"] += 1
+        if call_count["n"] < 3:
+            return httpx.Response(429, text="rate limited")
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "ok after retry"}}],
+        })
+
+    config = LLMConfig(provider="openai", model="gpt-4o", api_key="k")
+    client = _make_client(config, handler, max_retries=3)
+    try:
+        response = await client.chat([Message(role="user", content="hi")])
+    finally:
+        await client.close()
+
+    assert call_count["n"] == 3
+    assert response.content == "ok after retry"
+
+
+async def test_llm_client_retries_exhausted_raises_llm_error() -> None:
+    """持续 500 重试耗尽后抛 LLMError（_RetryableLLMError 的子类）。"""
+    call_count = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        call_count["n"] += 1
+        return httpx.Response(500, text="server error")
+
+    config = LLMConfig(provider="openai", model="gpt-4o", api_key="k")
+    client = _make_client(config, handler, max_retries=2)
+    try:
+        with pytest.raises(LLMError):
+            await client.chat([Message(role="user", content="hi")])
+    finally:
+        await client.close()
+
+    # 1 次初始 + 2 次重试 = 3 次
+    assert call_count["n"] == 3
+
+
+async def test_llm_client_no_retry_on_400() -> None:
+    """400 鉴权/参数错不可重试，立即抛 LLMError。"""
+    call_count = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        call_count["n"] += 1
+        return httpx.Response(401, text="unauthorized")
+
+    config = LLMConfig(provider="openai", model="gpt-4o", api_key="bad")
+    client = _make_client(config, handler, max_retries=3)
+    try:
+        with pytest.raises(LLMError, match="401"):
+            await client.chat([Message(role="user", content="hi")])
+    finally:
+        await client.close()
+
+    # 不可重试 → 只调用 1 次
+    assert call_count["n"] == 1
+
+
+async def test_llm_client_wraps_malformed_response() -> None:
+    """响应 200 但结构异常（缺 choices）应抛 LLMError 而非 KeyError。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"unexpected": "structure"})
+
+    config = LLMConfig(provider="openai", model="gpt-4o", api_key="k")
+    client = _make_client(config, handler, max_retries=0)
+    try:
+        with pytest.raises(LLMError, match="响应结构异常"):
+            await client.chat([Message(role="user", content="hi")])
+    finally:
+        await client.close()
+
+
+async def test_llm_client_wraps_json_decode_error() -> None:
+    """响应非 JSON 时应抛 LLMError 而非 JSONDecodeError。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not json at all", headers={"content-type": "text/plain"})
+
+    config = LLMConfig(provider="openai", model="gpt-4o", api_key="k")
+    client = _make_client(config, handler, max_retries=0)
+    try:
+        with pytest.raises(LLMError):
+            await client.chat([Message(role="user", content="hi")])
+    finally:
+        await client.close()
+
+
+async def test_llm_client_async_context_manager() -> None:
+    """async with 语法自动关闭连接。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "ctx"}}],
+        })
+
+    config = LLMConfig(provider="openai", model="gpt-4o", api_key="k")
+    client = _make_client(config, handler, max_retries=0)
+    async with client:
+        response = await client.chat([Message(role="user", content="hi")])
+    assert response.content == "ctx"
+    # 退出 async with 后 httpx client 应已关闭
+    assert client._http.is_closed
+
+
+def test_llm_config_rejects_zero_max_tokens() -> None:
+    """max_tokens <= 0 应拒绝。"""
+    with pytest.raises(ValueError, match="max_tokens"):
+        LLMConfig(provider="openai", model="gpt-4o", max_tokens=0)
+
+
+# ===================== 指标采集（observability.spec.md§5.1） =====================
+
+async def test_llm_client_records_token_and_cost_metrics() -> None:
+    """成功调用后记录 llm_tokens（in/out）与 llm_cost 到 metrics。"""
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    try:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "total_tokens": 150,
+                },
+            })
+
+        # 配置单价：输入 $0.01/1k，输出 $0.03/1k
+        config = LLMConfig(
+            provider="openai", model="gpt-4o-test", api_key="k",
+            cost_per_1k_input=0.01, cost_per_1k_output=0.03,
+        )
+        client = _make_client(config, handler, max_retries=0)
+        try:
+            await client.chat([Message(role="user", content="hi")])
+        finally:
+            await client.close()
+
+        # 验证 llm_tokens
+        assert metrics.get_counter("llm_tokens", ("gpt-4o-test", "in")) == 100
+        assert metrics.get_counter("llm_tokens", ("gpt-4o-test", "out")) == 50
+        # 验证 llm_cost = 100/1000*0.01 + 50/1000*0.03 = 0.001 + 0.0015 = 0.0025
+        cost = metrics.get_counter("llm_cost", ("gpt-4o-test",))
+        assert abs(cost - 0.0025) < 1e-9
+    finally:
+        metrics.reset()
+
+
+async def test_llm_client_anthropic_usage_field_names() -> None:
+    """Anthropic usage 字段名 input_tokens/output_tokens 也能解析。"""
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    try:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "content": [{"type": "text", "text": "hi"}],
+                "usage": {"input_tokens": 80, "output_tokens": 20},
+            })
+
+        config = LLMConfig(provider="anthropic", model="claude-test", api_key="k")
+        client = _make_client(config, handler, max_retries=0)
+        try:
+            await client.chat([Message(role="user", content="hi")])
+        finally:
+            await client.close()
+
+        assert metrics.get_counter("llm_tokens", ("claude-test", "in")) == 80
+        assert metrics.get_counter("llm_tokens", ("claude-test", "out")) == 20
+    finally:
+        metrics.reset()

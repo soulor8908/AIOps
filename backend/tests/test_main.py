@@ -264,3 +264,113 @@ def test_app_error_detail_omitted_when_none(client: TestClient) -> None:
             r for r in app.router.routes
             if getattr(r, "path", "") != "/__test_no_detail__"
         ]
+
+
+# ===================== /metrics 端点（observability.spec.md§5） =====================
+
+def test_metrics_endpoint_empty(client: TestClient) -> None:
+    """无请求时 /metrics 返回 Prometheus 格式（空或仅含元数据行）。"""
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    try:
+        resp = client.get("/metrics")
+        assert resp.status_code == 200
+        # Prometheus exposition format 的 content-type
+        assert "text/plain" in resp.headers.get("content-type", "")
+        # 空时返回空字符串或仅换行
+        body = resp.text
+        assert isinstance(body, str)
+    finally:
+        metrics.reset()
+
+
+def test_metrics_endpoint_after_request(client: TestClient) -> None:
+    """发送请求后 /metrics 含 request_count + request_latency。"""
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    try:
+        # 触发一次请求
+        client.get("/health")
+        resp = client.get("/metrics")
+        assert resp.status_code == 200
+        body = resp.text
+        # 应含 request_count counter
+        assert "# TYPE request_count counter" in body
+        # 应含 request_latency histogram
+        assert "# TYPE request_latency histogram" in body
+        assert "request_latency_bucket" in body
+        assert "request_latency_count" in body
+        assert "request_latency_sum" in body
+        # 应含 /health endpoint 的指标
+        assert 'endpoint="/health"' in body
+    finally:
+        metrics.reset()
+
+
+# ===================== 可观测性中间件（observability.spec.md§2/§4/§5） =====================
+
+def test_request_context_set_during_request(client: TestClient) -> None:
+    """请求处理期间 ContextVar 持有 request_id，结束后清理。"""
+    from app.core.logging import request_id_var
+
+    # 请求前应为 None
+    assert request_id_var.get() is None
+    client.get("/health")
+    # 请求结束后应清理（finally 中 clear_request_context）
+    assert request_id_var.get() is None
+
+
+def test_latency_recorded_in_metrics(client: TestClient) -> None:
+    """请求耗时被记录到 request_latency histogram。"""
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    try:
+        client.get("/health")
+        state = metrics.get_histogram("request_latency", ("/health",))
+        assert state.count >= 1
+        assert state.sum > 0  # latency_ms 应为正数
+    finally:
+        metrics.reset()
+
+
+# ===================== endpoint 标签归一化（防高基数） =====================
+
+def test_endpoint_label_uses_route_template(client: TestClient) -> None:
+    """参数化路由的 endpoint 标签使用路由模板而非原始路径（防 Prometheus 高基数）。
+
+    P1-1 修复：访问 /api/v1/agents/{uuid} 时，metrics 中的 endpoint 标签应为
+    路由模板（含 {agent_id} 占位符）或归一化后的 /{id}，而非原始 UUID 路径。
+    """
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    try:
+        # 访问不存在的 agent UUID（会返回 404，但中间件仍记录指标）
+        fake_uuid = "12345678-1234-1234-1234-123456789012"
+        client.get(f"/api/v1/agents/{fake_uuid}")
+        out = metrics.render_prometheus()
+        # 关键：原始 UUID 不应作为 endpoint 标签值（防高基数）
+        assert fake_uuid not in out
+        # 应出现归一化后的 endpoint（路由模板含 {agent_id} 或 {id} 占位符）
+        assert "{agent_id}" in out or "{id}" in out, (
+            f"endpoint 未归一化为路由模板: {out}"
+        )
+    finally:
+        metrics.reset()
+
+
+def test_metrics_endpoint_label_uses_template(client: TestClient) -> None:
+    """/metrics 自身的 endpoint 标签使用路由模板 /metrics。"""
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    try:
+        client.get("/metrics")
+        out = metrics.render_prometheus()
+        assert 'endpoint="/metrics"' in out
+    finally:
+        metrics.reset()
+

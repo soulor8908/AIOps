@@ -3,40 +3,42 @@ import { test, expect, goTo, login, mockApiGet, mockApiMethod } from "./fixtures
 /** Model Router 列表 mock 数据（与 ModelConfigOut 对齐）。 */
 const MODELS = [
   {
-    id: 1,
+    id: "00000000-0000-4000-8000-000000000001",
     alias: "gpt-4o",
-    provider_name: "openai",
-    model_id: "gpt-4o-2024-07-18",
+    provider: "openai",
+    model_name: "gpt-4o-2024-07-18",
     temperature: 0.7,
     max_tokens: 4096,
-    cost_per_1k_input: 0.005,
-    cost_per_1k_output: 0.015,
-    routing_strategy: "direct",
-    fallback_models: [] as string[],
-    quota_daily: 1000000,
-    enabled: true,
+    cost_per_1k_input: "0.005",
+    cost_per_1k_output: "0.015",
+    api_base: null,
+    api_key_env: null,
+    is_active: true,
+    priority: 100,
     created_at: "2026-06-29T10:00:00Z",
+    updated_at: "2026-06-29T10:00:00Z",
   },
   {
-    id: 2,
+    id: "00000000-0000-4000-8000-000000000002",
     alias: "claude-sonnet",
-    provider_name: "anthropic",
-    model_id: "claude-3-5-sonnet",
+    provider: "anthropic",
+    model_name: "claude-3-5-sonnet",
     temperature: 0.7,
     max_tokens: 4096,
-    cost_per_1k_input: 0.003,
-    cost_per_1k_output: 0.015,
-    routing_strategy: "least_cost",
-    fallback_models: [] as string[],
-    quota_daily: 500000,
-    enabled: false,
+    cost_per_1k_input: "0.003",
+    cost_per_1k_output: "0.015",
+    api_base: null,
+    api_key_env: null,
+    is_active: false,
+    priority: 100,
     created_at: "2026-06-28T10:00:00Z",
+    updated_at: "2026-06-28T10:00:00Z",
   },
 ];
 
 test.beforeEach(async ({ page }) => {
   await login(page);
-  await mockApiGet(page, "/api/v1/models", { items: MODELS, total: MODELS.length });
+  await mockApiGet(page, "/api/v1/models", MODELS);
 });
 
 test.describe("Model Router — 关键路径", () => {
@@ -69,19 +71,20 @@ test.describe("Model Router — 关键路径", () => {
 
     // mock 创建端点（POST 201）
     const created = {
-      id: 3,
+      id: "00000000-0000-4000-8000-000000000003",
       alias: "llama-70b",
-      provider_name: "openai",
-      model_id: "llama-3.1-70b",
+      provider: "openai",
+      model_name: "llama-3.1-70b",
       temperature: 0.7,
       max_tokens: 4096,
-      cost_per_1k_input: 0,
-      cost_per_1k_output: 0,
-      routing_strategy: "direct",
-      fallback_models: [] as string[],
-      quota_daily: 1000000,
-      enabled: true,
+      cost_per_1k_input: "0",
+      cost_per_1k_output: "0",
+      api_base: null,
+      api_key_env: null,
+      is_active: true,
+      priority: 100,
       created_at: "2026-06-30T00:00:00Z",
+      updated_at: "2026-06-30T00:00:00Z",
     };
     await mockApiMethod(page, "POST", "/api/v1/models", created, 201);
 

@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import uuid
-from typing import Any, Literal
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.exceptions import LLMError, NotFoundError
-from app.core.llm_client import LLMClient, LLMConfig
+from app.core.exceptions import NotFoundError, ValidationError
+from app.core.llm_client import LLMClient, LLMConfig, Provider
 from app.domains.agents.executor import AgentExecutor, execute_workflow_dag
 from app.domains.agents.models import (
     Agent,
@@ -20,9 +22,22 @@ from app.domains.agents.models import (
     Workflow,
     WorkflowDef,
 )
+from app.domains.models.models import ModelConfig
+
+logger = logging.getLogger("app.agents.service")
 
 MAX_NODES = 50
 MAX_TURNS = 10
+
+# ModelConfig.provider 值 → LLMClient 支持的 Provider（Literal["openai","anthropic","local"]）。
+# Azure OpenAI 与 custom 兼容 OpenAI 协议，映射到 "openai"。
+_PROVIDER_MAP: dict[str, Provider] = {
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "local": "local",
+    "azure_openai": "openai",
+    "custom": "openai",
+}
 
 
 async def create_agent(session: AsyncSession, payload: AgentCreate) -> Agent:
@@ -65,9 +80,16 @@ async def list_agents(
 async def execute_agent(
     session: AsyncSession, agent_id: uuid.UUID, request: ExecuteRequest
 ) -> ExecutionResult:
-    """执行单个 Agent。LLMClient 实例化后交给 AgentExecutor。"""
+    """执行单个 Agent。
+
+    事务边界：读取 agent + 查询模型配置后立即 commit 释放 DB 连接，
+    LLM 调用在事务外执行（避免长事务占连接池）。``expire_on_commit=False``
+    确保 agent 对象在 commit 后仍可访问。
+    """
     agent = await get_agent(session, agent_id)
-    config = _build_llm_config(agent.model_alias)
+    config = await _build_llm_config(session, agent.model_alias, agent.temperature)
+    # P1-3：提交事务释放 DB 连接，LLM 调用不在事务内。
+    await session.commit()
     client = LLMClient(config)
     executor = AgentExecutor(client)
     try:
@@ -79,9 +101,9 @@ async def execute_agent(
 
 
 async def create_workflow(session: AsyncSession, payload: WorkflowDef) -> Workflow:
-    """创建工作流。节点数超 50 抛错。"""
+    """创建工作流。节点数超 50 抛 ValidationError（业务校验）。"""
     if len(payload.nodes) > MAX_NODES:
-        raise LLMError(f"DAG 节点数超 {MAX_NODES} 上限")
+        raise ValidationError(f"DAG 节点数超 {MAX_NODES} 上限")
     wf = Workflow(
         name=payload.name,
         description=payload.description,
@@ -124,20 +146,68 @@ async def execute_workflow(
     )
 
 
-def _build_llm_config(model_alias: str) -> LLMConfig:
-    """根据 model_alias 构造 LLMConfig（极简：默认走 openai）。"""
-    provider: Literal["openai", "anthropic", "local"] = "openai"
-    model = settings.default_llm_model
-    api_key = settings.openai_api_key
-    alias_lower = model_alias.lower()
-    if "claude" in alias_lower:
-        provider = "anthropic"
-        model = "claude-3-5-sonnet-20241022"
+async def _build_llm_config(
+    session: AsyncSession, model_alias: str, temperature: float | None = None
+) -> LLMConfig:
+    """根据 model_alias 查询 ``model_configs`` 表构造 LLMConfig。
+
+    以 ``model_configs`` 表为单一真源（P1-2：消除 agents 与 models 域的并行路由）：
+    - 按 alias + is_active 查询，priority 升序取首个
+    - 透传 provider / model_name / api_base / max_tokens / cost_per_1k_*
+    - ``api_key_env`` → ``os.environ[api_key_env]`` 解析（支持 K8s Secret 注入）
+    - agent.temperature 覆盖 model_config.temperature（agent 配置优先）
+    - 未找到时回退到 settings 默认值
+
+    cost_per_1k_* 透传给 LLMConfig，供 llm_client 计算 llm_cost 指标
+    （observability.spec.md§5.1）。
+    """
+    stmt = (
+        select(ModelConfig)
+        .where(
+            ModelConfig.alias == model_alias,
+            ModelConfig.is_active.is_(True),
+        )
+        .order_by(ModelConfig.priority)
+        .limit(1)
+    )
+    mc = (await session.execute(stmt)).scalar_one_or_none()
+
+    if mc is None:
+        logger.warning(
+            "model_config alias=%s not found or inactive; falling back to defaults",
+            model_alias,
+        )
+        return LLMConfig(
+            provider="openai",
+            model=settings.default_llm_model,
+            api_key=settings.openai_api_key,
+            temperature=temperature if temperature is not None else 0.7,
+        )
+
+    # 解析 API key：优先从 env var 读取，回退到 settings
+    api_key = ""
+    if mc.api_key_env:
+        api_key = os.environ.get(mc.api_key_env, "")
+    elif mc.provider == "openai":
+        api_key = settings.openai_api_key
+    elif mc.provider == "anthropic":
         api_key = settings.anthropic_api_key
-    elif model_alias not in ("default", "gpt-4o", "gpt-4o-mini"):
-        provider = "local"
-        model = model_alias
-    return LLMConfig(provider=provider, model=model, api_key=api_key)
+
+    provider = _PROVIDER_MAP.get(mc.provider, "openai")
+    # agent.temperature 覆盖 model_config.temperature（None 时用 model_config 值）
+    temp = temperature if temperature is not None else mc.temperature
+
+    return LLMConfig(
+        provider=provider,
+        model=mc.model_name,
+        api_key=api_key,
+        base_url=mc.api_base or "",
+        temperature=temp,
+        max_tokens=mc.max_tokens,
+        # Decimal → float 透传（observability.spec.md§5.1 llm_cost 计算）
+        cost_per_1k_input=float(mc.cost_per_1k_input),
+        cost_per_1k_output=float(mc.cost_per_1k_output),
+    )
 
 
 __all__ = [

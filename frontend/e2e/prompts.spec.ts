@@ -9,44 +9,61 @@ import { test, expect, goTo, login, type Page } from "./fixtures";
  */
 
 interface PromptVersion {
-  id: number;
+  id: string;
+  prompt_id: string;
   version_num: number;
   content: string;
   variables: string[];
+  change_note: string | null;
+  created_by: string | null;
   created_at: string;
 }
 
 interface Prompt {
-  id: number;
+  id: string;
   name: string;
   description: string;
-  current_version: PromptVersion | null;
-  version_count: number;
+  current_version_id: string | null;
+  is_active: boolean;
   created_at: string;
   updated_at: string;
+  versions: PromptVersion[];
+}
+
+/** 确定性 UUID：最后一段用 n 的零填充，其余段固定为占位 UUID。 */
+function uuidFromIndex(n: number): string {
+  return `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 }
 
 function mkPrompt(
-  id: number,
+  index: number,
   name: string,
   description: string,
   content: string,
   variables: string[] = [],
 ): Prompt {
+  const id = uuidFromIndex(index);
+  const versionId = uuidFromIndex(index * 10 + 1);
   return {
     id,
     name,
     description,
-    version_count: 1,
-    current_version: {
-      id: id * 10,
-      version_num: 1,
-      content,
-      variables,
-      created_at: "2026-06-29T10:00:00Z",
-    },
+    current_version_id: versionId,
+    is_active: true,
     created_at: "2026-06-29T10:00:00Z",
     updated_at: "2026-06-29T10:00:00Z",
+    versions: [
+      {
+        id: versionId,
+        prompt_id: id,
+        version_num: 1,
+        content,
+        variables,
+        change_note: null,
+        created_by: null,
+        created_at: "2026-06-29T10:00:00Z",
+      },
+    ],
   };
 }
 
@@ -58,6 +75,7 @@ const SEED: Prompt[] = [
 /** 注册有状态的 Prompts API mock：列表(带 q 过滤) + 创建 + 版本列表。 */
 async function mockPromptsApi(page: Page, seed: Prompt[] = SEED): Promise<void> {
   const items: Prompt[] = [...seed];
+  let nextIndex = seed.length + 1;
 
   // 列表 + 创建（同一 path，按方法分发）
   await page.route(/\/api\/v1\/prompts(\?.*)?$/, async (route) => {
@@ -71,7 +89,7 @@ async function mockPromptsApi(page: Page, seed: Prompt[] = SEED): Promise<void> 
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ items: filtered, total: filtered.length }),
+        body: JSON.stringify(filtered),
       });
     }
     if (method === "POST") {
@@ -80,16 +98,17 @@ async function mockPromptsApi(page: Page, seed: Prompt[] = SEED): Promise<void> 
         content: string;
         description?: string;
       };
-      const nextId = items.reduce((max, p) => Math.max(max, p.id), 0) + 1;
-      const created: Prompt = mkPrompt(nextId, body.name, body.description ?? "", body.content);
+      const created: Prompt = mkPrompt(nextIndex++, body.name, body.description ?? "", body.content);
       created.updated_at = "2026-06-30T00:00:00Z";
-      created.current_version = {
-        id: nextId * 10,
-        version_num: 1,
-        content: body.content,
-        variables: [],
-        created_at: "2026-06-30T00:00:00Z",
-      };
+      created.versions = [
+        {
+          ...created.versions[0],
+          content: body.content,
+          variables: [],
+          created_at: "2026-06-30T00:00:00Z",
+        },
+      ];
+      created.current_version_id = created.versions[0].id;
       items.unshift(created);
       return route.fulfill({
         status: 201,
@@ -101,11 +120,11 @@ async function mockPromptsApi(page: Page, seed: Prompt[] = SEED): Promise<void> 
   });
 
   // 版本列表（选中 prompt 时拉取，独立 path，不会与列表路由冲突）
-  await page.route(/\/api\/v1\/prompts\/\d+\/versions(\?.*)?$/, (route) =>
+  await page.route(/\/api\/v1\/prompts\/[0-9a-f-]+\/versions(\?.*)?$/, (route) =>
     route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ items: [], total: 0 }),
+      body: JSON.stringify([]),
     }),
   );
 }

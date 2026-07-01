@@ -8,7 +8,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+)
 
 from app.core.config import settings
 from app.core.exceptions import LLMError, NotFoundError, ValidationError
@@ -74,6 +78,9 @@ async def run_eval(
     失败状态独立事务：执行期抛错时，ERROR 状态通过独立 session 落库，
     避免被请求级 ``get_session`` 的 rollback 吞掉（之前 flush 后 raise 导致
     状态丢失）。LLM 判官客户端单例化并在 finally 中关闭，杜绝连接泄漏。
+
+    注：evals 为批处理任务，LLM 调用期间持有 DB 连接的影响小于 agents 的
+    请求路径 ReAct 循环（agents 已在 ``execute_agent`` 中 commit 释放连接）。
     """
     run = await get_eval(session, eval_id)
     run.status = EvalStatus.RUNNING.value
@@ -93,7 +100,7 @@ async def run_eval(
                 pass_count += 1
     except Exception:
         # 独立事务落库 ERROR 状态，避免被 get_session rollback 吞掉。
-        await _persist_error_status(session, eval_id)
+        await _persist_error_status(session.bind, eval_id)
         # 同步内存中的 run 对象，供调用方在异常前读到一致状态。
         run.status = EvalStatus.ERROR.value
         run.finished_at = datetime.now(UTC)
@@ -112,25 +119,24 @@ async def run_eval(
     return run
 
 
-async def _persist_error_status(session: AsyncSession, eval_id: uuid.UUID) -> None:
+async def _persist_error_status(
+    bind: AsyncEngine | AsyncConnection | None, eval_id: uuid.UUID
+) -> None:
     """用独立 session 落库 ERROR 状态。
 
     请求级 ``get_session`` 在异常时会 rollback，导致在请求 session 上 flush 的
-    ERROR 状态被丢弃。此处复用同一 engine 新建独立 session + 独立事务，
-    保证 ERROR 状态持久化，即便请求 session 回滚也不受影响。
+    ERROR 状态被丢弃。此处用独立 session + 独立事务，保证 ERROR 状态持久化，
+    即便请求 session 回滚也不受影响。
 
-    复用 ``session.bind``（同一 AsyncEngine）而非全局 ``AsyncSessionLocal``，
-    使单元测试中也能写入测试引擎（避免命中从不连接的全局引擎）。
+    接收 bind（``AsyncEngine | AsyncConnection | None``）而非 session，避免调用方
+    commit 后 session 内部状态变化导致的 ``MissingGreenlet`` 问题。
     """
-    # 注意：AsyncSession.get_bind() 返回同步 Engine，无法直接喂给 AsyncSession(bind=...)；
-    # ``AsyncSession.bind`` 属性返回 ``AsyncEngine | None``，类型匹配且无需 cast。
-    engine = session.bind
-    if engine is None:
+    if bind is None:
         # 无可用 engine 时退化为不落库（仅日志），不阻塞异常传播。
         logger.warning("no engine bound to session; skip persisting ERROR status")
         return
     try:
-        async with AsyncSession(bind=engine, expire_on_commit=False) as err_session:
+        async with AsyncSession(bind=bind, expire_on_commit=False) as err_session:
             await err_session.execute(
                 update(EvalRun)
                 .where(EvalRun.id == eval_id)
