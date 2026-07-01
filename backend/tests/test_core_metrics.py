@@ -33,8 +33,8 @@ def test_record_request_increments_counter() -> None:
     metrics.record_request("GET", "/health", 200, 3.0)
     metrics.record_request("POST", "/api/v1/agents", 201, 50.0)
 
-    assert metrics.get_counter("request_count", ("get", "/health", "200")) == 2.0
-    assert metrics.get_counter("request_count", ("post", "/api/v1/agents", "201")) == 1.0
+    assert metrics.get_counter("request_count", ("GET", "/health", "200")) == 2.0
+    assert metrics.get_counter("request_count", ("POST", "/api/v1/agents", "201")) == 1.0
 
 
 def test_record_request_records_latency_histogram() -> None:
@@ -96,6 +96,38 @@ def test_record_llm_usage_zero_skipped() -> None:
     assert metrics.get_counter("llm_cost", ("gpt-4o",)) == 0.0
 
 
+def test_record_llm_usage_negative_skipped() -> None:
+    """负值不累加（counter 必须单调递增）。"""
+    metrics.record_llm_usage(
+        "gpt-4o", input_tokens=-10, output_tokens=-5, cost=-0.5
+    )
+    assert metrics.get_counter("llm_tokens", ("gpt-4o", "in")) == 0.0
+    assert metrics.get_counter("llm_tokens", ("gpt-4o", "out")) == 0.0
+    assert metrics.get_counter("llm_cost", ("gpt-4o",)) == 0.0
+
+
+# ===================== record_llm_error =====================
+
+def test_record_llm_error_increments_counter() -> None:
+    """llm_errors 按 model/error_type 维度计数。"""
+    metrics.record_llm_error("gpt-4o", "retryable_exhausted")
+    metrics.record_llm_error("gpt-4o", "retryable_exhausted")
+    metrics.record_llm_error("gpt-4o", "non_retryable")
+    metrics.record_llm_error("claude", "unsupported_provider")
+
+    assert metrics.get_counter("llm_errors", ("gpt-4o", "retryable_exhausted")) == 2.0
+    assert metrics.get_counter("llm_errors", ("gpt-4o", "non_retryable")) == 1.0
+    assert metrics.get_counter("llm_errors", ("claude", "unsupported_provider")) == 1.0
+
+
+def test_record_llm_error_in_prometheus() -> None:
+    """llm_errors 出现在 Prometheus 导出。"""
+    metrics.record_llm_error("gpt-4o", "non_retryable")
+    out = metrics.render_prometheus()
+    assert "# TYPE llm_errors counter" in out
+    assert 'llm_errors{model="gpt-4o",error_type="non_retryable"} 1' in out
+
+
 # ===================== render_prometheus =====================
 
 def test_render_prometheus_empty() -> None:
@@ -111,8 +143,8 @@ def test_render_prometheus_counter_format() -> None:
 
     assert "# HELP request_count counter metric" in out
     assert "# TYPE request_count counter" in out
-    # 匹配 request_count{method="get",endpoint="/health",status="200"} 1
-    pattern = r'request_count\{method="get",endpoint="/health",status="200"\} 1'
+    # 匹配 request_count{method="GET",endpoint="/health",status="200"} 1
+    pattern = r'request_count\{method="GET",endpoint="/health",status="200"\} 1'
     assert re.search(pattern, out), f"未匹配到 counter 行: {out}"
 
 
@@ -152,4 +184,4 @@ def test_metric_registry_isolation() -> None:
     """独立 MetricRegistry 实例互不影响。"""
     other = MetricRegistry()
     metrics.record_request("GET", "/a", 200, 1.0)
-    assert other.get_counter("request_count", ("get", "/a", "200")) == 0.0
+    assert other.get_counter("request_count", ("GET", "/a", "200")) == 0.0

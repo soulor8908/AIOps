@@ -230,6 +230,8 @@ async def test_llm_client_chat_anthropic() -> None:
     # messages 中不含 system
     assert all(m["role"] != "system" for m in captured["body"]["messages"])
     assert len(captured["body"]["messages"]) == 1
+    # temperature 应被发送（Anthropic 范围 0-1，默认 0.7 透传）
+    assert captured["body"]["temperature"] == 0.7
 
     # 请求头
     assert captured["headers"]["x-api-key"] == "test-key-anthropic"
@@ -266,6 +268,28 @@ async def test_llm_client_chat_anthropic_multiple_system() -> None:
     assert "Rule 1." in system_field
     assert "Rule 2." in system_field
     assert "\n\n" in system_field  # 合并分隔符
+
+
+async def test_llm_client_chat_anthropic_temperature_clamp() -> None:
+    """Anthropic temperature 上限 1.0，LLMConfig 允许 0-2 时需 clamp。"""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        captured["body"] = body
+        return httpx.Response(200, json={
+            "content": [{"type": "text", "text": "ok"}],
+        })
+
+    # LLMConfig 接受 temperature=1.5，Anthropic 应 clamp 到 1.0
+    config = LLMConfig(provider="anthropic", model="claude", api_key="k", temperature=1.5)
+    client = _make_client(config, handler)
+    try:
+        await client.chat([Message(role="user", content="hi")])
+    finally:
+        await client.close()
+
+    assert captured["body"]["temperature"] == 1.0
 
 
 # ===================== LLMClient — Local =====================
@@ -380,6 +404,76 @@ async def test_llm_client_chat_raises_on_connect_error() -> None:
             await client.chat([Message(role="user", content="hi")])
     finally:
         await client.close()
+
+
+async def test_llm_client_records_error_metric_on_non_retryable_failure() -> None:
+    """不可重试失败（4xx）记录 llm_errors{model,"non_retryable"}。"""
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    try:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, text="Unauthorized")
+
+        config = LLMConfig(provider="openai", model="gpt-4o", api_key="bad")
+        client = _make_client(config, handler, max_retries=2)
+        try:
+            with pytest.raises(LLMError):
+                await client.chat([Message(role="user", content="hi")])
+        finally:
+            await client.close()
+
+        assert metrics.get_counter("llm_errors", ("gpt-4o", "non_retryable")) == 1.0
+    finally:
+        metrics.reset()
+
+
+async def test_llm_client_records_error_metric_on_retry_exhausted() -> None:
+    """可重试故障耗尽后记录 llm_errors{model,"retryable_exhausted"}。"""
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    try:
+        call_count = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            return httpx.Response(503, text="Service Unavailable")
+
+        config = LLMConfig(provider="openai", model="gpt-4o", api_key="k")
+        client = _make_client(config, handler, max_retries=2)
+        try:
+            with pytest.raises(LLMError):
+                await client.chat([Message(role="user", content="hi")])
+        finally:
+            await client.close()
+
+        # max_retries=2 → 3 次尝试（初始 + 2 次重试）
+        assert call_count == 3
+        assert metrics.get_counter("llm_errors", ("gpt-4o", "retryable_exhausted")) == 1.0
+    finally:
+        metrics.reset()
+
+
+async def test_llm_client_records_error_metric_on_unsupported_provider() -> None:
+    """不支持的 provider 记录 llm_errors{model,"unsupported_provider"}。"""
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    try:
+        config = LLMConfig(provider="openai", model="gpt-4o")
+        client = LLMClient(config)
+        client.config.provider = "unknown"  # type: ignore[assignment]
+        try:
+            with pytest.raises(LLMError, match="不支持"):
+                await client.chat([Message(role="user", content="hi")])
+        finally:
+            await client.close()
+
+        assert metrics.get_counter("llm_errors", ("gpt-4o", "unsupported_provider")) == 1.0
+    finally:
+        metrics.reset()
 
 
 # ===================== parse_tool_calls_json =====================

@@ -33,8 +33,8 @@ from app.core.config import settings
 from app.core.database import engine, init_db
 from app.core.exceptions import AppError
 from app.core.logging import (
-    clear_request_context,
     request_id_var,
+    reset_request_context,
     set_request_context,
     setup_logging,
 )
@@ -123,7 +123,8 @@ class ObservabilityMiddleware:
 
         scope.setdefault("state", {})["request_id"] = request_id
         # 2. 设置 ContextVar，使本请求所有日志自动携带 request_id（§2.2 / §4）
-        set_request_context(request_id)
+        # 返回 token 用于 finally 中 reset（Python contextvars 惯用模式）
+        ctx_tokens = set_request_context(request_id)
 
         # 3. latency 测量起点
         start = time.perf_counter()
@@ -164,8 +165,8 @@ class ObservabilityMiddleware:
             )
             # 指标采集（observability.spec.md§5.1：request_count / request_latency）
             metrics.record_request(method, endpoint, effective_status, latency_ms)
-            # 清理 ContextVar（最后执行，先让 logger.info 携带 request_id 再清理）
-            clear_request_context()
+            # 恢复 ContextVar 到 set 前状态（reset 而非 set(None)，避免协程复用泄漏）
+            reset_request_context(ctx_tokens)
 
 
 # UUID v4 与纯数字路径段归一化为 {id}（回退方案，当 scope["route"] 不可用时）
@@ -235,12 +236,12 @@ async def validation_error_handler(
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """500 兜底（errors.spec.md§5.4）：禁止将 str(exc) 写入响应体。"""
-    # 优先从 ContextVar 读取（ObservabilityMiddleware 已设置），回退到 request.state
-    request_id: str = request_id_var.get() or str(
-        getattr(request.state, "request_id", "-")
-    )
-    logger.exception("unhandled error | request_id=%s", request_id)
+    """500 兜底（errors.spec.md§5.4）：禁止将 str(exc) 写入响应体。
+
+    request_id 由 ``RequestContextFilter`` 从 ContextVar 注入到 JSON 顶层字段，
+    无需在 message 文本中重复（避免日志冗余）。
+    """
+    logger.exception("unhandled error")
     return _json_response(
         request,
         500,

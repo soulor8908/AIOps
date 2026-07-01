@@ -101,7 +101,10 @@ async def run_eval(
     except Exception:
         # 独立事务落库 ERROR 状态，避免被 get_session rollback 吞掉。
         await _persist_error_status(session.bind, eval_id)
-        # 同步内存中的 run 对象，供调用方在异常前读到一致状态。
+        # 同步内存中的 run 对象，供直接 catch 异常且不 rollback 的调用方
+        # （如部分测试）读到一致状态。注意：HTTP 路径下 get_session 会 rollback
+        # 导致 expire，调用方再读 run.status 会触发 lazy load 失败；持久化状态
+        # 已由 _persist_error_status 独立事务保证。
         run.status = EvalStatus.ERROR.value
         run.finished_at = datetime.now(UTC)
         raise

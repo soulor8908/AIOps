@@ -15,12 +15,12 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from datetime import UTC, datetime
 from typing import Any
 
 # 请求追踪上下文（observability.spec.md§4）。
-# RequestIDMiddleware 在请求入口 set，请求结束 reset。
+# ObservabilityMiddleware 在请求入口 set，请求结束 reset。
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 user_id_var: ContextVar[str | None] = ContextVar("user_id", default=None)
 
@@ -110,17 +110,28 @@ def setup_logging(log_level: str = "INFO") -> None:
         logging.getLogger(noisy).setLevel(level)
 
 
-def set_request_context(request_id: str | None, user_id: str | None = None) -> None:
+def set_request_context(
+    request_id: str | None, user_id: str | None = None
+) -> tuple[Token[str | None], Token[str | None]]:
     """在请求入口设置 request_id / user_id 上下文。
 
-    供 ``RequestIDMiddleware`` 调用，使同一请求所有日志自动携带。
+    供 ``ObservabilityMiddleware`` 调用，使同一请求所有日志自动携带。
+    返回的 token 必须由 ``reset_request_context`` 消费以正确恢复外层值
+    （Python ``contextvars`` 惯用模式，避免协程复用泄漏）。
     """
-    request_id_var.set(request_id)
-    if user_id is not None:
-        user_id_var.set(user_id)
+    rid_token = request_id_var.set(request_id)
+    uid_token = user_id_var.set(user_id)
+    return rid_token, uid_token
 
 
-def clear_request_context() -> None:
-    """请求结束清理上下文（避免协程复用泄漏上一个请求的 request_id）。"""
-    request_id_var.set(None)
-    user_id_var.set(None)
+def reset_request_context(
+    tokens: tuple[Token[str | None], Token[str | None]]
+) -> None:
+    """请求结束恢复上下文到 set 前的状态（Python ``contextvars`` 惯用模式）。
+
+    使用 ``reset(token)`` 而非 ``set(None)``，确保嵌套中间件 / 协程复用场景下
+    外层 ContextVar 值被正确恢复，避免上一个请求的 request_id 泄漏。
+    """
+    rid_token, uid_token = tokens
+    request_id_var.reset(rid_token)
+    user_id_var.reset(uid_token)

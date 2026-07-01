@@ -114,6 +114,7 @@ class LLMClient:
         }
         handler = dispatch.get(self.config.provider)
         if handler is None:
+            metrics.record_llm_error(self.config.model, "unsupported_provider")
             raise LLMError(f"不支持的 provider: {self.config.provider}")
 
         last_exc: LLMError | None = None
@@ -137,9 +138,12 @@ class LLMClient:
                     )
                     await asyncio.sleep(backoff)
                     continue
+                # 重试耗尽：记录失败指标后跳出
+                metrics.record_llm_error(self.config.model, "retryable_exhausted")
                 break
             except LLMError:
-                # 不可重试的 LLMError，立即抛出（不重试 4xx 鉴权/参数错）。
+                # 不可重试的 LLMError：记录失败指标后立即抛出（不重试 4xx 鉴权/参数错）。
+                metrics.record_llm_error(self.config.model, "non_retryable")
                 raise
             latency_ms = (time.monotonic() - start) * 1000
             response.latency_ms = latency_ms
@@ -258,6 +262,8 @@ class LLMClient:
                     "system": "\n\n".join(system_msgs),
                     "messages": chat_msgs,
                     "max_tokens": self.config.max_tokens,
+                    # Anthropic temperature 范围 0-1，clamp 防越界（LLMConfig 允许 0-2）
+                    "temperature": min(self.config.temperature, 1.0),
                 },
             )
             resp.raise_for_status()

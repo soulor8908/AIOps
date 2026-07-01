@@ -7,7 +7,7 @@
 - 业务额外字段透传（method / path / status / model 等）
 - 异常信息附加
 - setup_logging 幂等性
-- set_request_context / clear_request_context
+- set_request_context / reset_request_context（token 模式）
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ import pytest
 from app.core.logging import (
     JsonFormatter,
     RequestContextFilter,
-    clear_request_context,
     request_id_var,
+    reset_request_context,
     set_request_context,
     setup_logging,
 )
@@ -123,7 +123,7 @@ def test_json_formatter_omits_none_optional() -> None:
 
 def test_request_context_filter_injects_request_id() -> None:
     """ContextVar 设置后 filter 注入 request_id 到 LogRecord。"""
-    set_request_context("req-123")
+    tokens = set_request_context("req-123")
     try:
         record = logging.LogRecord(
             name="app", level=logging.INFO, pathname="x", lineno=1,
@@ -132,12 +132,12 @@ def test_request_context_filter_injects_request_id() -> None:
         RequestContextFilter().filter(record)
         assert record.request_id == "req-123"  # type: ignore[attr-defined]
     finally:
-        clear_request_context()
+        reset_request_context(tokens)
 
 
 def test_request_context_filter_injects_user_id() -> None:
     """ContextVar 设置 user_id 后注入。"""
-    set_request_context("req-1", user_id="user-42")
+    tokens = set_request_context("req-1", user_id="user-42")
     try:
         record = logging.LogRecord(
             name="app", level=logging.INFO, pathname="x", lineno=1,
@@ -146,12 +146,11 @@ def test_request_context_filter_injects_user_id() -> None:
         RequestContextFilter().filter(record)
         assert record.user_id == "user-42"  # type: ignore[attr-defined]
     finally:
-        clear_request_context()
+        reset_request_context(tokens)
 
 
 def test_request_context_filter_no_context() -> None:
     """无上下文时不附加 request_id（observability.spec.md§2.2）。"""
-    clear_request_context()
     record = logging.LogRecord(
         name="app", level=logging.INFO, pathname="x", lineno=1,
         msg="test", args=(), exc_info=None,
@@ -160,14 +159,31 @@ def test_request_context_filter_no_context() -> None:
     assert not hasattr(record, "request_id")
 
 
-# ===================== set/clear_request_context =====================
+# ===================== set/reset_request_context =====================
 
-def test_set_and_clear_request_context() -> None:
-    """set 后 ContextVar 持有值，clear 后归 None。"""
+def test_set_and_reset_request_context() -> None:
+    """set 后 ContextVar 持有值，reset 后恢复原值。"""
     assert request_id_var.get() is None
-    set_request_context("abc-123")
+    tokens = set_request_context("abc-123")
     assert request_id_var.get() == "abc-123"
-    clear_request_context()
+    reset_request_context(tokens)
+    assert request_id_var.get() is None
+
+
+def test_reset_restores_outer_value() -> None:
+    """reset(token) 恢复外层 ContextVar 值，而非简单置 None（嵌套场景正确性）。"""
+    # 外层先设置一个值
+    outer_tokens = set_request_context("outer-req")
+    try:
+        assert request_id_var.get() == "outer-req"
+        # 内层 set 一个新值
+        inner_tokens = set_request_context("inner-req")
+        assert request_id_var.get() == "inner-req"
+        # reset 应恢复到外层值，而非 None
+        reset_request_context(inner_tokens)
+        assert request_id_var.get() == "outer-req"
+    finally:
+        reset_request_context(outer_tokens)
     assert request_id_var.get() is None
 
 

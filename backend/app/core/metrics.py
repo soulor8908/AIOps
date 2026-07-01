@@ -62,6 +62,7 @@ class MetricRegistry:
             "request_count": ("method", "endpoint", "status"),
             "llm_tokens": ("model", "direction"),
             "llm_cost": ("model",),
+            "llm_errors": ("model", "error_type"),
         }
         self._histogram_label_names: dict[str, tuple[str, ...]] = {
             "request_latency": ("endpoint",),
@@ -76,10 +77,12 @@ class MetricRegistry:
 
         - ``request_count{method,endpoint,status}`` += 1
         - ``request_latency{endpoint}`` 观察 latency_ms
+
+        HTTP method 保留原始大写（Prometheus 社区惯例），HTTP method 集合有限
+        （GET/POST/PUT/DELETE/PATCH/OPTIONS/HEAD），无基数爆炸风险。
         """
-        method_l = method.lower()
         status_str = str(status)
-        counter_key = ("request_count", (method_l, endpoint, status_str))
+        counter_key = ("request_count", (method, endpoint, status_str))
         hist_key = ("request_latency", (endpoint,))
 
         with self._lock:
@@ -103,18 +106,33 @@ class MetricRegistry:
         - ``llm_tokens{model,direction="in"}`` += input_tokens
         - ``llm_tokens{model,direction="out"}`` += output_tokens
         - ``llm_cost{model}`` += cost
+
+        负值被忽略：counter 必须单调递增（Prometheus 语义），misconfigured
+        ``cost_per_1k_*`` 导致的负 cost 不应破坏单调性。
         """
         in_key = ("llm_tokens", (model, "in"))
         out_key = ("llm_tokens", (model, "out"))
         cost_key = ("llm_cost", (model,))
 
         with self._lock:
-            if input_tokens:
+            if input_tokens > 0:
                 self._counters[in_key] += input_tokens
-            if output_tokens:
+            if output_tokens > 0:
                 self._counters[out_key] += output_tokens
-            if cost:
+            if cost > 0:
                 self._counters[cost_key] += cost
+
+    def record_llm_error(self, model: str, error_type: str) -> None:
+        """记录 LLM 调用失败（observability.spec.md§5.1：错误率可观测）。
+
+        - ``llm_errors{model,error_type}`` += 1
+
+        ``error_type`` 建议值：``retryable_exhausted`` / ``non_retryable`` /
+        ``unsupported_provider``。使失败调用不再处于 metrics 盲区。
+        """
+        key = ("llm_errors", (model, error_type))
+        with self._lock:
+            self._counters[key] += 1.0
 
     # ===================== 读取接口（便于测试） =====================
 
