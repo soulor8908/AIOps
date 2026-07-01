@@ -6,12 +6,13 @@ import type {
   PromptUpdate,
   PromptVersionOut,
   PromptVersionCreate,
-  PromptDiff,
-  ListResponse,
+  DiffResult,
+  UUID,
 } from "@/shared/api/types";
 
+// 列表端点返回裸数组（response_model=list[<Out>]），无 {items,total} 包装。
 export function fetchPrompts(q = "", limit = 20, offset = 0) {
-  return api.get<ListResponse<PromptOut>>(
+  return api.get<PromptOut[]>(
     `/prompts${buildQuery({ q, limit, offset })}`,
   );
 }
@@ -20,44 +21,43 @@ export function createPrompt(data: PromptCreate) {
   return api.post<PromptOut>("/prompts", data);
 }
 
-export function getPrompt(promptId: number) {
+export function getPrompt(promptId: UUID) {
   return api.get<PromptOut>(`/prompts/${promptId}`);
 }
 
-export function updatePrompt(promptId: number, data: PromptUpdate) {
+export function updatePrompt(promptId: UUID, data: PromptUpdate) {
   return api.put<PromptOut>(`/prompts/${promptId}`, data);
 }
 
-export function deletePrompt(promptId: number) {
+export function deletePrompt(promptId: UUID) {
   return api.del<void>(`/prompts/${promptId}`);
 }
 
-export function listVersions(promptId: number) {
-  return api.get<ListResponse<PromptVersionOut>>(
-    `/prompts/${promptId}/versions`,
-  );
+export function listVersions(promptId: UUID) {
+  return api.get<PromptVersionOut[]>(`/prompts/${promptId}/versions`);
 }
 
-export function createVersion(promptId: number, data: PromptVersionCreate) {
+export function createVersion(promptId: UUID, data: PromptVersionCreate) {
   return api.post<PromptVersionOut>(`/prompts/${promptId}/versions`, data);
 }
 
-export function rollbackVersion(promptId: number, versionId: number) {
-  return api.post<PromptOut>(
+export function rollbackVersion(promptId: UUID, versionId: UUID) {
+  return api.post<PromptVersionOut>(
     `/prompts/${promptId}/versions/${versionId}/rollback`,
     {},
   );
 }
 
+// 后端 diff 查询参数为 from/to（int 版本号）。
 export function diffVersions(
-  promptId: number,
+  promptId: UUID,
   fromVersion: number,
   toVersion: number,
 ) {
-  return api.get<PromptDiff>(
+  return api.get<DiffResult>(
     `/prompts/${promptId}/diff${buildQuery({
-      from_version: fromVersion,
-      to_version: toVersion,
+      from: fromVersion,
+      to: toVersion,
     })}`,
   );
 }

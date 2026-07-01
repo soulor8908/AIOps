@@ -108,7 +108,7 @@ describe("upload", () => {
   it("以 FormData 发送文件（POST），不手动设置 Content-Type", async () => {
     const fetchMock = mockFetch(async () => jsonResponse({ url: "/files/1" }));
     const file = new File(["hello"], "f.txt", { type: "text/plain" });
-    await upload("/upload", file);
+    await upload("/upload", file, "doc-title");
 
     const init = fetchMock.mock.calls[0][1]!;
     expect(init.method).toBe("POST");
@@ -116,6 +116,7 @@ describe("upload", () => {
 
     const fd = init.body as FormData;
     expect(fd.get("file")).toBe(file);
+    expect(fd.get("title")).toBe("doc-title");
     // upload 仅设置 Authorization，Content-Type 由浏览器为 FormData 自动补充 boundary
     expect((init.headers as Record<string, string>)["Content-Type"]).toBeUndefined();
   });

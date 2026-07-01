@@ -59,11 +59,21 @@ export const api = {
   put: <T>(path: string, body: unknown) =>
     request<T>(path, { method: "PUT", body: JSON.stringify(body) }),
   del: <T>(path: string) => request<T>(path, { method: "DELETE" }),
+  // OAuth2PasswordRequestForm 端点需 application/x-www-form-urlencoded（非 JSON）。
+  // 后端 /auth/token 读取表单字段 username/password。
+  postForm: <T>(path: string, fields: Record<string, string>) =>
+    request<T>(path, {
+      method: "POST",
+      body: new URLSearchParams(fields).toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    }),
 };
 
 // Upload helper for multipart/form-data (file uploads bypass JSON content-type).
-export async function upload<T>(path: string, file: File): Promise<T> {
+// 后端 /knowledge-bases/{kb_id}/documents 要求 Form 字段 title + file。
+export async function upload<T>(path: string, file: File, title: string): Promise<T> {
   const form = new FormData();
+  form.append("title", title);
   form.append("file", file);
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",

@@ -3,37 +3,36 @@ import { onMounted, ref } from "vue";
 import { useModelStore } from "../store";
 import { Button, Input, Badge } from "@/shared/ui";
 import { Card, CardHeader, CardTitle, CardContent } from "@/shared/ui";
-import type { ModelConfigCreate, ProviderName, RoutingStrategy } from "@/shared/api/types";
+import type { ModelConfigCreate, ModelProvider } from "@/shared/api/types";
 
 const store = useModelStore();
 const showForm = ref(false);
 
-const providers: ProviderName[] = ["openai", "anthropic", "azure", "local"];
-const strategies: RoutingStrategy[] = ["direct", "round_robin", "least_cost", "latency"];
+const providers: ModelProvider[] = ["openai", "anthropic", "local", "azure_openai", "custom"];
 
 const form = ref({
   alias: "",
-  provider_name: "openai" as ProviderName,
-  model_id: "",
+  provider: "openai" as ModelProvider,
+  model_name: "",
   temperature: "0.7",
   max_tokens: "4096",
   cost_per_1k_input: "0",
   cost_per_1k_output: "0",
-  routing_strategy: "direct" as RoutingStrategy,
-  quota_daily: "1000000",
+  is_active: true,
+  priority: "0",
 });
 
 function buildPayload(): ModelConfigCreate {
   return {
     alias: form.value.alias,
-    provider_name: form.value.provider_name,
-    model_id: form.value.model_id,
+    provider: form.value.provider,
+    model_name: form.value.model_name,
     temperature: Number(form.value.temperature) || 0.7,
     max_tokens: Number(form.value.max_tokens) || 4096,
-    cost_per_1k_input: Number(form.value.cost_per_1k_input) || 0,
-    cost_per_1k_output: Number(form.value.cost_per_1k_output) || 0,
-    routing_strategy: form.value.routing_strategy,
-    quota_daily: Number(form.value.quota_daily) || 1000000,
+    cost_per_1k_input: form.value.cost_per_1k_input,
+    cost_per_1k_output: form.value.cost_per_1k_output,
+    is_active: form.value.is_active,
+    priority: Number(form.value.priority) || 0,
   };
 }
 
@@ -42,14 +41,14 @@ async function onCreate() {
   showForm.value = false;
   form.value = {
     alias: "",
-    provider_name: "openai",
-    model_id: "",
+    provider: "openai",
+    model_name: "",
     temperature: "0.7",
     max_tokens: "4096",
     cost_per_1k_input: "0",
     cost_per_1k_output: "0",
-    routing_strategy: "direct",
-    quota_daily: "1000000",
+    is_active: true,
+    priority: "0",
   };
 }
 
@@ -74,20 +73,18 @@ onMounted(() => store.fetchList());
             <Input v-model="form.alias" placeholder="gpt-4o-mini" />
           </div>
           <div class="space-y-1">
-            <label class="text-sm font-medium">Model ID</label>
-            <Input v-model="form.model_id" placeholder="gpt-4o-mini-2024-07-18" />
+            <label class="text-sm font-medium">Model Name</label>
+            <Input v-model="form.model_name" placeholder="gpt-4o-mini-2024-07-18" />
           </div>
           <div class="space-y-1">
             <label class="text-sm font-medium">Provider</label>
-            <select v-model="form.provider_name" class="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+            <select v-model="form.provider" class="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
               <option v-for="p in providers" :key="p" :value="p">{{ p }}</option>
             </select>
           </div>
           <div class="space-y-1">
-            <label class="text-sm font-medium">Routing Strategy</label>
-            <select v-model="form.routing_strategy" class="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
-              <option v-for="s in strategies" :key="s" :value="s">{{ s }}</option>
-            </select>
+            <label class="text-sm font-medium">Priority</label>
+            <Input v-model="form.priority" type="number" />
           </div>
           <div class="space-y-1">
             <label class="text-sm font-medium">Temperature</label>
@@ -126,16 +123,15 @@ onMounted(() => store.fetchList());
           <div>
             <div class="flex items-center gap-2">
               <span class="font-medium">{{ m.alias }}</span>
-              <Badge variant="secondary">{{ m.provider_name }}</Badge>
-              <Badge :variant="m.enabled ? 'default' : 'outline'">
-                {{ m.enabled ? "enabled" : "disabled" }}
+              <Badge variant="secondary">{{ m.provider }}</Badge>
+              <Badge :variant="m.is_active ? 'default' : 'outline'">
+                {{ m.is_active ? "enabled" : "disabled" }}
               </Badge>
             </div>
-            <div class="text-sm text-muted-foreground">{{ m.model_id }}</div>
+            <div class="text-sm text-muted-foreground">{{ m.model_name }}</div>
           </div>
           <div class="text-right text-xs text-muted-foreground">
-            <div>strategy: {{ m.routing_strategy }}</div>
-            <div>quota: {{ m.quota_daily }}</div>
+            <div>priority: {{ m.priority }}</div>
           </div>
         </div>
       </div>

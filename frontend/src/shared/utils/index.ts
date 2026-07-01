@@ -31,10 +31,12 @@ export function formatNumber(
   });
 }
 
-/** Format a USD cost value. */
-export function formatCost(value: number | null | undefined): string {
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-  return `$${value.toFixed(4)}`;
+/** Format a USD cost value. Accepts numbers or decimal-as-string values. */
+export function formatCost(value: number | string | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "-";
+  const n = typeof value === "string" ? Number(value) : value;
+  if (Number.isNaN(n)) return "-";
+  return `$${n.toFixed(4)}`;
 }
 
 /** Format bytes as a human-readable size. */
@@ -55,7 +57,7 @@ export function formatPercent(value: number | null | undefined): string {
 
 /** Build a query string from a record of params, skipping undefined/empty. */
 export function buildQuery(
-  params: Record<string, string | number | undefined>,
+  params: Record<string, string | number | boolean | undefined>,
 ): string {
   const sp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {

@@ -11,8 +11,8 @@ type BadgeVariant = "default" | "secondary" | "destructive" | "outline";
 const store = useEvalStore();
 
 function statusVariant(status: EvalRunOut["status"]): BadgeVariant {
-  if (status === "done") return "default";
-  if (status === "failed") return "destructive";
+  if (status === "passed") return "default";
+  if (status === "failed" || status === "error") return "destructive";
   if (status === "running") return "secondary";
   return "outline";
 }
@@ -56,20 +56,20 @@ onMounted(() => store.fetchList());
         <CardContent>
           <div class="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
             <div>
-              <div class="text-xs text-muted-foreground">Prompt Version</div>
-              <div>{{ run.prompt_version_id }}</div>
+              <div class="text-xs text-muted-foreground">Judge</div>
+              <div>{{ run.judge_type }}</div>
             </div>
             <div>
-              <div class="text-xs text-muted-foreground">Model</div>
-              <div>{{ run.model_alias }}</div>
+              <div class="text-xs text-muted-foreground">Passed</div>
+              <div>{{ run.pass_count }} / {{ run.pass_count + run.fail_count }}</div>
             </div>
             <div>
               <div class="text-xs text-muted-foreground">Pass Rate</div>
-              <div>{{ formatPercent(run.pass_rate) }}</div>
+              <div>{{ formatPercent(run.pass_count + run.fail_count > 0 ? run.pass_count / (run.pass_count + run.fail_count) : null) }}</div>
             </div>
             <div>
-              <div class="text-xs text-muted-foreground">Avg Score</div>
-              <div>{{ run.avg_score.toFixed(2) }}</div>
+              <div class="text-xs text-muted-foreground">Score</div>
+              <div>{{ run.score != null ? run.score.toFixed(2) : "-" }}</div>
             </div>
           </div>
           <div class="mt-2 text-xs text-muted-foreground">

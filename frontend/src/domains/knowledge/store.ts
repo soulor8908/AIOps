@@ -4,6 +4,7 @@ import type {
   KnowledgeBaseOut,
   KnowledgeBaseCreate,
   SearchResult,
+  UUID,
 } from "@/shared/api/types";
 import * as api from "./api";
 
@@ -11,7 +12,7 @@ export const useKnowledgeStore = defineStore("knowledge", () => {
   const knowledgeBases = ref<KnowledgeBaseOut[]>([]);
   const loading = ref(false);
   const error = ref<string | null>(null);
-  const selectedId = ref<number | null>(null);
+  const selectedId = ref<UUID | null>(null);
   const searchResults = ref<SearchResult[]>([]);
   const searching = ref(false);
   const uploading = ref(false);
@@ -24,8 +25,7 @@ export const useKnowledgeStore = defineStore("knowledge", () => {
     loading.value = true;
     error.value = null;
     try {
-      const res = await api.fetchKnowledgeBases();
-      knowledgeBases.value = res.items;
+      knowledgeBases.value = await api.fetchKnowledgeBases();
     } catch (e) {
       error.value = e instanceof Error ? e.message : "Failed to load knowledge bases";
     } finally {
@@ -39,11 +39,13 @@ export const useKnowledgeStore = defineStore("knowledge", () => {
     return kb;
   }
 
+  // 后端要求 Form 字段 title；文件名去除扩展名作为标题。
   async function uploadDocument(file: File) {
     if (selectedId.value === null) return;
     uploading.value = true;
     try {
-      await api.uploadDocument(selectedId.value, file);
+      const title = file.name.replace(/\.[^.]+$/, "") || file.name;
+      await api.uploadDocument(selectedId.value, file, title);
       await fetchList();
     } finally {
       uploading.value = false;
@@ -54,17 +56,17 @@ export const useKnowledgeStore = defineStore("knowledge", () => {
     if (selectedId.value === null) return;
     searching.value = true;
     try {
-      const res = await api.searchKnowledge(selectedId.value, {
+      // 后端 search 返回裸数组 SearchResult[]。
+      searchResults.value = await api.searchKnowledge(selectedId.value, {
         query,
         top_k: topK,
       });
-      searchResults.value = res.results;
     } finally {
       searching.value = false;
     }
   }
 
-  function select(id: number | null) {
+  function select(id: UUID | null) {
     selectedId.value = id;
     searchResults.value = [];
   }

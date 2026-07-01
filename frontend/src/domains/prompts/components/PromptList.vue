@@ -58,7 +58,7 @@ onMounted(() => store.fetchList());
         <div class="min-w-0">
           <div class="flex items-center gap-2">
             <span class="font-medium">{{ prompt.name }}</span>
-            <Badge variant="secondary">{{ prompt.version_count }} versions</Badge>
+            <Badge variant="secondary">{{ prompt.versions.length }} versions</Badge>
           </div>
           <div class="truncate text-sm text-muted-foreground">
             {{ prompt.description || "No description" }}

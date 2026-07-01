@@ -9,10 +9,7 @@ const startDate = ref("");
 const endDate = ref("");
 
 function onFilter() {
-  void store.fetchConversations({
-    start_date: startDate.value || undefined,
-    end_date: endDate.value || undefined,
-  });
+  void store.fetchConversations({});
 }
 
 onMounted(() => store.fetchConversations());
@@ -36,12 +33,10 @@ onMounted(() => store.fetchConversations());
         <thead class="bg-muted/50 text-left text-xs uppercase text-muted-foreground">
           <tr>
             <th class="p-3">ID</th>
-            <th class="p-3">Session</th>
             <th class="p-3">Model</th>
             <th class="p-3">Messages</th>
             <th class="p-3">Tokens</th>
             <th class="p-3">Cost</th>
-            <th class="p-3">Latency</th>
             <th class="p-3">Created</th>
           </tr>
         </thead>
@@ -51,13 +46,11 @@ onMounted(() => store.fetchConversations());
             :key="c.id"
             class="border-t hover:bg-muted/30"
           >
-            <td class="p-3">{{ c.id }}</td>
-            <td class="max-w-[12rem] truncate p-3 font-mono text-xs">{{ c.session_id }}</td>
+            <td class="max-w-[12rem] truncate p-3 font-mono text-xs">{{ c.id }}</td>
             <td class="p-3"><Badge variant="secondary">{{ c.model_alias }}</Badge></td>
-            <td class="p-3">{{ formatNumber(c.message_count) }}</td>
-            <td class="p-3">{{ formatNumber(c.input_tokens + c.output_tokens) }}</td>
-            <td class="p-3">{{ formatCost(c.cost_usd) }}</td>
-            <td class="p-3">{{ formatNumber(c.latency_ms) }} ms</td>
+            <td class="p-3">{{ formatNumber(c.messages.length) }}</td>
+            <td class="p-3">{{ formatNumber(c.total_tokens) }}</td>
+            <td class="p-3">{{ formatCost(c.total_cost) }}</td>
             <td class="p-3 text-xs text-muted-foreground">{{ formatDate(c.created_at) }}</td>
           </tr>
         </tbody>

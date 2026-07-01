@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -26,6 +27,8 @@ from app.domains.evals.models import (
     EvalStatus,
     JudgeType,
 )
+
+logger = logging.getLogger("app.evals.service")
 
 
 async def create_eval(session: AsyncSession, payload: EvalRunCreate) -> EvalRun:
@@ -66,26 +69,38 @@ async def run_eval(
     eval_id: uuid.UUID,
     predict_fn: Any | None = None,
 ) -> EvalRun:
-    """执行 eval。predict_fn(case) -> actual；默认用 expected 直接比对。"""
+    """执行 eval。predict_fn(case) -> actual；默认用 expected 直接比对。
+
+    失败状态独立事务：执行期抛错时，ERROR 状态通过独立 session 落库，
+    避免被请求级 ``get_session`` 的 rollback 吞掉（之前 flush 后 raise 导致
+    状态丢失）。LLM 判官客户端单例化并在 finally 中关闭，杜绝连接泄漏。
+    """
     run = await get_eval(session, eval_id)
     run.status = EvalStatus.RUNNING.value
     run.started_at = datetime.now(UTC)
     await session.flush()
 
+    # LLM 判官客户端仅在需要时创建，整个 run_eval 生命周期复用一个实例。
+    client = _build_llm_client_if_needed(run.judge_type)
     results: list[CaseResult] = []
     pass_count = 0
     try:
         for case in run.cases:
             actual = await _predict(predict_fn, case)
-            result = await _judge_case(run.judge_type, case, actual)
+            result = await _judge_case(run.judge_type, case, actual, client)
             results.append(result)
             if result.passed:
                 pass_count += 1
     except Exception:
+        # 独立事务落库 ERROR 状态，避免被 get_session rollback 吞掉。
+        await _persist_error_status(session, eval_id)
+        # 同步内存中的 run 对象，供调用方在异常前读到一致状态。
         run.status = EvalStatus.ERROR.value
         run.finished_at = datetime.now(UTC)
-        await session.flush()
         raise
+    finally:
+        if client is not None:
+            await client.close()
 
     run.results = [r.model_dump(mode="json") for r in results]
     run.pass_count = pass_count
@@ -95,6 +110,39 @@ async def run_eval(
     run.finished_at = datetime.now(UTC)
     await session.flush()
     return run
+
+
+async def _persist_error_status(session: AsyncSession, eval_id: uuid.UUID) -> None:
+    """用独立 session 落库 ERROR 状态。
+
+    请求级 ``get_session`` 在异常时会 rollback，导致在请求 session 上 flush 的
+    ERROR 状态被丢弃。此处复用同一 engine 新建独立 session + 独立事务，
+    保证 ERROR 状态持久化，即便请求 session 回滚也不受影响。
+
+    复用 ``session.bind``（同一 AsyncEngine）而非全局 ``AsyncSessionLocal``，
+    使单元测试中也能写入测试引擎（避免命中从不连接的全局引擎）。
+    """
+    # 注意：AsyncSession.get_bind() 返回同步 Engine，无法直接喂给 AsyncSession(bind=...)；
+    # ``AsyncSession.bind`` 属性返回 ``AsyncEngine | None``，类型匹配且无需 cast。
+    engine = session.bind
+    if engine is None:
+        # 无可用 engine 时退化为不落库（仅日志），不阻塞异常传播。
+        logger.warning("no engine bound to session; skip persisting ERROR status")
+        return
+    try:
+        async with AsyncSession(bind=engine, expire_on_commit=False) as err_session:
+            await err_session.execute(
+                update(EvalRun)
+                .where(EvalRun.id == eval_id)
+                .values(
+                    status=EvalStatus.ERROR.value,
+                    finished_at=datetime.now(UTC),
+                )
+            )
+            await err_session.commit()
+    except Exception:  # noqa: BLE001
+        # 落库失败不应掩盖原始异常，仅记录日志。
+        logger.exception("failed to persist ERROR status for eval %s", eval_id)
 
 
 async def _predict(predict_fn: Any | None, case: dict[str, Any]) -> str:
@@ -108,15 +156,33 @@ async def _predict(predict_fn: Any | None, case: dict[str, Any]) -> str:
 
 
 async def _judge_case(
-    judge_type: str, case: dict[str, Any], actual: str
+    judge_type: str,
+    case: dict[str, Any],
+    actual: str,
+    llm_client: LLMClient | None,
 ) -> CaseResult:
-    """根据判官类型评估单条 case。"""
+    """根据判官类型评估单条 case。LLM 判官复用传入的 client。"""
     expected = str(case.get("expected", ""))
+
+    def _exact() -> JudgeResult:
+        return judge_exact(actual, expected)
+
+    def _contains() -> JudgeResult:
+        return judge_contains(actual, expected)
+
+    async def _semantic() -> JudgeResult:
+        return await judge_semantic(actual, expected)
+
+    async def _llm() -> JudgeResult:
+        if llm_client is None:
+            raise LLMError("LLM 判官需要客户端，但未提供")
+        return await judge_llm(actual, expected, llm_client)
+
     judge_map: dict[str, Any] = {
-        JudgeType.EXACT.value: lambda: judge_exact(actual, expected),
-        JudgeType.CONTAINS.value: lambda: judge_contains(actual, expected),
-        JudgeType.SEMANTIC.value: lambda: judge_semantic(actual, expected),
-        JudgeType.LLM.value: lambda: judge_llm(actual, expected, _default_llm_client()),
+        JudgeType.EXACT.value: _exact,
+        JudgeType.CONTAINS.value: _contains,
+        JudgeType.SEMANTIC.value: _semantic,
+        JudgeType.LLM.value: _llm,
     }
     handler = judge_map.get(judge_type)
     if handler is None:
@@ -137,8 +203,10 @@ async def _judge_case(
     )
 
 
-def _default_llm_client() -> LLMClient:
-    """构造默认 LLM 客户端供 LLM 判官使用。"""
+def _build_llm_client_if_needed(judge_type: str) -> LLMClient | None:
+    """仅当判官类型为 LLM 时构造客户端，避免无谓的 httpx 连接。"""
+    if judge_type != JudgeType.LLM.value:
+        return None
     return LLMClient(
         LLMConfig(
             provider="openai",

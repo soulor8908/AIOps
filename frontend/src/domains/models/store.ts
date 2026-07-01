@@ -17,8 +17,7 @@ export const useModelStore = defineStore("models", () => {
     loading.value = true;
     error.value = null;
     try {
-      const res = await api.fetchModels();
-      models.value = res.items;
+      models.value = await api.fetchModels();
     } catch (e) {
       error.value = e instanceof Error ? e.message : "Failed to load models";
     } finally {

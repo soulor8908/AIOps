@@ -1,12 +1,60 @@
 // Core types mirroring the backend OpenAPI 3.1 schemas.
-// Normally generated via `npm run gen:api` (openapi-typescript).
-// Hand-maintained here as a fallback so the UI is fully typed.
+// Faithfully reflects the FastAPI pydantic models in backend/app/domains/*/models.py.
+// Normally regenerated via `npm run gen:api` (openapi-typescript); hand-maintained here.
+//
+// Backend contract facts (all verified against source):
+// - List endpoints return a BARE JSON array `[]` (response_model=list[<Out>]).
+//   There is NO {items, total} wrapper; pagination is via limit/offset query only.
+// - All entity IDs are uuid.UUID (serialized as canonical UUID string).
+//   The only non-UUID keys: /models/{alias} (str), /prompts/{id}/diff (int versions).
+// - Decimal fields (costs) serialize as strings; datetime as ISO-8601 strings.
 
-// ---------- Generic list wrapper ----------
+// ---------- Common ----------
 
-export interface ListResponse<T> {
-  items: T[];
-  total: number;
+/** Generic error envelope returned by the backend (errors.spec.md§2). */
+export interface ApiErrorBody {
+  error: string;
+  message: string;
+  detail?: unknown;
+}
+
+/** Pagination query params shared by all list endpoints. */
+export interface PageQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** A UUID string (canonical 8-4-4-4-12 form). */
+export type UUID = string;
+
+// ---------- Auth ----------
+
+export interface UserCreate {
+  email: string;
+  username: string;
+  full_name?: string;
+  password: string;
+}
+
+export interface UserOut {
+  id: UUID;
+  email: string;
+  username: string;
+  full_name: string | null;
+  is_active: boolean;
+  role: "admin" | "user";
+  created_at: string;
+}
+
+export interface Token {
+  access_token: string;
+  refresh_token: string;
+  token_type: string; // "bearer"
+  expires_in: number; // access token validity seconds
+}
+
+export interface RefreshRequest {
+  refresh_token: string;
 }
 
 // ---------- Prompts ----------
@@ -15,113 +63,149 @@ export interface PromptCreate {
   name: string;
   description?: string;
   content: string;
-  variables?: string[];
+  variables: string[];
 }
 
 export interface PromptUpdate {
   name?: string;
   description?: string;
-}
-
-export interface PromptVersionOut {
-  id: number;
-  version_num: number;
-  content: string;
-  variables: string[];
-  created_at: string;
-}
-
-export interface PromptOut {
-  id: number;
-  name: string;
-  description: string;
-  current_version: PromptVersionOut | null;
-  version_count: number;
-  created_at: string;
-  updated_at: string;
+  is_active?: boolean;
 }
 
 export interface PromptVersionCreate {
   content: string;
-  variables?: string[];
+  variables: string[];
+  change_note?: string;
 }
 
-export interface PromptDiff {
-  additions: number;
-  deletions: number;
-  diff: string;
+export interface PromptVersionOut {
+  id: UUID;
+  prompt_id: UUID;
+  version_num: number;
+  content: string;
+  variables: string[];
+  change_note: string | null;
+  created_by: string | null;
+  created_at: string;
+}
+
+export interface PromptOut {
+  id: UUID;
+  name: string;
+  description: string | null;
+  current_version_id: UUID | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  versions: PromptVersionOut[];
+}
+
+export interface DiffResult {
+  from_version: number;
+  to_version: number;
+  added_lines: string[];
+  removed_lines: string[];
+  unified_diff: string[];
 }
 
 // ---------- Agents ----------
 
+export type ToolType =
+  | "search"
+  | "calculator"
+  | "http"
+  | "code"
+  | "rag"
+  | "custom";
+
+export interface ToolDef {
+  name: string;
+  type: ToolType;
+  description?: string;
+  config: Record<string, unknown>;
+}
+
 export interface AgentCreate {
   name: string;
   description?: string;
-  system_prompt: string;
+  system_prompt?: string;
   model_alias: string;
-  tools?: string[];
+  tools: ToolDef[];
+  max_turns: number;
+  temperature: number;
 }
 
 export interface AgentOut {
-  id: number;
+  id: UUID;
   name: string;
-  description: string;
-  system_prompt: string;
+  description: string | null;
+  system_prompt: string | null;
   model_alias: string;
-  tools: string[];
+  tools: Record<string, unknown>[];
+  max_turns: number;
+  temperature: number;
+  is_active: boolean;
   created_at: string;
+  updated_at: string;
 }
 
-export interface AgentExecuteRequest {
-  input: Record<string, unknown>;
-  stream?: boolean;
+export interface ExecuteRequest {
+  input: string;
+  max_turns?: number;
+  context?: Record<string, unknown>;
+}
+
+export interface ExecutionTrace {
+  turn: number;
+  thought: string;
+  action: string | null;
+  observation: string | null;
+  tokens: number;
 }
 
 export interface ExecutionResult {
-  trace_id: string;
-  status: "success" | "failed" | "timeout";
-  output: Record<string, unknown>;
-  token_usage: Record<string, number>;
-  latency_ms: number;
+  agent_id: UUID | null;
+  workflow_id: UUID | null;
+  final_answer: string;
+  traces: ExecutionTrace[];
+  total_tokens: number;
+  success: boolean;
+  error: string | null;
 }
 
 // ---------- Workflows ----------
 
 export interface AgentNode {
   id: string;
+  agent_id: UUID | null;
   name: string;
-  agent_id?: number;
-  system_prompt?: string;
-  model_config_id?: number;
-  tools: string[];
-  next_nodes: string[];
+  inputs: Record<string, unknown>;
+  is_entry: boolean;
+  is_exit: boolean;
+}
+
+export interface WorkflowEdge {
+  source: string;
+  target: string;
   condition?: string;
 }
 
 export interface WorkflowDef {
   name: string;
+  description?: string;
   nodes: AgentNode[];
-  entry_node: string;
-  max_rounds?: number;
+  edges: WorkflowEdge[];
 }
 
 export interface WorkflowOut {
-  id: number;
+  id: UUID;
   name: string;
-  nodes: AgentNode[];
-  entry_node: string;
-  max_rounds: number;
+  description: string | null;
+  nodes: Record<string, unknown>[];
+  edges: Record<string, unknown>[];
+  is_active: boolean;
   created_at: string;
-}
-
-export interface ExecutionTrace {
-  trace_id: string;
-  workflow_id: number;
-  status: "running" | "success" | "failed" | "timeout";
-  spans: Record<string, unknown>[];
-  token_usage: Record<string, number>;
-  latency_ms: number;
-  created_at: string;
+  updated_at: string;
 }
 
 // ---------- Knowledge Base ----------
@@ -135,164 +219,222 @@ export interface KnowledgeBaseCreate {
 }
 
 export interface KnowledgeBaseOut {
-  id: number;
+  id: UUID;
   name: string;
-  description: string;
+  description: string | null;
   embedding_model: string;
   chunk_size: number;
   chunk_overlap: number;
-  doc_count: number;
   created_at: string;
+  updated_at: string;
 }
 
 export interface DocumentOut {
-  id: number;
-  kb_id: number;
-  filename: string;
-  file_size: number;
+  id: UUID;
+  knowledge_base_id: UUID;
+  title: string;
+  source_uri: string | null;
+  mime_type: string | null;
+  size_bytes: number | null;
   chunk_count: number;
-  status: "pending" | "processing" | "done" | "error";
+  status: "pending" | "processing" | "ready" | "failed";
   created_at: string;
+  updated_at: string;
 }
 
-export interface SearchRequest {
+export interface SearchQuery {
   query: string;
   top_k?: number;
-  threshold?: number;
+  score_threshold?: number;
 }
 
 export interface SearchResult {
-  chunk_id: number;
-  doc_id: number;
+  chunk_id: UUID;
+  document_id: UUID;
   content: string;
   score: number;
   metadata: Record<string, unknown>;
 }
 
-export interface SearchResponse {
-  results: SearchResult[];
+export interface RAGQuery {
+  question: string;
+  top_k?: number;
 }
 
 // ---------- Models ----------
 
-export type ProviderName = "openai" | "anthropic" | "azure" | "local";
-export type RoutingStrategy = "direct" | "round_robin" | "least_cost" | "latency";
+export type ModelProvider =
+  | "openai"
+  | "anthropic"
+  | "local"
+  | "azure_openai"
+  | "custom";
+
+export type RoutingStrategy =
+  | "direct"
+  | "round_robin"
+  | "least_cost"
+  | "latency";
 
 export interface ModelConfigCreate {
   alias: string;
-  provider_name: ProviderName;
-  model_id: string;
-  temperature?: number;
+  provider?: ModelProvider;
+  model_name: string;
+  api_base?: string;
+  api_key_env?: string;
   max_tokens?: number;
-  cost_per_1k_input?: number;
-  cost_per_1k_output?: number;
-  routing_strategy?: RoutingStrategy;
-  fallback_models?: string[];
-  quota_daily?: number;
+  temperature?: number;
+  cost_per_1k_input: string; // Decimal as string
+  cost_per_1k_output: string; // Decimal as string
+  priority?: number;
+  is_active?: boolean;
+}
+
+export interface ModelConfigUpdate {
+  model_name?: string;
+  api_base?: string;
+  api_key_env?: string;
+  max_tokens?: number;
+  temperature?: number;
+  cost_per_1k_input?: string;
+  cost_per_1k_output?: string;
+  is_active?: boolean;
+  priority?: number;
 }
 
 export interface ModelConfigOut {
-  id: number;
+  id: UUID;
   alias: string;
-  provider_name: ProviderName;
-  model_id: string;
-  temperature: number;
+  provider: string;
+  model_name: string;
+  api_base: string | null;
+  api_key_env: string | null;
   max_tokens: number;
-  cost_per_1k_input: number;
-  cost_per_1k_output: number;
-  routing_strategy: RoutingStrategy;
-  fallback_models: string[];
-  quota_daily: number;
-  enabled: boolean;
+  temperature: number;
+  cost_per_1k_input: string; // Decimal as string
+  cost_per_1k_output: string; // Decimal as string
+  is_active: boolean;
+  priority: number;
   created_at: string;
+  updated_at: string;
 }
 
-export interface Message {
-  role: "system" | "user" | "assistant" | "tool";
+export interface ChatMessage {
+  role: string;
   content: string;
 }
 
 export interface ChatRequest {
-  messages: Message[];
+  messages: ChatMessage[];
   temperature?: number;
   max_tokens?: number;
-  stream?: boolean;
+  strategy?: RoutingStrategy;
 }
 
 export interface ChatResponse {
-  id: string;
   content: string;
   model: string;
-  usage: Record<string, number>;
-  latency_ms: number;
+  alias: string;
+  usage: Record<string, unknown>;
+  cost: string; // Decimal as string
+  fallback_used: boolean;
 }
 
 // ---------- Analytics ----------
 
-export interface ConversationOut {
-  id: number;
-  session_id: string;
-  user_id: number;
-  agent_id: number | null;
-  model_alias: string;
-  message_count: number;
-  input_tokens: number;
-  output_tokens: number;
-  cost_usd: number;
-  latency_ms: number;
-  quality_score: number | null;
-  user_rating: number | null;
+export interface MessageOut {
+  id: UUID;
+  conversation_id: UUID;
+  role: string;
+  content: string;
+  tokens_in: number;
+  tokens_out: number;
+  latency_ms: number | null;
+  model_alias: string | null;
   created_at: string;
 }
 
-export interface DailyStat {
-  date: string;
-  conversations: number;
-  tokens: number;
-  cost_usd: number;
+export interface ConversationOut {
+  id: UUID;
+  user_id: UUID | null;
+  agent_id: UUID | null;
+  model_alias: string | null;
+  title: string | null;
+  total_tokens: number;
+  total_cost: string; // Decimal as string
+  created_at: string;
+  updated_at: string;
+  messages: MessageOut[];
 }
 
 export interface DashboardMetrics {
   total_conversations: number;
+  total_messages: number;
   total_tokens: number;
-  total_cost_usd: number;
-  avg_latency_ms?: number;
-  avg_quality_score?: number;
-  model_distribution?: Record<string, number>;
-  daily_stats?: DailyStat[];
+  total_cost: string; // Decimal as string
+  avg_messages_per_conversation: number;
+  avg_latency_ms: number;
+  active_models: Record<string, unknown>[];
+  conversations_last_7d: Record<string, unknown>[];
 }
 
 // ---------- Evals ----------
 
-export interface EvalRule {
-  type: "exact_match" | "contains" | "json_schema" | "regex";
-  target: string;
-  expected: unknown;
-  case_sensitive?: boolean;
+export type JudgeType = "exact" | "contains" | "llm" | "semantic";
+
+export type EvalStatus =
+  | "pending"
+  | "running"
+  | "passed"
+  | "failed"
+  | "error";
+
+export interface EvalCaseInput {
+  name?: string;
+  input: string;
+  expected?: string;
+  metadata?: Record<string, unknown>;
 }
 
-export interface EvalJudge {
-  criteria: string;
-  model_alias?: string;
-  scale?: number;
-  threshold?: number;
+export interface EvalRuleInput {
+  name: string;
+  judge_type?: JudgeType;
+  expected?: string;
+  config?: Record<string, unknown>;
 }
 
 export interface EvalRunCreate {
-  prompt_version_id: number;
-  model_alias: string;
-  cases: string[];
-  rules?: EvalRule[];
-  judges?: EvalJudge[];
+  name: string;
+  description?: string;
+  rules?: EvalRuleInput[];
+  cases: EvalCaseInput[];
+  judge_type?: JudgeType;
+}
+
+export interface CaseResult {
+  case_name: string | null;
+  input: string;
+  expected: string | null;
+  actual: string | null;
+  passed: boolean;
+  score: number;
+  reason: string | null;
 }
 
 export interface EvalRunOut {
-  id: string;
-  prompt_version_id: number;
-  model_alias: string;
-  status: "pending" | "running" | "done" | "failed";
-  pass_rate: number;
-  avg_score: number;
-  results: Record<string, unknown>[];
+  id: UUID;
+  name: string;
+  description: string | null;
+  rules: Record<string, unknown>[];
+  cases: Record<string, unknown>[];
+  judge_type: string;
+  status: EvalStatus;
+  results: Record<string, unknown>[] | null;
+  pass_count: number;
+  fail_count: number;
+  score: number | null;
+  started_at: string | null;
+  finished_at: string | null;
   created_at: string;
+  updated_at: string;
 }

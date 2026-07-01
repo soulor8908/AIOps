@@ -1,21 +1,29 @@
 import { api } from "@/shared/api/client";
+import { buildQuery } from "@/shared/utils";
 import type {
   ModelConfigOut,
   ModelConfigCreate,
+  ModelConfigUpdate,
   ChatRequest,
   ChatResponse,
-  ListResponse,
 } from "@/shared/api/types";
 
-export function fetchModels() {
-  return api.get<ListResponse<ModelConfigOut>>("/models");
+// 列表端点返回裸数组（response_model=list[<Out>]），无 {items,total} 包装。
+export function fetchModels(activeOnly = false, limit = 50, offset = 0) {
+  return api.get<ModelConfigOut[]>(
+    `/models${buildQuery({ active_only: activeOnly, limit, offset })}`,
+  );
 }
 
 export function createModel(data: ModelConfigCreate) {
   return api.post<ModelConfigOut>("/models", data);
 }
 
-export function updateModel(modelAlias: string, data: Partial<ModelConfigCreate>) {
+export function getModel(alias: string) {
+  return api.get<ModelConfigOut>(`/models/${alias}`);
+}
+
+export function updateModel(modelAlias: string, data: ModelConfigUpdate) {
   return api.put<ModelConfigOut>(`/models/${modelAlias}`, data);
 }
 

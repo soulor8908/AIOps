@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { useKnowledgeStore } from "../store";
-import { Button, Input, Badge } from "@/shared/ui";
+import { Button, Input } from "@/shared/ui";
 import { Card, CardHeader, CardTitle, CardContent } from "@/shared/ui";
-import { formatDate, formatNumber } from "@/shared/utils";
+import { formatDate } from "@/shared/utils";
 import type { KnowledgeBaseCreate } from "@/shared/api/types";
 
 const store = useKnowledgeStore();
@@ -91,7 +91,6 @@ onMounted(() => store.fetchList());
         <CardHeader>
           <div class="flex items-center justify-between">
             <CardTitle>{{ kb.name }}</CardTitle>
-            <Badge variant="secondary">{{ formatNumber(kb.doc_count) }} docs</Badge>
           </div>
         </CardHeader>
         <CardContent>

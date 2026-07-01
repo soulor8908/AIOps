@@ -13,8 +13,7 @@ export const useEvalStore = defineStore("evals", () => {
     loading.value = true;
     error.value = null;
     try {
-      const res = await api.fetchEvals();
-      runs.value = res.items;
+      runs.value = await api.fetchEvals();
     } catch (e) {
       error.value = e instanceof Error ? e.message : "Failed to load evals";
     } finally {

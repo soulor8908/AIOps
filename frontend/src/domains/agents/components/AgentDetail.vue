@@ -12,13 +12,11 @@ const result = ref<string>("");
 async function onExecute() {
   if (!store.selected) return;
   try {
-    const res = await store.execute(store.selected.id, {
-      message: inputText.value,
-    });
+    const res = await store.execute(store.selected.id, inputText.value);
     result.value =
-      typeof res.output === "string"
-        ? res.output
-        : JSON.stringify(res.output, null, 2);
+      typeof res.final_answer === "string"
+        ? res.final_answer
+        : JSON.stringify(res.final_answer, null, 2);
   } catch {
     result.value = "Execution failed. See error.";
   }
@@ -49,7 +47,7 @@ async function onExecute() {
         <div v-if="store.selected.tools.length" class="mt-3">
           <div class="mb-1 text-xs font-medium text-muted-foreground">Tools</div>
           <div class="flex flex-wrap gap-1">
-            <Badge v-for="t in store.selected.tools" :key="t" variant="outline">{{ t }}</Badge>
+            <Badge v-for="(t, idx) in store.selected.tools" :key="String(t.name ?? idx)" variant="outline">{{ t.name ?? t }}</Badge>
           </div>
         </div>
         <div class="mt-3 text-xs text-muted-foreground">
@@ -73,8 +71,8 @@ async function onExecute() {
           </Button>
           <div v-if="store.lastResult" class="space-y-2">
             <div class="flex gap-4 text-xs text-muted-foreground">
-              <span>Status: {{ store.lastResult.status }}</span>
-              <span>Latency: {{ formatNumber(store.lastResult.latency_ms) }}ms</span>
+              <span>Status: {{ store.lastResult.success ? "success" : "failed" }}</span>
+              <span>Tokens: {{ formatNumber(store.lastResult.total_tokens) }}</span>
             </div>
             <pre class="max-h-60 overflow-auto rounded-md bg-muted p-3 text-sm whitespace-pre-wrap">{{ result }}</pre>
           </div>

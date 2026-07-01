@@ -9,8 +9,15 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 默认占位密钥：仅允许在开发/测试环境使用，生产环境必须通过环境变量显式覆盖。
+_INSECURE_DEFAULT_SECRET = "change-me"
+# security.spec.md§2.3：JWT_SECRET 最小长度 32 字节。
+_MIN_SECRET_BYTES = 32
+# 生产环境标识：以下 environment 值触发 fail-fast 校验。
+_PROD_ENVS = {"production", "prod", "staging"}
 
 
 def _default_cors_origins() -> list[str]:
@@ -29,10 +36,15 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        # 允许通过字段名（而非仅 alias）作为 init kwarg 传入，
+        # 例如 Settings(environment="production")。否则 kwargs 会被当成 extra
+        # 字段并因 extra="ignore" 被静默丢弃，导致 validator 拿不到 production。
+        populate_by_name=True,
     )
 
     # 基础
     app_version: str = Field(default="0.1.0-alpha", alias="APP_VERSION")
+    environment: str = Field(default="development", alias="ENVIRONMENT")
     debug: bool = Field(default=True, alias="DEBUG")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
@@ -45,8 +57,8 @@ class Settings(BaseSettings):
 
     # 安全 — JWT
     # `JWT_SECRET` 为真源（`security.spec.md`§2.3），`SECRET_KEY` 作为兼容别名。
-    jwt_secret: str = Field(default="change-me", alias="JWT_SECRET")
-    secret_key: str = Field(default="change-me", alias="SECRET_KEY")
+    jwt_secret: str = Field(default=_INSECURE_DEFAULT_SECRET, alias="JWT_SECRET")
+    secret_key: str = Field(default=_INSECURE_DEFAULT_SECRET, alias="SECRET_KEY")
     jwt_expire_hours: int = Field(default=24, alias="JWT_EXPIRE_HOURS")
     # 兼容旧字段：若显式设置则覆盖 hours 计算；默认 None 表示由 hours 派生。
     access_token_expire_minutes: int | None = Field(
@@ -81,7 +93,35 @@ class Settings(BaseSettings):
     def effective_secret_key(self) -> str:
         """返回实际使用的 JWT 签名密钥（JWT_SECRET 优先于 SECRET_KEY）。"""
         # 若 JWT_SECRET 被显式覆盖（非默认值）则用它，否则回退到 SECRET_KEY
-        return self.jwt_secret if self.jwt_secret != "change-me" else self.secret_key
+        return (
+            self.jwt_secret
+            if self.jwt_secret != _INSECURE_DEFAULT_SECRET
+            else self.secret_key
+        )
+
+    @model_validator(mode="after")
+    def _validate_secret_key(self) -> Settings:
+        """生产环境 fail-fast：拒绝默认占位密钥与过短密钥（security.spec.md§2.3/§9）。
+
+        - 开发/测试环境允许使用占位符 ``change-me`` 以降低本地启动门槛。
+        - 生产/staging 环境必须通过环境变量（或 K8s Secret）显式注入
+          长度 ≥ 32 字节的强密钥，否则启动直接报错，杜绝弱密钥上生产。
+        """
+        if self.environment.lower() not in _PROD_ENVS:
+            return self
+        secret = self.effective_secret_key
+        if secret == _INSECURE_DEFAULT_SECRET:
+            raise ValueError(
+                "JWT_SECRET 必须在生产环境通过环境变量显式设置，"
+                "禁止使用默认占位值 'change-me'（security.spec.md§2.3/§9）"
+            )
+        if len(secret.encode("utf-8")) < _MIN_SECRET_BYTES:
+            raise ValueError(
+                f"JWT_SECRET 长度不足 {_MIN_SECRET_BYTES} 字节"
+                f"（当前 {len(secret.encode('utf-8'))} 字节），"
+                "security.spec.md§2.3 要求最小 32 字节"
+            )
+        return self
 
 
 @lru_cache

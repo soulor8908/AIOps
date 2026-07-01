@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { ref, computed } from "vue";
 import type { ConversationOut, DashboardMetrics } from "@/shared/api/types";
 import * as api from "./api";
 import type { ConversationQuery } from "./api";
@@ -7,9 +7,11 @@ import type { ConversationQuery } from "./api";
 export const useAnalyticsStore = defineStore("analytics", () => {
   const metrics = ref<DashboardMetrics | null>(null);
   const conversations = ref<ConversationOut[]>([]);
-  const total = ref(0);
   const loading = ref(false);
   const error = ref<string | null>(null);
+
+  // 后端列表返回裸数组，无 total 字段；本地以 conversations.length 近似。
+  const total = computed(() => conversations.value.length);
 
   async function fetchMetrics() {
     loading.value = true;
@@ -27,9 +29,7 @@ export const useAnalyticsStore = defineStore("analytics", () => {
     loading.value = true;
     error.value = null;
     try {
-      const res = await api.fetchConversations(params);
-      conversations.value = res.items;
-      total.value = res.total;
+      conversations.value = await api.fetchConversations(params);
     } catch (e) {
       error.value = e instanceof Error ? e.message : "Failed to load conversations";
     } finally {

@@ -15,6 +15,8 @@ const form = ref<AgentCreate>({
   system_prompt: "",
   model_alias: "",
   tools: [],
+  max_turns: 10,
+  temperature: 0.7,
 });
 const toolsInput = ref("");
 
@@ -22,9 +24,10 @@ async function onCreate() {
   form.value.tools = toolsInput.value
     .split(",")
     .map((s) => s.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .map((name) => ({ name, type: "custom" as const, config: {} }));
   await store.create(form.value);
-  form.value = { name: "", description: "", system_prompt: "", model_alias: "", tools: [] };
+  form.value = { name: "", description: "", system_prompt: "", model_alias: "", tools: [], max_turns: 10, temperature: 0.7 };
   toolsInput.value = "";
   showForm.value = false;
 }
@@ -92,7 +95,7 @@ onMounted(() => store.fetchAgents());
               {{ agent.description || "No description" }}
             </div>
             <div v-if="agent.tools.length" class="mt-1 flex flex-wrap gap-1">
-              <Badge v-for="t in agent.tools" :key="t" variant="outline">{{ t }}</Badge>
+              <Badge v-for="(t, idx) in agent.tools" :key="String(t.name ?? idx)" variant="outline">{{ t.name ?? t }}</Badge>
             </div>
           </div>
           <div class="text-xs text-muted-foreground">{{ formatDate(agent.created_at) }}</div>

@@ -73,7 +73,7 @@ async function onFileChange(e: Event) {
             class="rounded-md border p-3"
           >
             <div class="mb-1 flex items-center justify-between">
-              <Badge variant="outline">doc #{{ r.doc_id }}</Badge>
+              <Badge variant="outline">doc #{{ r.document_id }}</Badge>
               <span class="text-xs text-muted-foreground">
                 score: {{ formatPercent(r.score) }}
               </span>

@@ -9,8 +9,8 @@ const store = useEvalStore();
 const emit = defineEmits<{ created: [] }>();
 
 const form = ref({
-  prompt_version_id: "",
-  model_alias: "",
+  name: "",
+  description: "",
   cases: "",
 });
 
@@ -18,25 +18,25 @@ const submitting = ref(false);
 const error = ref<string | null>(null);
 
 async function onSubmit() {
-  const pvId = Number(form.value.prompt_version_id);
-  if (!form.value.model_alias.trim() || !pvId) {
-    error.value = "Prompt version ID and model alias are required.";
+  if (!form.value.name.trim()) {
+    error.value = "Name is required.";
     return;
   }
   submitting.value = true;
   error.value = null;
   try {
     const payload: EvalRunCreate = {
-      prompt_version_id: pvId,
-      model_alias: form.value.model_alias,
+      name: form.value.name,
+      description: form.value.description || undefined,
       cases: form.value.cases
         .split("\n")
         .map((s) => s.trim())
-        .filter(Boolean),
+        .filter(Boolean)
+        .map((input) => ({ input })),
     };
     await store.create(payload);
     emit("created");
-    form.value = { prompt_version_id: "", model_alias: "", cases: "" };
+    form.value = { name: "", description: "", cases: "" };
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Failed to create eval";
   } finally {
@@ -52,12 +52,12 @@ async function onSubmit() {
       <form class="space-y-3" @submit.prevent="onSubmit">
         <div class="grid grid-cols-2 gap-3">
           <div class="space-y-1">
-            <label class="text-sm font-medium">Prompt Version ID</label>
-            <Input v-model="form.prompt_version_id" type="number" placeholder="1" />
+            <label class="text-sm font-medium">Name</label>
+            <Input v-model="form.name" placeholder="my-eval" />
           </div>
           <div class="space-y-1">
-            <label class="text-sm font-medium">Model Alias</label>
-            <Input v-model="form.model_alias" placeholder="gpt-4o-mini" />
+            <label class="text-sm font-medium">Description</label>
+            <Input v-model="form.description" />
           </div>
         </div>
         <div class="space-y-1">

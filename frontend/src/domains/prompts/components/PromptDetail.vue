@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { watch, ref } from "vue";
+import { watch, ref, computed } from "vue";
 import { usePromptStore } from "../store";
 import { Button, Badge } from "@/shared/ui";
 import { Card, CardHeader, CardTitle, CardContent } from "@/shared/ui";
@@ -8,6 +8,12 @@ import { formatDate } from "@/shared/utils";
 const store = usePromptStore();
 const newContent = ref("");
 const showNewVersion = ref(false);
+
+const currentVersion = computed(() => {
+  const p = store.selected;
+  if (!p || !p.current_version_id) return null;
+  return p.versions.find((v) => v.id === p.current_version_id) ?? null;
+});
 
 watch(
   () => store.selectedId,
@@ -20,7 +26,7 @@ watch(
   },
 );
 
-async function onRollback(versionId: number) {
+async function onRollback(versionId: string) {
   if (store.selectedId === null) return;
   if (!confirm("Rollback to this version?")) return;
   await store.rollback(store.selectedId, versionId);
@@ -29,7 +35,7 @@ async function onRollback(versionId: number) {
 
 async function onCreateVersion() {
   if (store.selectedId === null || !newContent.value.trim()) return;
-  await store.createVersion(store.selectedId, { content: newContent.value });
+  await store.createVersion(store.selectedId, { content: newContent.value, variables: [] });
   newContent.value = "";
   showNewVersion.value = false;
 }
@@ -51,7 +57,7 @@ async function onCreateVersion() {
             </p>
           </div>
           <Badge variant="secondary">
-            v{{ store.selected.current_version?.version_num ?? 0 }}
+            v{{ currentVersion?.version_num ?? 0 }}
           </Badge>
         </div>
       </CardHeader>
@@ -59,7 +65,7 @@ async function onCreateVersion() {
         <div class="mb-2 text-xs font-medium text-muted-foreground">
           Current version content
         </div>
-        <pre class="max-h-72 overflow-auto rounded-md bg-muted p-4 text-sm whitespace-pre-wrap">{{ store.selected.current_version?.content || "(no content)" }}</pre>
+        <pre class="max-h-72 overflow-auto rounded-md bg-muted p-4 text-sm whitespace-pre-wrap">{{ currentVersion?.content || "(no content)" }}</pre>
         <div class="mt-2 text-xs text-muted-foreground">
           Updated {{ formatDate(store.selected.updated_at) }}
         </div>
@@ -100,7 +106,7 @@ async function onCreateVersion() {
             <div>
               <div class="flex items-center gap-2">
                 <span class="text-sm font-medium">v{{ v.version_num }}</span>
-                <Badge v-if="store.selected.current_version?.id === v.id">
+                <Badge v-if="currentVersion?.id === v.id">
                   current
                 </Badge>
               </div>
@@ -109,7 +115,7 @@ async function onCreateVersion() {
               </div>
             </div>
             <Button
-              v-if="store.selected.current_version?.id !== v.id"
+              v-if="currentVersion?.id !== v.id"
               size="sm"
               variant="ghost"
               @click="onRollback(v.id)"

@@ -2,7 +2,7 @@
 import { onMounted, computed } from "vue";
 import { useAnalyticsStore } from "../store";
 import { Card, CardHeader, CardTitle, CardContent } from "@/shared/ui";
-import { formatNumber, formatCost, formatPercent } from "@/shared/utils";
+import { formatNumber, formatCost } from "@/shared/utils";
 
 const store = useAnalyticsStore();
 
@@ -27,28 +27,22 @@ const cards = computed<MetricCard[]>(() => {
     },
     {
       label: "Total Cost",
-      value: m ? formatCost(m.total_cost_usd) : "-",
+      value: m ? formatCost(m.total_cost) : "-",
     },
     {
       label: "Avg Latency",
       value: m && m.avg_latency_ms != null ? `${formatNumber(m.avg_latency_ms)} ms` : "-",
     },
     {
-      label: "Avg Quality",
-      value:
-        m && m.avg_quality_score != null
-          ? formatPercent(m.avg_quality_score)
-          : "-",
+      label: "Avg Msgs/Conv",
+      value: m ? formatNumber(Number(m.avg_messages_per_conversation), 1) : "-",
     },
   ];
 });
 
-const modelDist = computed(() => {
-  const dist = store.metrics?.model_distribution ?? {};
-  return Object.entries(dist).map(([model, count]) => ({ model, count }));
-});
+const modelDist = computed(() => store.metrics?.active_models ?? []);
 
-const daily = computed(() => store.metrics?.daily_stats ?? []);
+const daily = computed(() => store.metrics?.conversations_last_7d ?? []);
 </script>
 
 <template>
@@ -78,9 +72,9 @@ const daily = computed(() => store.metrics?.daily_stats ?? []);
             No data.
           </div>
           <div v-else class="space-y-2">
-            <div v-for="d in modelDist" :key="d.model" class="flex items-center justify-between text-sm">
+            <div v-for="(d, idx) in modelDist" :key="String(d.model ?? idx)" class="flex items-center justify-between text-sm">
               <span>{{ d.model }}</span>
-              <span class="font-medium">{{ formatNumber(d.count) }}</span>
+              <span class="font-medium">{{ formatNumber(Number(d.count)) }}</span>
             </div>
           </div>
         </CardContent>
@@ -94,13 +88,13 @@ const daily = computed(() => store.metrics?.daily_stats ?? []);
           </div>
           <div v-else class="max-h-64 space-y-2 overflow-y-auto">
             <div
-              v-for="d in daily"
-              :key="d.date"
+              v-for="(d, idx) in daily"
+              :key="String(d.date ?? idx)"
               class="flex items-center justify-between border-b py-1 text-sm last:border-b-0"
             >
               <span>{{ d.date }}</span>
               <span class="text-muted-foreground">
-                {{ formatNumber(d.conversations) }} conv / {{ formatCost(d.cost_usd) }}
+                {{ formatNumber(Number(d.conversations)) }} conv / {{ formatCost(d.cost_usd == null ? null : String(d.cost_usd)) }}
               </span>
             </div>
           </div>

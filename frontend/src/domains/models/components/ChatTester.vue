@@ -4,14 +4,13 @@ import { useModelStore } from "../store";
 import { Button, Badge } from "@/shared/ui";
 import { Card, CardHeader, CardTitle, CardContent } from "@/shared/ui";
 import { chatCompletion } from "../api";
-import { formatNumber } from "@/shared/utils";
-import type { Message } from "@/shared/api/types";
+import type { ChatMessage } from "@/shared/api/types";
 
 const store = useModelStore();
 const userInput = ref("");
 const response = ref("");
 const usage = ref<string>("");
-const latency = ref<number | null>(null);
+const cost = ref<string>("");
 const sending = ref(false);
 
 async function onSend() {
@@ -19,11 +18,11 @@ async function onSend() {
   sending.value = true;
   response.value = "";
   try {
-    const messages: Message[] = [{ role: "user", content: userInput.value }];
+    const messages: ChatMessage[] = [{ role: "user", content: userInput.value }];
     const res = await chatCompletion(store.selected.alias, { messages });
     response.value = res.content;
     usage.value = JSON.stringify(res.usage);
-    latency.value = res.latency_ms;
+    cost.value = res.cost;
   } catch (e) {
     response.value = e instanceof Error ? e.message : "Request failed";
   } finally {
@@ -47,7 +46,7 @@ async function onSend() {
       </CardHeader>
       <CardContent>
         <div class="mb-3 text-sm text-muted-foreground">
-          {{ store.selected.provider_name }} / {{ store.selected.model_id }}
+          {{ store.selected.provider }} / {{ store.selected.model_name }}
         </div>
         <div class="flex items-center gap-2">
           <input
@@ -61,11 +60,11 @@ async function onSend() {
           </Button>
         </div>
 
-        <div v-if="response || latency !== null" class="mt-4 space-y-2">
+        <div v-if="response || cost !== ''" class="mt-4 space-y-2">
           <div class="text-xs font-medium text-muted-foreground">Response</div>
           <pre class="max-h-60 overflow-auto rounded-md bg-muted p-3 text-sm whitespace-pre-wrap">{{ response || "(empty)" }}</pre>
-          <div v-if="latency !== null" class="flex gap-4 text-xs text-muted-foreground">
-            <span>latency: {{ formatNumber(latency) }}ms</span>
+          <div v-if="cost !== ''" class="flex gap-4 text-xs text-muted-foreground">
+            <span>cost: {{ cost }}</span>
             <span>usage: {{ usage }}</span>
           </div>
         </div>

@@ -48,9 +48,17 @@ CREATE TABLE IF NOT EXISTS prompt_versions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_prompt_versions_prompt_id ON prompt_versions (prompt_id);
-ALTER TABLE prompts
-    ADD CONSTRAINT fk_prompts_current_version
-    FOREIGN KEY (current_version_id) REFERENCES prompt_versions (id) ON DELETE SET NULL;
+-- 幂等外键：仅在约束不存在时添加，避免重跑 init.sql 报错。
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'fk_prompts_current_version'
+    ) THEN
+        ALTER TABLE prompts
+            ADD CONSTRAINT fk_prompts_current_version
+            FOREIGN KEY (current_version_id) REFERENCES prompt_versions (id) ON DELETE SET NULL;
+    END IF;
+END $$;
 
 -- ========== agents ==========
 CREATE TABLE IF NOT EXISTS agents (
@@ -168,6 +176,7 @@ CREATE TABLE IF NOT EXISTS conversations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations (user_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_agent ON conversations (agent_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_created ON conversations (created_at DESC);
 
 -- ========== messages ==========
@@ -184,6 +193,47 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages (conversation_id, created_at);
+
+-- ========== eval_rules ==========
+-- 评估规则定义（单条断言），与 ORM app.domains.evals.models.EvalRule 对齐
+CREATE TABLE IF NOT EXISTS eval_rules (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name          VARCHAR(128) NOT NULL,
+    description   TEXT,
+    judge_type    VARCHAR(32) NOT NULL DEFAULT 'exact',
+    expected      TEXT,
+    config        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_eval_rules_judge_type ON eval_rules (judge_type);
+
+-- ========== eval_judges ==========
+-- 判官配置（LLM-as-judge 的模型与 prompt），与 ORM EvalJudge 对齐
+CREATE TABLE IF NOT EXISTS eval_judges (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name            VARCHAR(128) NOT NULL,
+    judge_type      VARCHAR(32) NOT NULL,
+    model_alias     VARCHAR(64) NOT NULL DEFAULT 'default',
+    prompt_template TEXT NOT NULL,
+    config          JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_eval_judges_judge_type ON eval_judges (judge_type);
+
+-- ========== eval_cases ==========
+-- 评估用例：input + expected + 可选 metadata，与 ORM EvalCase 对齐
+CREATE TABLE IF NOT EXISTS eval_cases (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        VARCHAR(128),
+    input       TEXT NOT NULL,
+    expected    TEXT,
+    metadata    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_eval_cases_name ON eval_cases (name);
 
 -- ========== eval_runs ==========
 -- UUID 主键，支持分布式评估任务追踪
@@ -222,7 +272,8 @@ BEGIN
     FOR t IN SELECT unnest(ARRAY[
         'users','prompts','prompt_versions','agents','workflows',
         'knowledge_bases','documents','chunks','model_configs',
-        'conversations','messages','eval_runs'
+        'conversations','messages','eval_rules','eval_judges',
+        'eval_cases','eval_runs'
     ])
     LOOP
         EXECUTE format(

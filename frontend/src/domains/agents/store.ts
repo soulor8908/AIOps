@@ -5,6 +5,7 @@ import type {
   AgentCreate,
   WorkflowOut,
   ExecutionResult,
+  UUID,
 } from "@/shared/api/types";
 import * as api from "./api";
 
@@ -13,7 +14,7 @@ export const useAgentStore = defineStore("agents", () => {
   const workflows = ref<WorkflowOut[]>([]);
   const loading = ref(false);
   const error = ref<string | null>(null);
-  const selectedId = ref<number | null>(null);
+  const selectedId = ref<UUID | null>(null);
   const lastResult = ref<ExecutionResult | null>(null);
   const executing = ref(false);
 
@@ -25,8 +26,7 @@ export const useAgentStore = defineStore("agents", () => {
     loading.value = true;
     error.value = null;
     try {
-      const res = await api.fetchAgents();
-      agents.value = res.items;
+      agents.value = await api.fetchAgents();
     } catch (e) {
       error.value = e instanceof Error ? e.message : "Failed to load agents";
     } finally {
@@ -35,8 +35,7 @@ export const useAgentStore = defineStore("agents", () => {
   }
 
   async function fetchWorkflows() {
-    const res = await api.fetchWorkflows();
-    workflows.value = res.items;
+    workflows.value = await api.fetchWorkflows();
   }
 
   async function create(data: AgentCreate) {
@@ -45,7 +44,8 @@ export const useAgentStore = defineStore("agents", () => {
     return agent;
   }
 
-  async function execute(agentId: number, input: Record<string, unknown>) {
+  // 后端 ExecuteRequest.input 为 str（min 1）。
+  async function execute(agentId: UUID, input: string) {
     executing.value = true;
     error.value = null;
     try {
@@ -59,7 +59,7 @@ export const useAgentStore = defineStore("agents", () => {
     }
   }
 
-  function select(id: number | null) {
+  function select(id: UUID | null) {
     selectedId.value = id;
   }
 

@@ -13,7 +13,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.database import Base
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import LLMError, NotFoundError, ValidationError
 from app.core.llm_client import LLMResponse
 from app.domains.evals import service
 from app.domains.evals.judge import (
@@ -185,3 +185,65 @@ async def test_run_eval_contains_judge(session: AsyncSession) -> None:
 
     result = await service.run_eval(session, run.id, predict_fn=predict)
     assert result.pass_count == 1
+
+
+@pytest.mark.asyncio
+async def test_run_eval_error_status_survives_rollback(session: AsyncSession) -> None:
+    """predict_fn 抛错时，ERROR 状态通过独立事务落库，请求 session rollback 后仍可见。
+
+    回归 run_eval 历史 bug：之前在请求 session 上 flush ERROR 后 raise，
+    被 get_session 的 rollback 吞掉，导致 ERROR 状态丢失。
+    """
+    run = await service.create_eval(
+        session,
+        EvalRunCreate(
+            name="error-case",
+            cases=[EvalCaseInput(input="q1", expected="hello")],
+            judge_type=JudgeType.EXACT,
+        ),
+    )
+
+    async def predict(case: dict[str, Any]) -> str:
+        raise RuntimeError("predict blew up")
+
+    # run_eval 应抛出 RuntimeError（透传原始异常）
+    with pytest.raises(RuntimeError, match="predict blew up"):
+        await service.run_eval(session, run.id, predict_fn=predict)
+
+    # 模拟 get_session 在异常后 rollback 请求 session
+    await session.rollback()
+
+    # 用独立 session 重新读取，验证 ERROR 状态已持久化（未被 rollback 吞掉）
+    # 注意：AsyncSession.get_bind() 返回同步 Engine，AsyncSession.bind 返回 AsyncEngine。
+    engine = session.bind
+    assert engine is not None
+    async with AsyncSession(bind=engine, expire_on_commit=False) as fresh:
+        persisted = await service.get_eval(fresh, run.id)
+        assert persisted.status == EvalStatus.ERROR.value
+        assert persisted.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_run_eval_unknown_judge_type_raises(session: AsyncSession) -> None:
+    """未知判官类型应抛 LLMError，且状态落库为 ERROR。"""
+    run = await service.create_eval(
+        session,
+        EvalRunCreate(
+            name="bad-judge",
+            cases=[EvalCaseInput(input="q", expected="a")],
+            judge_type=JudgeType.EXACT,
+        ),
+    )
+    # 直接篡改 run.judge_type 绕过枚举校验
+    run.judge_type = "nonexistent"
+    await session.flush()
+
+    with pytest.raises(LLMError):
+        await service.run_eval(session, run.id)
+
+    await session.rollback()
+    engine = session.bind
+    assert engine is not None
+    async with AsyncSession(bind=engine, expire_on_commit=False) as fresh:
+        persisted = await service.get_eval(fresh, run.id)
+        assert persisted.status == EvalStatus.ERROR.value
