@@ -25,7 +25,8 @@ onMounted(() => store.fetchConversations());
       <Input v-model="startDate" type="date" class="w-44" />
       <Input v-model="endDate" type="date" class="w-44" />
       <Button @click="onFilter">Filter</Button>
-      <Button variant="outline" @click="store.fetchConversations()">Refresh</Button>
+      <!-- P3：Refresh 复用当前日期筛选，避免一点刷新就丢失已选时间范围 -->
+      <Button variant="outline" @click="onFilter">Refresh</Button>
       <span class="text-sm text-muted-foreground">{{ formatNumber(store.total) }} total</span>
     </div>
 

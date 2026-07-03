@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import uuid
 from typing import Any
 
@@ -10,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.exceptions import LLMError, NotFoundError, ValidationError
+from app.core.exceptions import NotFoundError, ValidationError
 from app.core.llm_client import LLMClient, LLMConfig, Message
 from app.domains.knowledge.chunker import chunk_text
 from app.domains.knowledge.embedder import embed_batch
@@ -174,8 +173,6 @@ async def rag_query(
     ]
     try:
         resp = await client.chat(messages)
-    except json.JSONDecodeError as exc:
-        raise LLMError(f"LLM 返回非法 JSON: {exc}") from exc
     finally:
         await client.close()
     return {

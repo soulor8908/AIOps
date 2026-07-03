@@ -11,6 +11,7 @@ PyJWT 2.x ``encode`` 直接返回 str，``decode`` 返回 dict，API 简洁。
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -30,20 +31,43 @@ def _encode(payload: dict[str, object]) -> str:
     return pyjwt.encode(payload, settings.effective_secret_key, algorithm=ALGORITHM)
 
 
+def _base_claims(subject: str, token_type: str, expires_seconds: int) -> dict[str, object]:
+    """构造基础 JWT claims：sub / iat / exp / type / jti。
+
+    - ``iat``：签发时间（Unix 秒），供审计与 token 生命周期追踪。
+    - ``jti``：唯一 ID，为未来 token 吊销/轮换黑名单提供锚点（RFC 7519 §4.1.7）。
+    """
+    now = datetime.now(UTC)
+    expire = now + timedelta(seconds=expires_seconds)
+    return {
+        "sub": subject,
+        "iat": int(now.timestamp()),
+        "exp": expire,
+        "type": token_type,
+        "jti": str(uuid.uuid4()),
+    }
+
+
 def create_access_token(subject: str, expires_seconds: int | None = None) -> str:
     """签发 access token。subject 通常是 user_id 字符串。"""
-    expire = datetime.now(UTC) + timedelta(
-        seconds=expires_seconds or settings.access_token_expire_seconds
+    return _encode(
+        _base_claims(
+            subject,
+            TOKEN_TYPE_ACCESS,
+            expires_seconds or settings.access_token_expire_seconds,
+        )
     )
-    return _encode({"sub": subject, "exp": expire, "type": TOKEN_TYPE_ACCESS})
 
 
 def create_refresh_token(subject: str, expires_seconds: int | None = None) -> str:
     """签发 refresh token（默认 7d，可配置 ``REFRESH_TOKEN_EXPIRE_DAYS``）。"""
-    expire = datetime.now(UTC) + timedelta(
-        seconds=expires_seconds or settings.refresh_token_expire_seconds
+    return _encode(
+        _base_claims(
+            subject,
+            TOKEN_TYPE_REFRESH,
+            expires_seconds or settings.refresh_token_expire_seconds,
+        )
     )
-    return _encode({"sub": subject, "exp": expire, "type": TOKEN_TYPE_REFRESH})
 
 
 def decode_token(token: str) -> dict[str, object]:

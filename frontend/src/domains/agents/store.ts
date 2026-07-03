@@ -3,7 +3,6 @@ import { ref, computed } from "vue";
 import type {
   AgentOut,
   AgentCreate,
-  WorkflowOut,
   ExecutionResult,
   UUID,
 } from "@/shared/api/types";
@@ -11,7 +10,6 @@ import * as api from "./api";
 
 export const useAgentStore = defineStore("agents", () => {
   const agents = ref<AgentOut[]>([]);
-  const workflows = ref<WorkflowOut[]>([]);
   const loading = ref(false);
   const error = ref<string | null>(null);
   const selectedId = ref<UUID | null>(null);
@@ -31,15 +29,6 @@ export const useAgentStore = defineStore("agents", () => {
       error.value = e instanceof Error ? e.message : "Failed to load agents";
     } finally {
       loading.value = false;
-    }
-  }
-
-  async function fetchWorkflows() {
-    error.value = null;
-    try {
-      workflows.value = await api.fetchWorkflows();
-    } catch (e) {
-      error.value = e instanceof Error ? e.message : "Failed to load workflows";
     }
   }
 
@@ -76,7 +65,6 @@ export const useAgentStore = defineStore("agents", () => {
 
   return {
     agents,
-    workflows,
     loading,
     error,
     selectedId,
@@ -84,7 +72,6 @@ export const useAgentStore = defineStore("agents", () => {
     lastResult,
     executing,
     fetchAgents,
-    fetchWorkflows,
     create,
     execute,
     select,

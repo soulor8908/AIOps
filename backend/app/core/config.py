@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     # 基础
     app_version: str = Field(default="0.1.0", alias="APP_VERSION")
     environment: str = Field(default="development", alias="ENVIRONMENT")
-    debug: bool = Field(default=True, alias="DEBUG")
+    debug: bool = Field(default=False, alias="DEBUG")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     # 数据库 / 缓存
@@ -120,6 +120,13 @@ class Settings(BaseSettings):
                 f"JWT_SECRET 长度不足 {_MIN_SECRET_BYTES} 字节"
                 f"（当前 {len(secret.encode('utf-8'))} 字节），"
                 "security.spec.md§2.3 要求最小 32 字节"
+            )
+        # 生产环境禁止 debug=True：Starlette ServerErrorMiddleware 在 debug=True 时
+        # 返回明文 traceback，违反 errors.spec.md§5.4（禁止泄漏 str(exc)）。
+        if self.debug:
+            raise ValueError(
+                "生产环境必须 DEBUG=false（errors.spec.md§5.4）："
+                "debug=True 会导致异常时返回明文 traceback 泄漏内部信息"
             )
         return self
 

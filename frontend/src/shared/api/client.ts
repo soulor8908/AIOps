@@ -22,6 +22,10 @@ function getToken(): string {
   return localStorage.getItem("token") || "";
 }
 
+function getRefreshToken(): string {
+  return localStorage.getItem("refresh_token") || "";
+}
+
 export function setToken(token: string): void {
   if (token) {
     localStorage.setItem("token", token);
@@ -30,16 +34,62 @@ export function setToken(token: string): void {
   }
 }
 
+function setRefreshToken(token: string): void {
+  if (token) {
+    localStorage.setItem("refresh_token", token);
+  } else {
+    localStorage.removeItem("refresh_token");
+  }
+}
+
+// P1：refresh token 单飞锁。并发请求同时 401 时，仅第一个发起 /auth/refresh，
+// 其余请求 await 同一个 Promise，避免 N 个 401 各自刷新导致旧 token 被多次轮换。
+let _refreshPromise: Promise<string | null> | null = null;
+
 /**
- * 统一响应处理：401 清 token、非 2xx 抛 ApiError、204 返回 undefined。
+ * 用 refresh token 换新 access token（单飞）。
+ *
+ * 成功返回新 access token 并写入 localStorage；失败返回 null（调用方应 logout）。
+ * 并发调用复用同一个 Promise，避免重复刷新。
+ */
+async function refreshAccessToken(): Promise<string | null> {
+  if (_refreshPromise) return _refreshPromise;
+  const refreshToken = getRefreshToken();
+  if (!refreshToken) return null;
+  _refreshPromise = (async () => {
+    try {
+      const res = await fetch(`${API_BASE}/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+      if (!res.ok) return null;
+      const data = (await res.json()) as { access_token: string; refresh_token: string };
+      setToken(data.access_token);
+      setRefreshToken(data.refresh_token);
+      return data.access_token;
+    } catch {
+      return null;
+    } finally {
+      _refreshPromise = null;
+    }
+  })();
+  return _refreshPromise;
+}
+
+/**
+ * 统一响应处理：非 2xx 抛 ApiError、204 返回 undefined。
  *
  * 抽离自 request/upload 共享，确保两条路径错误处理一致——之前 upload 不清 401 token、
  * 不处理网络/超时错误，导致文件上传失败时 token 残留 + 错误信息不一致。
+ *
+ * P1：成功分支也兜底 JSON 解析——反代返回 200+HTML 错误页或空体时 res.json()
+ * 抛 SyntaxError，调用方 ``e instanceof ApiError`` 判断失效且丢失 status。
+ *
+ * 注意：401 不在此清 token，由 request 层负责尝试 refresh 后再决定是否清除，
+ * 避免可刷新的 401 误清 token 导致用户被登出。
  */
 async function handleResponse<T>(res: Response): Promise<T> {
-  // 401 表示 token 失效：清除本地 token，触发上层（路由守卫/用户 store）回到未认证态。
-  if (res.status === 401) setToken("");
-
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: res.statusText }));
     throw new ApiError(
@@ -49,7 +99,53 @@ async function handleResponse<T>(res: Response): Promise<T> {
     );
   }
   if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
+  // P1：成功分支兜底 JSON 解析失败（200+HTML/空体），转为 ApiError 而非裸 SyntaxError
+  try {
+    return (await res.json()) as T;
+  } catch (err) {
+    throw new ApiError(
+      "响应不是合法 JSON（可能为反代错误页或空响应）",
+      res.status,
+      { parseError: String(err) },
+    );
+  }
+}
+
+/**
+ * P1：401 单次重试。access token 过期时用 refresh token 换新 token 并重试原请求。
+ * refresh 失败（无 refresh token / refresh 端点拒绝）则清 token 并抛原 401。
+ *
+ * 仅重试一次，避免 refresh 端点本身 401 引发无限循环。
+ */
+async function requestWithRefreshRetry<T>(
+  path: string,
+  options: RequestInit,
+): Promise<T> {
+  const url = `${API_BASE}${path}`;
+  const doFetch = (init: RequestInit) =>
+    fetchWithTimeout(url, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${getToken()}`,
+        ...init.headers,
+      },
+    });
+  try {
+    return await handleResponse<T>(await doFetch(options));
+  } catch (err) {
+    if (!(err instanceof ApiError) || err.status !== 401) throw err;
+    // 401 → 尝试 refresh
+    const newToken = await refreshAccessToken();
+    if (!newToken) {
+      // refresh 失败 → 清 token，触发路由守卫跳登录
+      setToken("");
+      setRefreshToken("");
+      throw err;
+    }
+    // refresh 成功 → 用新 token 重试一次
+    return handleResponse<T>(await doFetch(options));
+  }
 }
 
 /**
@@ -81,16 +177,7 @@ async function fetchWithTimeout(
 }
 
 export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const url = `${API_BASE}${path}`;
-  const res = await fetchWithTimeout(url, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${getToken()}`,
-      ...options.headers,
-    },
-  });
-  return handleResponse<T>(res);
+  return requestWithRefreshRetry<T>(path, options);
 }
 
 export const api = {
@@ -120,10 +207,23 @@ export async function upload<T>(path: string, file: File, title: string): Promis
   const form = new FormData();
   form.append("title", title);
   form.append("file", file);
-  const res = await fetchWithTimeout(`${API_BASE}${path}`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${getToken()}` },
-    body: form,
-  });
-  return handleResponse<T>(res);
+  const doFetch = () =>
+    fetchWithTimeout(`${API_BASE}${path}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${getToken()}` },
+      body: form,
+    });
+  try {
+    return await handleResponse<T>(await doFetch());
+  } catch (err) {
+    if (!(err instanceof ApiError) || err.status !== 401) throw err;
+    // P1：401 尝试 refresh 后重试（与 request 一致）
+    const newToken = await refreshAccessToken();
+    if (!newToken) {
+      setToken("");
+      setRefreshToken("");
+      throw err;
+    }
+    return handleResponse<T>(await doFetch());
+  }
 }

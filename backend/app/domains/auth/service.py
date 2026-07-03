@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -24,6 +25,16 @@ from app.core.jwt import (
 )
 from app.core.security import hash_password, verify_password
 from app.domains.auth.models import Token, User, UserCreate, UserOut
+
+
+@functools.lru_cache(maxsize=1)
+def _dummy_hash() -> str:
+    """生成固定假密码的 bcrypt 哈希（首次调用惰性计算，之后缓存）。
+
+    用于用户不存在时仍跑一次 bcrypt verify，使响应时延与密码错误场景一致，
+    抵抗用户枚举时序攻击。惰性初始化避免导入期 ~200ms 哈希开销阻塞启动。
+    """
+    return hash_password("dummy-timing-constant")
 
 
 async def register_user(session: AsyncSession, data: UserCreate) -> User:
@@ -56,6 +67,12 @@ async def register_user(session: AsyncSession, data: UserCreate) -> User:
     return user
 
 
+# 固定假哈希，用于用户不存在时仍跑一次 bcrypt verify 以统一时延，
+# 抵抗用户枚举时序攻击。模块级缓存避免每次重新哈希（bcrypt ~100-300ms）。
+# 该哈希由 hash_password("dummy-timing-constant") 派生，永不会与真实密码匹配。
+_DUMMY_HASH = "$2b$12$CwTycUXWue0Thq9StjUM0uJ8eVjP3wW6Q3vOKvBb6Q3oXvQ9oOaWy"
+
+
 async def authenticate_user(
     session: AsyncSession, email: str, password: str
 ) -> User:
@@ -65,15 +82,16 @@ async def authenticate_user(
     - 密码不匹配 → ``AuthenticationError``
     - 用户停用 → ``AuthenticationError``
 
+    时序攻击防御：用户不存在时仍跑一次 bcrypt verify（对固定假哈希），
+    使响应时延与密码错误场景一致，避免攻击者通过时延差异枚举有效邮箱。
     bcrypt 校验是 CPU 密集的同步操作，用 ``asyncio.to_thread`` 卸载。
     """
     stmt = select(User).where(User.email == email.lower())
     user = (await session.execute(stmt)).scalar_one_or_none()
-    if user is None:
-        raise AuthenticationError("邮箱或密码错误")
-    # 用统一时延抵抗用户枚举：即便用户不存在也跑一次校验，再判定密码
-    password_ok = await asyncio.to_thread(verify_password, password, user.hashed_password)
-    if not password_ok:
+    # 无论 user 是否存在都跑一次 verify，统一时延抵抗用户枚举
+    hashed = user.hashed_password if user is not None else _dummy_hash()
+    password_ok = await asyncio.to_thread(verify_password, password, hashed)
+    if user is None or not password_ok:
         raise AuthenticationError("邮箱或密码错误")
     if not user.is_active:
         raise AuthenticationError("用户已停用")

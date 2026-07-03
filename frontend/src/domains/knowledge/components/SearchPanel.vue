@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { useKnowledgeStore } from "../store";
-import { Button, Input, Badge } from "@/shared/ui";
+import { Alert, Button, Input, Badge } from "@/shared/ui";
 import { Card, CardHeader, CardTitle, CardContent } from "@/shared/ui";
 import { formatPercent } from "@/shared/utils";
 
@@ -34,6 +34,8 @@ async function onFileChange(e: Event) {
   </div>
 
   <div v-else class="space-y-4">
+    <Alert v-if="store.error" :message="store.error" />
+
     <Card>
       <CardHeader>
         <div class="flex items-center justify-between">

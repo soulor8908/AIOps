@@ -46,7 +46,7 @@ async def _seed(
         conv.created_at = created_at
     session.add(conv)
     await session.flush()
-    session.add_all([
+    msgs = [
         Message(conversation_id=conv.id, role="user", content="hi", tokens_in=5),
         Message(
             conversation_id=conv.id,
@@ -55,7 +55,13 @@ async def _seed(
             tokens_out=10,
             latency_ms=200,
         ),
-    ])
+    ]
+    # 窗口过滤测试需让 messages 的 created_at 与 conversation 对齐，
+    # 否则 server_default=now() 会让旧对话的消息仍落在今天。
+    if created_at is not None:
+        for m in msgs:
+            m.created_at = created_at
+    session.add_all(msgs)
     await session.flush()
     return conv
 
@@ -128,3 +134,18 @@ async def test_dashboard_empty(session: AsyncSession) -> None:
     metrics = await service.get_dashboard_metrics(session)
     assert metrics.total_conversations == 0
     assert metrics.avg_latency_ms == 0.0
+
+
+@pytest.mark.asyncio
+async def test_dashboard_respects_days_window(session: AsyncSession) -> None:
+    """P1：所有聚合按 days 窗口过滤，窗口外的数据不计入 total_*。"""
+    now = datetime.now(UTC)
+    await _seed(session, created_at=now)  # 今天
+    await _seed(session, model_alias="old", created_at=now - timedelta(days=10))  # 10 天前
+
+    metrics = await service.get_dashboard_metrics(session, days=7)
+    # 仅今天的 1 条对话在窗口内（10 天前被排除）
+    assert metrics.total_conversations == 1
+    assert metrics.total_messages == 2
+    assert len(metrics.active_models) == 1
+    assert metrics.active_models[0]["model"] == "gpt-4o-mini"

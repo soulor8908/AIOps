@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from typing import Any
 
 import jwt as pyjwt
@@ -94,9 +95,12 @@ async def _check_sliding_window(
     """
     now = time.time()
     window_start = now - window
+    # member 用 ``now:uuid`` 保证唯一，避免高并发/时钟回退时时间戳碰撞导致
+    # ZSET 覆盖（zadd 对已存在 member 仅更新 score），从而计数少计、限流被绕过。
+    member = f"{now}:{uuid.uuid4()}"
     pipe = redis_client.pipeline()
     pipe.zremrangebyscore(key, 0, window_start)  # 清除窗口外过期条目
-    pipe.zadd(key, {str(now): now})  # 添加当前请求时间戳
+    pipe.zadd(key, {member: now})  # 添加当前请求时间戳（score 仍为 now）
     pipe.zcard(key)  # 计数窗口内条目
     pipe.expire(key, window)  # 设置 TTL 防止 key 泄漏
     results = await pipe.execute()
