@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import { useAgentStore } from "../store";
 import { Button, Badge } from "@/shared/ui";
 import { Card, CardHeader, CardTitle, CardContent } from "@/shared/ui";
@@ -8,6 +8,18 @@ import { formatDate, formatNumber } from "@/shared/utils";
 const store = useAgentStore();
 const inputText = ref("");
 const result = ref<string>("");
+
+// P2：切换 agent 时清空本地执行结果与上次执行状态，避免显示上一个 agent 的输出
+watch(
+  () => store.selectedId,
+  (id) => {
+    if (id !== null) {
+      result.value = "";
+      inputText.value = "";
+      store.lastResult = null;
+    }
+  },
+);
 
 async function onExecute() {
   if (!store.selected) return;

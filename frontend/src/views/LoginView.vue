@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useUserStore } from "@/shared/stores/user";
 import { Button, Input, Alert } from "@/shared/ui";
@@ -11,11 +11,24 @@ const route = useRoute();
 const email = ref("");
 const password = ref("");
 
+// P3：用户重新输入时清空上一次登录失败提示，避免错误信息与当前输入不同步
+watch([email, password], () => {
+  if (userStore.error) userStore.error = null;
+});
+
+// P3：redirect 白名单校验，防止开放重定向（?redirect=//evil.com）
+// 仅允许以单个 / 开头的站内相对路径，拒绝 //（协议相对 URL）和 /\（绕过）
+function safeRedirect(redirect: unknown): string {
+  if (typeof redirect !== "string" || !redirect) return "/";
+  if (redirect === "/") return "/";
+  if (/^\/[^/\\]/.test(redirect)) return redirect;
+  return "/";
+}
+
 async function onSubmit() {
   try {
     await userStore.login(email.value, password.value);
-    const redirect = (route.query.redirect as string) || "/";
-    router.replace(redirect);
+    router.replace(safeRedirect(route.query.redirect));
   } catch {
     // error 已写入 userStore.error，Alert 展示
   }

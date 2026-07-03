@@ -29,6 +29,8 @@ watch(
   () => store.selectedId,
   (id) => {
     if (id !== null) {
+      // P2：切换 prompt 时立即清空旧版本列表，避免 fetch 期间短暂显示上一条数据
+      store.versions = [];
       store.fetchVersions(id);
       showNewVersion.value = false;
       newContent.value = "";

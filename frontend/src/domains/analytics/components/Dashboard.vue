@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, computed } from "vue";
 import { useAnalyticsStore } from "../store";
-import { Card, CardHeader, CardTitle, CardContent } from "@/shared/ui";
+import { Alert, Card, CardHeader, CardTitle, CardContent } from "@/shared/ui";
 import { formatNumber, formatCost } from "@/shared/utils";
 
 const store = useAnalyticsStore();
@@ -47,6 +47,8 @@ const daily = computed(() => store.metrics?.conversations_last_7d ?? []);
 
 <template>
   <div class="space-y-6">
+    <Alert v-if="store.error" :message="store.error" @retry="store.fetchMetrics()" />
+
     <div v-if="store.loading && !store.metrics" class="text-sm text-muted-foreground">
       Loading metrics...
     </div>

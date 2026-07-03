@@ -44,8 +44,9 @@ function onCancel() {
 }
 
 // P3-UX-M2：ESC 关闭 + 打开时锁定背景滚动。
+// P1-6：loading 期间禁止 ESC/背景点击关闭，避免提交中途中断。
 function onKeydown(e: KeyboardEvent) {
-  if (e.key === "Escape" && props.open) {
+  if (e.key === "Escape" && props.open && !props.loading) {
     onCancel();
   }
 }
@@ -75,7 +76,11 @@ onUnmounted(() => {
       v-if="open"
       class="fixed inset-0 z-50 flex items-center justify-center p-4"
     >
-      <div class="absolute inset-0 bg-black/50" @click="onCancel" />
+      <div
+        class="absolute inset-0 bg-black/50"
+        :aria-hidden="true"
+        @click="!loading && onCancel()"
+      />
       <div
         role="alertdialog"
         aria-modal="true"

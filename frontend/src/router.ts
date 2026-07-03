@@ -66,7 +66,8 @@ export const router = createRouter({
 
 // P3-UX-H3：路由守卫。受保护页未登录 → 跳 /login（带 redirect 参数）；
 // 已登录访问 /login → 跳首页。首次进入受保护页时补拉 /auth/me 校验 token
-// 有效性（token 过期则 fetchMe 内部 logout，随后 requiresAuth 判定失败跳登录）。
+// 有效性。P1：fetchMe 现在会抛错（token 过期），此处需 try/catch 捕获并
+// logout，随后 requiresAuth 判定失败跳登录页，避免未捕获 Promise rejection。
 router.beforeEach(async (to) => {
   const userStore = useUserStore();
 
@@ -79,7 +80,12 @@ router.beforeEach(async (to) => {
     userStore.isAuthenticated &&
     !userStore.user
   ) {
-    await userStore.fetchMe();
+    try {
+      await userStore.fetchMe();
+    } catch {
+      // token 无效（401）→ fetchMe 抛错，logout 保持未认证态
+      userStore.logout();
+    }
   }
 
   if (to.meta.requiresAuth && !userStore.isAuthenticated) {

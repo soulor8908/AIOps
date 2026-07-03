@@ -46,7 +46,7 @@ async def _seed(
         conv.created_at = created_at
     session.add(conv)
     await session.flush()
-    session.add_all([
+    msgs = [
         Message(conversation_id=conv.id, role="user", content="hi", tokens_in=5),
         Message(
             conversation_id=conv.id,
@@ -55,7 +55,13 @@ async def _seed(
             tokens_out=10,
             latency_ms=200,
         ),
-    ])
+    ]
+    # 窗口过滤测试需让 messages 的 created_at 与 conversation 对齐，
+    # 否则 server_default=now() 会让旧对话的消息仍落在今天。
+    if created_at is not None:
+        for m in msgs:
+            m.created_at = created_at
+    session.add_all(msgs)
     await session.flush()
     return conv
 
