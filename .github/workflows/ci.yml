@@ -40,6 +40,35 @@ jobs:
       - name: Test with pytest (coverage)
         run: pytest
 
+  # L2 契约测试（testing.spec.md §4）— 显式独立 job，与 L1 分离以便清晰报告。
+  # schemathesis 验证 API 实现与 specs/openapi.yaml 一致：状态码 + schema 契合。
+  contract-test:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: sqlite:///test.db
+      DEBUG: "true"
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: L2 contract tests (schemathesis, verbose)
+        run: pytest tests/test_api_contract.py -v --no-cov
+
   # 迁移一致性校验（specs/migration.spec.md §8）。
   # 真正用 PG + pgvector 跑迁移：upgrade → ORM/DB 一致性 → downgrade → replay。
   # 这是 SQLite 跑不了的 PG 专属类型/索引（HNSW、UUID、JSONB）的唯一守门人。
@@ -131,11 +160,52 @@ jobs:
       - name: Build
         run: npm run build
 
+      # L1 前端单元测试（testing.spec.md §9）— 测试必须 100% 通过（阻断）。
       - name: Unit tests (Vitest)
         run: npm run test:run
+
+      # 覆盖率报告（信息性，非阻断）— vitest.config.ts 门槛 80%，当前覆盖率未达标
+      # （前端单测覆盖尚处早期）。先收集报告使覆盖率可见，待补齐测试后转为硬门禁。
+      - name: Coverage report (informational)
+        continue-on-error: true
+        run: npm run test:run -- --coverage
 
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
-      - name: E2E tests (Playwright)
+      # L3 E2E（testing.spec.md §5）：CI 中对 vite build 产物（dist/）运行，
+      # 而非 dev server。playwright.config.ts 据 CI 环境变量切换 webServer。
+      - name: E2E tests (Playwright, against build)
         run: npm run e2e
+
+  # L4 LLM-as-Judge（testing.spec.md §6）— 语义质量评估，非阻断门禁。
+  # 得分 > 0.85 为通过；未达不阻断合并（continue-on-error）但标红评审。
+  # 无 OPENAI_API_KEY secret 时 eval 内 skipif 自动跳过。
+  llm-judge:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      DATABASE_URL: sqlite:///test.db
+      DEBUG: "true"
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: L4 LLM-as-Judge eval
+        run: pytest app/domains/evals/tests/eval_llm_as_judge.py -v --no-cov
