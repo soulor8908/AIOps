@@ -42,6 +42,7 @@ from app.core.logging import (
 from app.core.metrics import metrics
 from app.core.rate_limit import RateLimitMiddleware
 from app.core.redis import close_redis
+from app.domains.knowledge.embedder import close_embedder_client
 
 # 导入期配置 JSON 日志（observability.spec.md§2）。
 # 幂等：重复 import 仅重置 handler。测试 conftest import 本模块即生效。
@@ -62,6 +63,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
     await engine.dispose()
     await close_redis()
+    await close_embedder_client()
 
 
 app = FastAPI(

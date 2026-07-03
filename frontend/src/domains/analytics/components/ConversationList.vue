@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { useAnalyticsStore } from "../store";
-import { Button, Input, Badge } from "@/shared/ui";
+import { Button, Input, Badge, Alert, Skeleton } from "@/shared/ui";
 import { formatDate, formatNumber, formatCost } from "@/shared/utils";
 
 const store = useAnalyticsStore();
@@ -9,7 +9,11 @@ const startDate = ref("");
 const endDate = ref("");
 
 function onFilter() {
-  void store.fetchConversations({});
+  // P3：修复原 onFilter 传空对象 {} 忽略日期的 bug，真实透传 start_date / end_date
+  void store.fetchConversations({
+    start_date: startDate.value || undefined,
+    end_date: endDate.value || undefined,
+  });
 }
 
 onMounted(() => store.fetchConversations());
@@ -21,11 +25,17 @@ onMounted(() => store.fetchConversations());
       <Input v-model="startDate" type="date" class="w-44" />
       <Input v-model="endDate" type="date" class="w-44" />
       <Button @click="onFilter">Filter</Button>
+      <Button variant="outline" @click="store.fetchConversations()">Refresh</Button>
       <span class="text-sm text-muted-foreground">{{ formatNumber(store.total) }} total</span>
     </div>
 
-    <div v-if="store.loading" class="text-sm text-muted-foreground">Loading...</div>
-    <div v-else-if="store.conversations.length === 0" class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
+    <Alert v-if="store.error" :message="store.error" @retry="store.fetchConversations()" />
+
+    <div v-if="store.loading" class="space-y-2">
+      <Skeleton v-for="i in 5" :key="i" class="h-10 w-full" />
+    </div>
+
+    <div v-else-if="!store.error && store.conversations.length === 0" class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
       No conversations found.
     </div>
     <div v-else class="overflow-x-auto rounded-md border">

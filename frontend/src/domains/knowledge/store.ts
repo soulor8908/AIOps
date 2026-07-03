@@ -34,19 +34,29 @@ export const useKnowledgeStore = defineStore("knowledge", () => {
   }
 
   async function create(data: KnowledgeBaseCreate) {
-    const kb = await api.createKnowledgeBase(data);
-    knowledgeBases.value = [kb, ...knowledgeBases.value];
-    return kb;
+    error.value = null;
+    try {
+      const kb = await api.createKnowledgeBase(data);
+      knowledgeBases.value = [kb, ...knowledgeBases.value];
+      return kb;
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : "Failed to create knowledge base";
+      throw e;
+    }
   }
 
   // 后端要求 Form 字段 title；文件名去除扩展名作为标题。
   async function uploadDocument(file: File) {
     if (selectedId.value === null) return;
     uploading.value = true;
+    error.value = null;
     try {
       const title = file.name.replace(/\.[^.]+$/, "") || file.name;
       await api.uploadDocument(selectedId.value, file, title);
       await fetchList();
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : "Failed to upload document";
+      throw e;
     } finally {
       uploading.value = false;
     }
@@ -55,12 +65,16 @@ export const useKnowledgeStore = defineStore("knowledge", () => {
   async function search(query: string, topK = 5) {
     if (selectedId.value === null) return;
     searching.value = true;
+    error.value = null;
     try {
       // 后端 search 返回裸数组 SearchResult[]。
       searchResults.value = await api.searchKnowledge(selectedId.value, {
         query,
         top_k: topK,
       });
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : "Search failed";
+      throw e;
     } finally {
       searching.value = false;
     }

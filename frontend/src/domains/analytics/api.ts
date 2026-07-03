@@ -6,11 +6,14 @@ import type {
   UUID,
 } from "@/shared/api/types";
 
-// 后端 /analytics/conversations 支持 user_id（UUID）、limit、offset 查询参数。
+// 后端 /analytics/conversations 支持 user_id（UUID）、limit、offset、
+// start_date / end_date（YYYY-MM-DD，按 created_at 闭区间过滤）查询参数。
 export interface ConversationQuery {
   user_id?: UUID;
   limit?: number;
   offset?: number;
+  start_date?: string;
+  end_date?: string;
 }
 
 // 列表端点返回裸数组（response_model=list[<Out>]），无 {items,total} 包装。

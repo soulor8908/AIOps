@@ -26,15 +26,27 @@ export const useModelStore = defineStore("models", () => {
   }
 
   async function create(data: ModelConfigCreate) {
-    const model = await api.createModel(data);
-    models.value = [...models.value, model];
-    return model;
+    error.value = null;
+    try {
+      const model = await api.createModel(data);
+      models.value = [...models.value, model];
+      return model;
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : "Failed to create model";
+      throw e;
+    }
   }
 
   async function remove(alias: string) {
-    await api.deleteModel(alias);
-    models.value = models.value.filter((m) => m.alias !== alias);
-    if (selectedAlias.value === alias) selectedAlias.value = null;
+    error.value = null;
+    try {
+      await api.deleteModel(alias);
+      models.value = models.value.filter((m) => m.alias !== alias);
+      if (selectedAlias.value === alias) selectedAlias.value = null;
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : "Failed to delete model";
+      throw e;
+    }
   }
 
   function select(alias: string | null) {

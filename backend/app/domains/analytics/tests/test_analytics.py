@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -30,13 +31,19 @@ async def session() -> Any:
     await engine.dispose()
 
 
-async def _seed(session: AsyncSession, model_alias: str = "gpt-4o-mini") -> Conversation:
+async def _seed(
+    session: AsyncSession,
+    model_alias: str = "gpt-4o-mini",
+    created_at: datetime | None = None,
+) -> Conversation:
     conv = Conversation(
         model_alias=model_alias,
         title="t1",
         total_tokens=100,
         total_cost=Decimal("0.01"),
     )
+    if created_at is not None:
+        conv.created_at = created_at
     session.add(conv)
     await session.flush()
     session.add_all([
@@ -59,6 +66,34 @@ async def test_list_conversations(session: AsyncSession) -> None:
     convs = await service.list_conversations(session)
     assert len(convs) == 1
     assert len(convs[0].messages) == 2
+
+
+@pytest.mark.asyncio
+async def test_list_conversations_date_range(session: AsyncSession) -> None:
+    """P3：created_at 闭区间过滤（start_date / end_date 含当日全天）。"""
+    now = datetime.now(UTC)
+    old = now - timedelta(days=10)
+    await _seed(session, created_at=now)  # 今天
+    await _seed(session, model_alias="old", created_at=old)  # 10 天前
+
+    # 只取最近 1 天：含 today，排除 10 天前
+    today = now.date()
+    convs = await service.list_conversations(session, start_date=today)
+    assert len(convs) == 1
+    assert convs[0].model_alias == "gpt-4o-mini"
+
+    # 只取 10 天前那天
+    convs_old = await service.list_conversations(
+        session, start_date=old.date(), end_date=old.date()
+    )
+    assert len(convs_old) == 1
+    assert convs_old[0].model_alias == "old"
+
+    # 区间覆盖两者
+    convs_all = await service.list_conversations(
+        session, start_date=old.date(), end_date=today
+    )
+    assert len(convs_all) == 2
 
 
 @pytest.mark.asyncio

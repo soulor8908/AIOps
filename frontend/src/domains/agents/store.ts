@@ -35,13 +35,24 @@ export const useAgentStore = defineStore("agents", () => {
   }
 
   async function fetchWorkflows() {
-    workflows.value = await api.fetchWorkflows();
+    error.value = null;
+    try {
+      workflows.value = await api.fetchWorkflows();
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : "Failed to load workflows";
+    }
   }
 
   async function create(data: AgentCreate) {
-    const agent = await api.createAgent(data);
-    agents.value = [agent, ...agents.value];
-    return agent;
+    error.value = null;
+    try {
+      const agent = await api.createAgent(data);
+      agents.value = [agent, ...agents.value];
+      return agent;
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : "Failed to create agent";
+      throw e;
+    }
   }
 
   // 后端 ExecuteRequest.input 为 str（min 1）。

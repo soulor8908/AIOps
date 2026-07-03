@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import date
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,10 +22,23 @@ async def list_conversations(
     user_id: uuid.UUID | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    start_date: date | None = Query(
+        default=None, description="起始日 YYYY-MM-DD（含当日）"
+    ),
+    end_date: date | None = Query(
+        default=None, description="结束日 YYYY-MM-DD（含当日）"
+    ),
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> list[ConversationOut]:
-    convs = await service.list_conversations(session, user_id=user_id, limit=limit, offset=offset)
+    convs = await service.list_conversations(
+        session,
+        user_id=user_id,
+        limit=limit,
+        offset=offset,
+        start_date=start_date,
+        end_date=end_date,
+    )
     return [ConversationOut.model_validate(c) for c in convs]
 
 

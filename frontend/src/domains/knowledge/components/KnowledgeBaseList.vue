@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { useKnowledgeStore } from "../store";
-import { Button, Input } from "@/shared/ui";
+import { Button, Input, Alert, Skeleton } from "@/shared/ui";
 import { Card, CardHeader, CardTitle, CardContent } from "@/shared/ui";
 import { formatDate } from "@/shared/utils";
 import type { KnowledgeBaseCreate } from "@/shared/api/types";
@@ -28,7 +28,12 @@ function buildPayload(): KnowledgeBaseCreate {
 }
 
 async function onCreate() {
-  await store.create(buildPayload());
+  try {
+    await store.create(buildPayload());
+  } catch {
+    // error 已写入 store.error，保留表单内容供用户修正后重试
+    return;
+  }
   form.value = {
     name: "",
     description: "",
@@ -76,8 +81,13 @@ onMounted(() => store.fetchList());
       </CardContent>
     </Card>
 
-    <div v-if="store.loading" class="text-sm text-muted-foreground">Loading...</div>
-    <div v-else-if="store.knowledgeBases.length === 0" class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
+    <Alert v-if="store.error" :message="store.error" @retry="store.fetchList()" />
+
+    <div v-if="store.loading" class="grid gap-3 sm:grid-cols-2">
+      <Skeleton v-for="i in 4" :key="i" class="h-32 w-full" />
+    </div>
+
+    <div v-else-if="!store.error && store.knowledgeBases.length === 0" class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
       No knowledge bases yet.
     </div>
     <div v-else class="grid gap-3 sm:grid-cols-2">

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted } from "vue";
 import { useEvalStore } from "../store";
-import { Button, Badge } from "@/shared/ui";
+import { Button, Badge, Alert, Skeleton } from "@/shared/ui";
 import { Card, CardHeader, CardTitle, CardContent } from "@/shared/ui";
 import { formatDate, formatPercent } from "@/shared/utils";
 import type { EvalRunOut } from "@/shared/api/types";
@@ -18,7 +18,11 @@ function statusVariant(status: EvalRunOut["status"]): BadgeVariant {
 }
 
 async function onRun(id: string) {
-  await store.execute(id);
+  try {
+    await store.execute(id);
+  } catch {
+    // error 已写入 store.error，Alert 会展示
+  }
 }
 
 onMounted(() => store.fetchList());
@@ -31,8 +35,13 @@ onMounted(() => store.fetchList());
       <Button variant="outline" @click="store.fetchList()">Refresh</Button>
     </div>
 
-    <div v-if="store.loading" class="text-sm text-muted-foreground">Loading...</div>
-    <div v-else-if="store.runs.length === 0" class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
+    <Alert v-if="store.error" :message="store.error" @retry="store.fetchList()" />
+
+    <div v-if="store.loading" class="space-y-3">
+      <Skeleton v-for="i in 3" :key="i" class="h-32 w-full" />
+    </div>
+
+    <div v-else-if="!store.error && store.runs.length === 0" class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
       No eval runs yet. Use the runner to create one.
     </div>
     <div v-else class="space-y-3">
