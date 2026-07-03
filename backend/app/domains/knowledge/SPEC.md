@@ -25,12 +25,25 @@
 - 向量索引调参（HNSW 等）
 
 ## Success Criteria (Eval)
-- [ ] 文档上传后 status 由 processing → ready，`chunk_count` 与实际分块数一致
-- [ ] 检索结果按余弦相似度降序，低于 `score_threshold` 的被过滤
-- [ ] embedding 失败时回退零向量，文档仍可入库
-- [ ] RAG 返回的 sources 与检索结果一致，并附带 LLM usage
-- [ ] 文档超 50MB 或内容为空时上传被拒绝
-- [ ] `chunk_text` 在 overlap ≥ chunk_size 时抛 `ValueError`
+- [x] 文档上传后 status 由 processing → ready，`chunk_count` 与实际分块数一致
+- [x] 检索结果按余弦相似度降序，低于 `score_threshold` 的被过滤
+- [x] embedding 失败时回退零向量，文档仍可入库
+- [x] RAG 返回的 sources 与检索结果一致，并附带 LLM usage
+- [x] 文档超 50MB 或内容为空时上传被拒绝
+- [x] `chunk_text` 在 overlap ≥ chunk_size 时抛 `ValueError`
+
+## Eval 落地记录
+
+测试文件：`backend/tests/test_knowledge_pipeline.py`（12 tests，覆盖全部 6 项 Success Criteria）
+
+| SC | 测试 | 策略 |
+|----|------|------|
+| 1 | `test_upload_status_ready_and_chunk_count_matches` | 经 `client` fixture 的 session_factory 调 `service.upload_document`，`settings.openai_api_key=""` 使 embedder 返回零向量（无网络），断言 `status=="ready"` 且 `chunk_count` 与 `chunk_text` 实际分块数一致 |
+| 2 | `test_search_filters_by_score_threshold` / `test_search_threshold_zero_returns_all` | `cosine_distance` 在 SQLite 不可用，用 `_MockSession` 返回预打分行（score 0.9/0.5/0.2），验证 `score_threshold=0.4` 过滤掉 0.2，`threshold=0` 全保留 |
+| 3 | `test_embed_text_returns_zero_vector_on_http_failure` / `test_embed_batch_returns_zero_vectors_on_failure` / `test_upload_succeeds_with_zero_vector_embeddings` | monkeypatch `httpx.AsyncClient.post` 抛 `ConnectError`/`HTTPError`，断言单条与批量 embedder 均回退 1536 维零向量；端到端验证零向量文档仍以 `status=ready` 入库 |
+| 4 | `test_rag_sources_match_search_and_includes_usage` | mock `kb_service.search_kb` 返回固定 sources + `LLMClient.chat` 返回固定 usage，断言 RAG 返回的 sources 数量/内容与检索一致且 `usage.total_tokens` 透传 |
+| 5 | `test_upload_rejects_oversized_document` / `test_upload_empty_content_produces_zero_chunks` | 构造 50MB+1 字符内容断言 `ValidationError`；`chunk_text` 对空白返回 `[]`（router 层 422 拒绝空内容） |
+| 6 | `test_chunk_text_rejects_overlap_ge_chunk_size` / `test_chunk_text_rejects_invalid_chunk_size` / `test_chunk_text_normal_case` | 直接测 `chunker.chunk_text` 边界：`overlap ≥ chunk_size` / `chunk_size ≤ 0` 抛 `ValueError`；正常路径验证 index 递增 + chunk_size 长度 |
 
 ## Data Models
 - ORM `KnowledgeBase`（`knowledge_bases` 表）：`id`(UUID)、`name`、`description`、`embedding_model`(默认 text-embedding-3-small)、`chunk_size`(默认 800)、`chunk_overlap`(默认 100)、`created_at`、`updated_at`；`documents` 关系（cascade all, delete-orphan）
