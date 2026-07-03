@@ -59,18 +59,23 @@ def _to_httpx_response(resp) -> object:
     "method, path, expected_status",
     [
         ("GET", "/health", 200),
-        ("GET", "/api/v1/auth/me", 401),
         ("GET", "/api/v1/prompts", 200),
     ],
 )
 def test_endpoint_status_contract(
     client: TestClient, method: str, path: str, expected_status: int
 ) -> None:
-    """验证关键端点返回 spec 声明的状态码。"""
+    """验证关键端点返回 spec 声明的状态码（认证态）。"""
     resp = getattr(client, method.lower())(path)
     assert resp.status_code == expected_status, (
         f"{method} {path}: expected {expected_status}, got {resp.status_code} — {resp.text[:200]}"
     )
+
+
+def test_unauthenticated_auth_me_returns_401(anon_client: TestClient) -> None:
+    """未认证访问 /auth/me → 401（spec 声明的未认证状态码）。"""
+    resp = anon_client.get("/api/v1/auth/me")
+    assert resp.status_code == 401
 
 
 def test_register_response_matches_schema(client: TestClient) -> None:
@@ -121,9 +126,9 @@ def test_not_found_error_matches_schema(client: TestClient) -> None:
     assert "message" in body
 
 
-def test_unauthorized_error_matches_schema(client: TestClient) -> None:
+def test_unauthorized_error_matches_schema(anon_client: TestClient) -> None:
     """GET /auth/me 未认证返回 errors.spec.md§2 统一格式。"""
-    resp = client.get("/api/v1/auth/me")
+    resp = anon_client.get("/api/v1/auth/me")
     assert resp.status_code == 401
     body = resp.json()
     assert body["error"] == "token_invalid"

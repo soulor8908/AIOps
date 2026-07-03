@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
+from app.core.deps import get_current_admin, get_current_user
+from app.domains.auth.models import User
 from app.domains.models import service
 from app.domains.models.models import (
     ChatRequest,
@@ -24,6 +26,7 @@ async def list_models(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> list[ModelConfigOut]:
     configs = await service.list_models(
         session, active_only=active_only, limit=limit, offset=offset
@@ -33,7 +36,9 @@ async def list_models(
 
 @router.post("", response_model=ModelConfigOut, status_code=status.HTTP_201_CREATED)
 async def create_model(
-    payload: ModelConfigCreate, session: AsyncSession = Depends(get_session)
+    payload: ModelConfigCreate,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_admin),
 ) -> ModelConfigOut:
     config = await service.create_model(session, payload)
     return ModelConfigOut.model_validate(config)
@@ -41,7 +46,9 @@ async def create_model(
 
 @router.get("/{alias}", response_model=ModelConfigOut)
 async def get_model(
-    alias: str, session: AsyncSession = Depends(get_session)
+    alias: str,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> ModelConfigOut:
     config = await service.get_model(session, alias)
     return ModelConfigOut.model_validate(config)
@@ -52,13 +59,18 @@ async def update_model(
     alias: str,
     payload: ModelConfigUpdate,
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_admin),
 ) -> ModelConfigOut:
     config = await service.update_model(session, alias, payload)
     return ModelConfigOut.model_validate(config)
 
 
 @router.delete("/{alias}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_model(alias: str, session: AsyncSession = Depends(get_session)) -> None:
+async def delete_model(
+    alias: str,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_admin),
+) -> None:
     await service.delete_model(session, alias)
 
 
@@ -67,5 +79,6 @@ async def chat(
     alias: str,
     payload: ChatRequest,
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> ChatResponse:
     return await service.chat_completion(session, alias, payload)

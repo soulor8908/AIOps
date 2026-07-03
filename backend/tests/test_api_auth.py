@@ -164,10 +164,10 @@ def test_login_email_case_insensitive(client: TestClient) -> None:
 
 # ===================== me =====================
 
-def test_me_success(client: TestClient) -> None:
+def test_me_success(anon_client: TestClient) -> None:
     """携带有效 Bearer token 访问 /me → 200。"""
-    user, tokens = UserFactory.create_and_login(client, email="me@test.example")
-    resp = client.get(
+    user, tokens = UserFactory.create_and_login(anon_client, email="me@test.example")
+    resp = anon_client.get(
         "/api/v1/auth/me",
         headers={"Authorization": f"Bearer {tokens['access_token']}"},
     )
@@ -177,16 +177,16 @@ def test_me_success(client: TestClient) -> None:
     assert body["id"] == user["id"]
 
 
-def test_me_no_token(client: TestClient) -> None:
+def test_me_no_token(anon_client: TestClient) -> None:
     """未携带 token → 401 token_invalid。"""
-    resp = client.get("/api/v1/auth/me")
+    resp = anon_client.get("/api/v1/auth/me")
     assert resp.status_code == 401
     assert resp.json()["error"] == "token_invalid"
 
 
-def test_me_invalid_token(client: TestClient) -> None:
+def test_me_invalid_token(anon_client: TestClient) -> None:
     """无效 token → 401 token_invalid。"""
-    resp = client.get(
+    resp = anon_client.get(
         "/api/v1/auth/me",
         headers={"Authorization": "Bearer not.a.valid.jwt"},
     )
@@ -194,10 +194,10 @@ def test_me_invalid_token(client: TestClient) -> None:
     assert resp.json()["error"] == "token_invalid"
 
 
-def test_me_with_refresh_token_rejected(client: TestClient) -> None:
+def test_me_with_refresh_token_rejected(anon_client: TestClient) -> None:
     """用 refresh token 访问 /me → 401（access 端点不接受 refresh 类型）。"""
-    _, tokens = UserFactory.create_and_login(client)
-    resp = client.get(
+    _, tokens = UserFactory.create_and_login(anon_client)
+    resp = anon_client.get(
         "/api/v1/auth/me",
         headers={"Authorization": f"Bearer {tokens['refresh_token']}"},
     )
@@ -205,12 +205,12 @@ def test_me_with_refresh_token_rejected(client: TestClient) -> None:
     assert resp.json()["error"] == "token_invalid"
 
 
-def test_me_nonexistent_user(client: TestClient) -> None:
+def test_me_nonexistent_user(anon_client: TestClient) -> None:
     """token 合法但用户已被删除 → 401。"""
     # 用一个不存在的 user_id 签发 token
     fake_uid = str(__import__("uuid").uuid4())
     token = create_access_token(fake_uid)
-    resp = client.get(
+    resp = anon_client.get(
         "/api/v1/auth/me",
         headers={"Authorization": f"Bearer {token}"},
     )
@@ -220,10 +220,10 @@ def test_me_nonexistent_user(client: TestClient) -> None:
 
 # ===================== refresh =====================
 
-def test_refresh_success(client: TestClient) -> None:
+def test_refresh_success(anon_client: TestClient) -> None:
     """用 refresh token 换取新 token 对（轮换）。"""
-    _, tokens = UserFactory.create_and_login(client)
-    resp = client.post(
+    _, tokens = UserFactory.create_and_login(anon_client)
+    resp = anon_client.post(
         "/api/v1/auth/refresh",
         json={"refresh_token": tokens["refresh_token"]},
     )
@@ -233,7 +233,7 @@ def test_refresh_success(client: TestClient) -> None:
     assert new_tokens["refresh_token"]
     assert new_tokens["token_type"] == "bearer"
     # 轮换后新 token 应可用
-    resp2 = client.get(
+    resp2 = anon_client.get(
         "/api/v1/auth/me",
         headers={"Authorization": f"Bearer {new_tokens['access_token']}"},
     )
@@ -305,9 +305,9 @@ def test_inactive_user_cannot_login(client: TestClient) -> None:
 
 # ===================== 错误响应格式 =====================
 
-def test_auth_error_response_format(client: TestClient) -> None:
+def test_auth_error_response_format(anon_client: TestClient) -> None:
     """认证错误响应遵循统一格式 {error, message}，detail 可选。"""
-    resp = client.get("/api/v1/auth/me")
+    resp = anon_client.get("/api/v1/auth/me")
     assert resp.status_code == 401
     body = resp.json()
     assert "error" in body
