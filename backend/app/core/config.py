@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     )
 
     # 基础
-    app_version: str = Field(default="0.1.0-alpha", alias="APP_VERSION")
+    app_version: str = Field(default="0.1.0", alias="APP_VERSION")
     environment: str = Field(default="development", alias="ENVIRONMENT")
     debug: bool = Field(default=True, alias="DEBUG")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")

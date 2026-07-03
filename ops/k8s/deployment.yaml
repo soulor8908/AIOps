@@ -336,7 +336,7 @@ metadata:
 data:
   # 基础
   ENVIRONMENT: "production"
-  APP_VERSION: "0.1.0-alpha"
+  APP_VERSION: "0.1.0"
   LOG_LEVEL: "INFO"
   # JWT 过期（security.spec.md§2.2，密钥走 Secret）
   JWT_EXPIRE_HOURS: "24"

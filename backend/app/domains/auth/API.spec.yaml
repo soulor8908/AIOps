@@ -6,7 +6,7 @@ openapi: 3.1.0
 info:
   title: AIOps Console API — Auth
   description: 认证与授权领域 OpenAPI 子集（register / token / me / refresh）。
-  version: 0.1.0-alpha
+  version: 0.1.0
 servers:
 - url: http://localhost:8000
   description: Local

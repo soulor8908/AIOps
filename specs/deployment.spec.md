@@ -1,6 +1,6 @@
 # 横切关注点 Spec — 部署（Deployment）
 
-> Version: v0.1.0-alpha | Date: 2026-06-30
+> Version: v0.1.0 | Date: 2026-07-03
 > Scope: Docker 镜像标准、前端生产部署、K8s 部署、环境变量、健康检查
 > 关联: SPEC.md#6-部署、security.spec.md（Secret）、observability.spec.md（健康检查）
 

@@ -73,7 +73,7 @@ const navItems: NavItem[] = [
       >
         <h1 class="text-base font-semibold">AIOps Console</h1>
         <div class="text-sm text-muted-foreground">
-          v0.1.0-alpha
+          v0.1.0
         </div>
       </header>
 

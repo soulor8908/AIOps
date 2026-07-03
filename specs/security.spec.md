@@ -1,6 +1,6 @@
 # 横切关注点 Spec — 安全（Security）
 
-> Version: v0.1.0-alpha | Date: 2026-06-30
+> Version: v0.1.0 | Date: 2026-07-03
 > Scope: 认证、授权、CORS、限流、密码、文件上传、密钥管理
 > 关联: SPEC.md#安全、errors.spec.md（401/403/429）、deployment.spec.md（Secret 注入）
 

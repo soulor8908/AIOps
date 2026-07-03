@@ -1,6 +1,6 @@
 # 横切关注点 Spec — 数据库迁移（Migration）
 
-> Version: v0.1.0-alpha | Date: 2026-06-30
+> Version: v0.1.0 | Date: 2026-07-03
 > Scope: Schema 真源策略、Alembic 流程、init.sql 边界、漂移检测
 > 关联: SPEC.md#迁移、backend/SPEC.md（ORM）、testing.spec.md（一致性校验 CI）
 
