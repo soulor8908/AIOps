@@ -79,7 +79,10 @@ async def upload_document(
     kb = await get_kb(session, kb_id)
     size = len(content.encode("utf-8"))
     if size > MAX_DOC_BYTES:
-        raise ValidationError(f"文档超 {MAX_DOC_BYTES // 1024 // 1024}MB 上限")
+        raise ValidationError(
+            f"文档超 {MAX_DOC_BYTES // 1024 // 1024}MB 上限"
+            f"（实际 {size} bytes, 上限 {MAX_DOC_BYTES} bytes）"
+        )
     doc = Document(
         knowledge_base_id=kb_id,
         title=title,

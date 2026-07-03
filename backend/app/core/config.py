@@ -123,6 +123,22 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_cors(self) -> Settings:
+        """CORS 安全校验（security.spec.md§4）。
+
+        禁止 ``allow_origins=["*"]`` 与 ``allow_credentials=True`` 同时出现
+        （浏览器规范亦不允许，且是高危误配）。main.py 中 ``allow_credentials=True``
+        硬编码，因此 ``cors_origins`` 不得含 ``"*"``——必须显式指定 Origin 列表。
+        """
+        if "*" in self.cors_origins:
+            raise ValueError(
+                "CORS_ORIGINS 不得包含 '*'（security.spec.md§4）："
+                "allow_credentials=True 与通配 Origin 不可同时使用，"
+                "请显式指定允许的 Origin 列表（如 ['https://console.example.com']）"
+            )
+        return self
+
 
 @lru_cache
 def get_settings() -> Settings:

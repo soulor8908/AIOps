@@ -1,0 +1,16 @@
+title = "AIOps Console — gitleaks config"
+
+# 继承 gitleaks 内置规则集（覆盖 AWS/GCP/GitHub/Generic 等常见密钥模式）。
+[extend]
+useDefault = true
+
+# security.spec.md §9：.env.example 仅含占位符，入库合规。
+# 显式 allowlist 避免占位符（如 change-me-in-production）被误报。
+[allowlist]
+description = "Allowlist example/template files with placeholder secrets"
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''(^|/)\.env\.sample$''',
+  '''(^|/)conftest\.py$''',
+  '''(^|/)tests/.*\.py$''',
+]

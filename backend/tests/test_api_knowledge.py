@@ -117,7 +117,9 @@ def test_upload_document(client: TestClient, monkeypatch) -> None:  # type: igno
     assert body["status"] == "ready"
     assert body["chunk_count"] >= 1
     assert body["size_bytes"] == len(content.encode("utf-8"))
-    assert body["source_uri"] == "intro.txt"
+    # security.spec.md§7.4 — source_uri 为 UUID 重命名，非用户原始文件名。
+    uuid.UUID(body["source_uri"])
+    assert body["source_uri"] != "intro.txt"
     assert body["mime_type"] == "text/plain"
     assert isinstance(body["created_at"], str)
     assert isinstance(body["updated_at"], str)
@@ -135,6 +137,67 @@ def test_upload_document_empty_content(client: TestClient) -> None:
     body = resp.json()
     assert body["error"] == "validation_error"
     assert "message" in body
+
+
+# ===================== 文件上传安全（security.spec.md§7）=====================
+
+
+def test_upload_document_rejects_invalid_mime(client: TestClient) -> None:
+    """§7.2 非白名单 MIME 应返回 422。"""
+    kb = _create_kb(client, name="mime-reject-kb")
+    resp = client.post(
+        f"/api/v1/knowledge-bases/{kb['id']}/documents",
+        data={"title": "evil"},
+        files={"file": ("evil.exe", b"MZ\x90\x00", "application/octet-stream")},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["error"] == "validation_error"
+    assert "octet-stream" in body["message"]
+
+
+def test_upload_document_rejects_oversized_content_length(client: TestClient) -> None:
+    """§7.1 Content-Length 超限应直接拒绝（不读 body）。"""
+    kb = _create_kb(client, name="oversized-kb")
+    # 构造一个 Content-Length 超过 51MB 阈值的请求：
+    # 用一个中等大小的 body 但伪造 Content-Length 头不可行（httpx 校验），
+    # 因此直接构造真实超限 body（51MB+1）。为避免内存爆炸，用流式不可行于 TestClient，
+    # 改为直接测试 router 逻辑：构造刚好超 _MAX_CONTENT_LENGTH 的 body。
+    oversized = b"x" * (51 * 1024 * 1024 + 1)
+    resp = client.post(
+        f"/api/v1/knowledge-bases/{kb['id']}/documents",
+        data={"title": "big"},
+        files={"file": ("big.txt", oversized, "text/plain")},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["error"] == "validation_error"
+
+
+def test_upload_document_source_uri_is_uuid(client: TestClient, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """§7.4 source_uri 为 UUID 重命名，不含用户原始文件名。"""
+    _original_upload = kb_service.upload_document
+
+    async def _refreshing_upload(session, kb_id, title, content, mime_type=None, source_uri=None):  # type: ignore[no-untyped-def]
+        doc = await _original_upload(
+            session, kb_id, title, content, mime_type, source_uri
+        )
+        await session.refresh(doc)
+        return doc
+
+    monkeypatch.setattr(kb_service, "upload_document", _refreshing_upload)
+
+    kb = _create_kb(client, name="uuid-uri-kb")
+    resp = client.post(
+        f"/api/v1/knowledge-bases/{kb['id']}/documents",
+        data={"title": "uuid-test"},
+        files={"file": ("../../etc/passwd", b"content", "text/plain")},
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    # source_uri 必须是合法 UUID，而非用户提供的路径穿越文件名
+    uuid.UUID(body["source_uri"])
+    assert body["source_uri"] != "../../etc/passwd"
 
 
 def test_search_knowledge_base(client: TestClient, monkeypatch) -> None:  # type: ignore[no-untyped-def]

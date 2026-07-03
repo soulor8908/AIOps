@@ -78,3 +78,37 @@ def test_environment_case_insensitive() -> None:
         _make_settings(environment="Production")
     with pytest.raises(ValidationError):
         _make_settings(environment="PROD")
+
+
+# ===================== CORS 校验（security.spec.md§4）=====================
+
+
+def test_cors_wildcard_rejected() -> None:
+    """CORS_ORIGINS 含 '*' 应启动失败（allow_credentials=True 不可与通配 Origin 共存）。"""
+    with pytest.raises(ValidationError) as exc_info:
+        _make_settings(cors_origins=["*"])
+    assert "CORS_ORIGINS" in str(exc_info.value)
+
+
+def test_cors_wildcard_in_list_rejected() -> None:
+    """CORS_ORIGINS 列表中混入 '*' 也应拒绝。"""
+    with pytest.raises(ValidationError):
+        _make_settings(cors_origins=["https://ok.example.com", "*"])
+
+
+def test_cors_explicit_origins_accepted() -> None:
+    """显式 Origin 列表应通过校验。"""
+    s = _make_settings(cors_origins=["https://console.example.com"])
+    assert s.cors_origins == ["https://console.example.com"]
+
+
+def test_cors_production_rejects_wildcard() -> None:
+    """生产环境即使提供强密钥，CORS 含 '*' 仍应失败。"""
+    strong = "x" * 48
+    with pytest.raises(ValidationError) as exc_info:
+        _make_settings(
+            environment="production",
+            jwt_secret=strong,
+            cors_origins=["*"],
+        )
+    assert "CORS_ORIGINS" in str(exc_info.value)

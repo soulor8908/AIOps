@@ -39,6 +39,8 @@ from app.core.logging import (
     setup_logging,
 )
 from app.core.metrics import metrics
+from app.core.rate_limit import RateLimitMiddleware
+from app.core.redis import close_redis
 
 # 导入期配置 JSON 日志（observability.spec.md§2）。
 # 幂等：重复 import 仅重置 handler。测试 conftest import 本模块即生效。
@@ -58,6 +60,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await init_db()
     yield
     await engine.dispose()
+    await close_redis()
 
 
 app = FastAPI(
@@ -67,6 +70,10 @@ app = FastAPI(
     debug=settings.debug,
     lifespan=lifespan,
 )
+
+# 限流中间件（security.spec.md§5）— 注册在 CORS 之前（innermost），
+# 使 429 响应能经 CORS 中间件获得 CORS 头。
+app.add_middleware(RateLimitMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
