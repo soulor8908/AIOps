@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Float, Integer, String, Text, func
+from sqlalchemy import Float, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -51,6 +51,8 @@ class Agent(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
+    __table_args__ = (Index("idx_agents_active", "is_active"),)
+
 
 class Workflow(Base):
     """工作流 DAG。nodes + edges 以 JSONB 存储。"""
@@ -65,6 +67,8 @@ class Workflow(Base):
     is_active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (Index("idx_workflows_active", "is_active"),)
 
 
 # ===================== Schemas =====================

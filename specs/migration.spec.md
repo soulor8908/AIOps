@@ -28,13 +28,15 @@
 
 ## 4. init.sql 的职责边界
 
-`backend/init.sql` **仅用于**以下三类操作，禁止定义业务表结构：
+`backend/init.sql` 作为 PostgreSQL 容器 initdb 脚本，在容器首次启动时执行（**早于**应用与 Alembic）。因此它**只能包含无表依赖的语句**。
 
-1. **创建扩展**：`CREATE EXTENSION IF NOT EXISTS vector;`、`CREATE EXTENSION IF NOT EXISTS "uuid-ossp";`
-2. **种子数据**：初始 admin 用户、默认配置等（仅可重入的 `INSERT ... ON CONFLICT DO NOTHING`）。
-3. **性能优化索引**：Alembic 难以表达或需人工调优的复合索引（须注释说明理由）。
+- **init.sql 仅保留**：`CREATE EXTENSION IF NOT EXISTS ...`（`vector` / `pgcrypto` / `citext`）。
+- **业务表结构**（`CREATE TABLE` / `ALTER TABLE`）：一律走 Alembic 迁移。
+- **索引**（含 HNSW 向量索引、复合索引）：在 ORM 模型 `__table_args__` 中声明（`Index(...)`），由 Alembic 迁移从 `Base.metadata` 派生，确保 ORM 为单一真源。
+- **种子数据**：走 Alembic 数据迁移（`op.bulk_insert`），保证其在表创建之后执行且版本可追溯。
+- **触发器**（如 `touch_updated_at`）：**不再使用**。ORM 模型 `updated_at` 列已声明 `onupdate=func.now()`，由 SQLAlchemy 在 UPDATE 语句中渲染 `now()`，等价覆盖触发器语义且无 PG 专属依赖。
 
-> 业务表结构（CREATE TABLE / ALTER TABLE）一律走 Alembic，不得出现在 `init.sql`。
+> 历史上 init.sql 同时定义表/索引/触发器/种子，与 ORM 双真源漂移。现已收敛为「扩展-only」，其余全部移交 Alembic。
 
 ## 5. 迁移流程（强制）
 
@@ -73,25 +75,28 @@
 
 ## 9. 已知漂移修复清单
 
-当前仓库存在以下历史漂移，须按 §5 流程逐项补迁移修复：
+历史漂移修复状态（2026-07-03 更新）：
 
-| # | 漂移现象 | 根因 | 修复动作 |
+| # | 漂移现象 | 根因 | 修复状态 |
 |---|----------|------|----------|
-| 1 | `evals` 领域缺 `eval_rules` 表 | ORM 未定义该模型 | 在 `domains/evals/models.py` 补 `EvalRule` 模型 → autogenerate → 补迁移 |
-| 2 | `evals` 领域缺 `eval_judges` 表 | ORM 未定义该模型 | 补 `EvalJudge` 模型 → 迁移 |
-| 3 | `evals` 领域缺 `eval_cases` 表 | ORM 未定义该模型 | 补 `EvalCase` 模型 → 迁移 |
-| 4 | `users` 表无对应 ORM 模型 | 表由 `init.sql` 手写 DDL 创建 | 在 `domains/auth/`（或 core）补 `User` ORM 模型 → 迁移接管，逐步退役 `init.sql` 中的 users DDL |
+| 1 | `evals` 领域缺 `eval_rules` 表 | ORM 未定义该模型 | ✅ 已补 `EvalRule` ORM（`domains/evals/models.py`）+ Alembic 迁移接管 |
+| 2 | `evals` 领域缺 `eval_judges` 表 | ORM 未定义该模型 | ✅ 已补 `EvalJudge` ORM + 迁移 |
+| 3 | `evals` 领域缺 `eval_cases` 表 | ORM 未定义该模型 | ✅ 已补 `EvalCase` ORM + 迁移 |
+| 4 | `users` 表无对应 ORM 模型 | 表由 `init.sql` 手写 DDL 创建 | ✅ 已补 `User` ORM（`domains/auth/models.py`）+ 迁移接管 |
+| 5 | init.sql 与 ORM 双真源（表/索引/触发器/种子重复定义） | init.sql 承担表结构定义 | ✅ init.sql 收敛为「扩展-only」，表/索引移交 Alembic，触发器移除（ORM `onupdate` 替代），种子改数据迁移 |
+| 6 | `conversations` 跨域 FK（→users/agents）仅 init.sql 强制，ORM 未声明 | ORM 刻意回避跨域 metadata 耦合 | ✅ 以字符串 `ForeignKey("users.id"/"agents.id")` 声明，无 metadata 耦合且恢复 DB 级约束 |
 
-- 修复优先级：#4（users 无 ORM）影响认证链路，优先处理；#1–#3 影响 Eval Suite 功能完整性。
-- 每项修复独立 PR，便于 review 与回滚。
+- 已知漂移清单已全部清零。
 
 ## 10. 验收清单
 
-- [ ] `init.sql` 不再包含 `CREATE TABLE` 业务表结构。
-- [ ] 所有表均有对应 ORM 模型（含 users、eval_*）。
-- [ ] CI 一致性校验通过（ORM vs DB 无 diff）。
-- [ ] 最新迁移 `upgrade` + `downgrade` 均可执行。
-- [ ] 已知漂移清单全部清零或有明确修复 PR。
+- [x] `init.sql` 不再包含 `CREATE TABLE` 业务表结构（仅保留 `CREATE EXTENSION`）。
+- [x] 所有表均有对应 ORM 模型（含 users、eval_*）。
+- [x] 索引（含 HNSW、复合索引）在 ORM `__table_args__` 声明，ORM 为单一真源。
+- [x] 种子数据走 Alembic 数据迁移（`op.bulk_insert`）。
+- [ ] CI 一致性校验通过（ORM vs DB 无 diff）— 由 CI job `migration-consistency` 验证。
+- [ ] 最新迁移 `upgrade` + `downgrade` 均可执行 — 由 CI job `migration-consistency` 验证。
+- [x] 已知漂移清单全部清零。
 
 ---
 

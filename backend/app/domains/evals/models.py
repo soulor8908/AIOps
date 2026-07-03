@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Float, Integer, String, Text, func
+from sqlalchemy import Float, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -56,6 +56,8 @@ class EvalRule(Base):
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
+    __table_args__ = (Index("idx_eval_rules_judge_type", "judge_type"),)
+
 
 class EvalJudge(Base):
     """判官配置（LLM-as-judge 的模型与 prompt）。"""
@@ -69,6 +71,8 @@ class EvalJudge(Base):
     prompt_template: Mapped[str] = mapped_column(Text, nullable=False)
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    __table_args__ = (Index("idx_eval_judges_judge_type", "judge_type"),)
 
 
 class EvalCase(Base):
@@ -84,6 +88,8 @@ class EvalCase(Base):
         "metadata", JSONB, nullable=False, default=dict
     )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    __table_args__ = (Index("idx_eval_cases_name", "name"),)
 
 
 class EvalRun(Base):
@@ -110,6 +116,11 @@ class EvalRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        Index("idx_eval_runs_status", "status"),
+        Index("idx_eval_runs_created", "created_at"),
+    )
 
 
 # ===================== Schemas =====================
