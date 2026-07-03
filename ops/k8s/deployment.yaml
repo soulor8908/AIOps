@@ -35,6 +35,28 @@ spec:
                 secretKeyRef:
                   name: aiops-secrets
                   key: redis-url
+            # 敏感凭据（JWT_SECRET / LLM API Key / DB 密码）走 aiops-secrets，
+            # 非敏感配置（ENVIRONMENT / LOG_LEVEL / JWT_EXPIRE_HOURS / CORS / 限流阈值）
+            # 走 aiops-config ConfigMap（deployment.spec.md§4.1 配置与密钥分离）
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: aiops-secrets
+                  key: jwt-secret
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aiops-secrets
+                  key: openai-api-key
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aiops-secrets
+                  key: anthropic-api-key
+            # 非敏感配置整批注入（envFrom 避免逐字段列举）
+          envFrom:
+            - configMapRef:
+                name: aiops-config
           resources:
             requests:
               cpu: "500m"
@@ -85,7 +107,7 @@ metadata:
     app.kubernetes.io/name: aiops-console
     app.kubernetes.io/component: frontend
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: aiops-console
@@ -105,7 +127,10 @@ spec:
               containerPort: 5173
           env:
             - name: VITE_API_BASE_URL
-              value: /api/v1
+              valueFrom:
+                configMapKeyRef:
+                  name: aiops-config
+                  key: vite_api_base_url
           resources:
             requests:
               cpu: "100m"
@@ -298,3 +323,111 @@ spec:
       port: 6379
       targetPort: 6379
       protocol: TCP
+---
+# ConfigMap — 非敏感配置（deployment.spec.md§4.1 配置与密钥分离）
+# 敏感值（JWT_SECRET / OPENAI_API_KEY / ANTHROPIC_API_KEY / DB 密码 / Redis 密码）
+# 必须放入 aiops-secrets Secret，禁止写入本 ConfigMap。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aiops-config
+  labels:
+    app.kubernetes.io/name: aiops-console
+data:
+  # 基础
+  ENVIRONMENT: "production"
+  APP_VERSION: "0.1.0-alpha"
+  LOG_LEVEL: "INFO"
+  # JWT 过期（security.spec.md§2.2，密钥走 Secret）
+  JWT_EXPIRE_HOURS: "24"
+  REFRESH_TOKEN_EXPIRE_DAYS: "7"
+  # CORS（security.spec.md§4 禁 "*"，显式列举允许 Origin）
+  CORS_ORIGINS: '["https://aiops.local"]'
+  # LLM 默认（仅 provider/model，API Key 走 Secret）
+  DEFAULT_LLM_PROVIDER: "openai"
+  DEFAULT_LLM_MODEL: "gpt-4o-mini"
+  # 限流阈值（security.spec.md§5）
+  RATE_LIMIT_DEFAULT_PER_MIN: "100"
+  RATE_LIMIT_LLM_PER_MIN: "20"
+  # 前端
+  VITE_API_BASE_URL: "/api/v1"
+---
+# PodDisruptionBudget — voluntary disruption 期间保证至少 1 个可用（§4.2/§4.3）
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: aiops-backend-pdb
+  labels:
+    app.kubernetes.io/name: aiops-console
+    app.kubernetes.io/component: backend
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aiops-console
+      app.kubernetes.io/component: backend
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: aiops-frontend-pdb
+  labels:
+    app.kubernetes.io/name: aiops-console
+    app.kubernetes.io/component: frontend
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aiops-console
+      app.kubernetes.io/component: frontend
+---
+# HorizontalPodAutoscaler — 基于 CPU 自动扩缩（§4.2/§4.3）
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: aiops-backend-hpa
+  labels:
+    app.kubernetes.io/name: aiops-console
+    app.kubernetes.io/component: backend
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: aiops-backend
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: aiops-frontend-hpa
+  labels:
+    app.kubernetes.io/name: aiops-console
+    app.kubernetes.io/component: frontend
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: aiops-frontend
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
