@@ -126,20 +126,80 @@ async def list_workflows(
 async def execute_workflow(
     session: AsyncSession, workflow_id: uuid.UUID, request: ExecuteRequest
 ) -> ExecutionResult:
-    """执行工作流 DAG。按节点顺序逐个跑 Agent，传递上下文。"""
+    """执行工作流 DAG。按节点顺序逐个跑 Agent，传递上下文。
+
+    P3：预取所有节点引用的 agent + model_config，避免 DAG 执行时每节点
+    2 次 DB 查询（``get_agent`` + ``_build_llm_config``）的 N+1 问题。
+    50 节点工作流：原 100 次串行 DB 往返 → 2 次批量查询。
+    """
     wf = await session.get(Workflow, workflow_id)
     if wf is None:
         raise NotFoundError(f"Workflow {workflow_id} 不存在")
 
+    # 预取所有节点引用的 agent（去重后批量查）
+    agent_ids = {
+        uuid.UUID(str(node["agent_id"]))
+        for node in wf.nodes
+        if node.get("agent_id")
+    }
+    agents_cache: dict[uuid.UUID, Agent] = {}
+    mcs_cache: dict[str, ModelConfig] = {}
+    if agent_ids:
+        agents_cache = {
+            a.id: a
+            for a in (
+                await session.execute(select(Agent).where(Agent.id.in_(agent_ids)))
+            ).scalars().all()
+        }
+        # 预取所有 model_config（按 alias 去重，priority 升序取首个）
+        aliases = {a.model_alias for a in agents_cache.values()}
+        if aliases:
+            mc_rows = (
+                await session.execute(
+                    select(ModelConfig)
+                    .where(
+                        ModelConfig.alias.in_(aliases),
+                        ModelConfig.is_active.is_(True),
+                    )
+                    .order_by(ModelConfig.alias, ModelConfig.priority)
+                )
+            ).scalars().all()
+            seen: set[str] = set()
+            for mc in mc_rows:
+                if mc.alias not in seen:
+                    mcs_cache[mc.alias] = mc
+                    seen.add(mc.alias)
+
+    # 提交事务释放 DB 连接（与 execute_agent 一致，LLM 调用在事务外）
+    await session.commit()
+
     async def _run_node(node: dict[str, Any], node_input: str) -> ExecutionResult:
-        agent_id = node.get("agent_id")
-        if agent_id is None:
+        agent_id_val = node.get("agent_id")
+        if agent_id_val is None:
             return ExecutionResult(
                 workflow_id=workflow_id, final_answer=node_input, success=True
             )
-        return await execute_agent(
-            session, uuid.UUID(str(agent_id)), ExecuteRequest(input=node_input)
+        aid = uuid.UUID(str(agent_id_val))
+        agent = agents_cache.get(aid)
+        if agent is None:
+            raise NotFoundError(f"Agent {aid} 不存在")
+        mc = mcs_cache.get(agent.model_alias)
+        config = (
+            _llm_config_from_row(mc, agent.temperature)
+            if mc is not None
+            else _fallback_llm_config(agent.model_alias, agent.temperature)
         )
+        client = LLMClient(config)
+        executor = AgentExecutor(client)
+        try:
+            return await executor.run(
+                agent,
+                node_input,
+                max_turns=request.max_turns,
+                context=request.context,
+            )
+        finally:
+            await client.close()
 
     return await execute_workflow_dag(
         workflow_id, wf.nodes, wf.edges, _run_node, request.input
@@ -173,17 +233,16 @@ async def _build_llm_config(
     mc = (await session.execute(stmt)).scalar_one_or_none()
 
     if mc is None:
-        logger.warning(
-            "model_config alias=%s not found or inactive; falling back to defaults",
-            model_alias,
-        )
-        return LLMConfig(
-            provider="openai",
-            model=settings.default_llm_model,
-            api_key=settings.openai_api_key,
-            temperature=temperature if temperature is not None else 0.7,
-        )
+        return _fallback_llm_config(model_alias, temperature)
+    return _llm_config_from_row(mc, temperature)
 
+
+def _llm_config_from_row(mc: ModelConfig, temperature: float | None) -> LLMConfig:
+    """从 ModelConfig ORM 行构造 LLMConfig（纯函数，无 DB 查询）。
+
+    供 ``_build_llm_config``（单 agent 执行）与 ``execute_workflow``（DAG 批量预取）
+    共享，确保两条路径的 LLMConfig 构造逻辑一致。
+    """
     # 解析 API key：优先从 env var 读取，回退到 settings
     api_key = ""
     if mc.api_key_env:
@@ -207,6 +266,20 @@ async def _build_llm_config(
         # Decimal → float 透传（observability.spec.md§5.1 llm_cost 计算）
         cost_per_1k_input=float(mc.cost_per_1k_input),
         cost_per_1k_output=float(mc.cost_per_1k_output),
+    )
+
+
+def _fallback_llm_config(model_alias: str, temperature: float | None) -> LLMConfig:
+    """model_config 未找到时回退到 settings 默认值。"""
+    logger.warning(
+        "model_config alias=%s not found or inactive; falling back to defaults",
+        model_alias,
+    )
+    return LLMConfig(
+        provider="openai",
+        model=settings.default_llm_model,
+        api_key=settings.openai_api_key,
+        temperature=temperature if temperature is not None else 0.7,
     )
 
 

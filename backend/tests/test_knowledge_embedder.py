@@ -16,7 +16,9 @@ from typing import Any
 from unittest.mock import patch
 
 import httpx
+import pytest
 
+import app.domains.knowledge.embedder as embedder_mod
 from app.core.config import settings
 from app.domains.knowledge.embedder import (
     DEFAULT_EMBEDDING_MODEL,
@@ -26,6 +28,18 @@ from app.domains.knowledge.embedder import (
     embed_text,
 )
 from app.domains.knowledge.models import EMBEDDING_DIM
+
+
+@pytest.fixture(autouse=True)
+def _reset_embedder_shared_client() -> Any:
+    """每个测试前重置共享 httpx.AsyncClient 单例。
+
+    P3 后 embedder 使用共享客户端，若不重置则跨测试复用上一次的 MockTransport，
+    导致断言失败（如 API key / model 不匹配）。
+    """
+    embedder_mod._client = None
+    yield
+    embedder_mod._client = None
 
 # 在任何 patch 之前捕获真实的 httpx.AsyncClient 类引用。
 # embedder 模块通过 ``import httpx`` 引用 httpx 模块，

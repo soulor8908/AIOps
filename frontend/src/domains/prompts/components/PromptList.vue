@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { usePromptStore } from "../store";
-import { Button, Input, Badge } from "@/shared/ui";
+import { Button, Input, Badge, Alert, Skeleton } from "@/shared/ui";
 import { formatDate } from "@/shared/utils";
 import PromptEditor from "./PromptEditor.vue";
 
@@ -38,10 +38,14 @@ onMounted(() => store.fetchList());
 
     <PromptEditor v-if="showEditor" @created="onCreated" />
 
-    <div v-if="store.loading" class="text-sm text-muted-foreground">Loading...</div>
+    <Alert v-if="store.error" :message="store.error" @retry="store.fetchList(searchQuery)" />
+
+    <div v-if="store.loading" class="space-y-2">
+      <Skeleton v-for="i in 4" :key="i" class="h-16 w-full" />
+    </div>
 
     <div
-      v-else-if="store.items.length === 0"
+      v-else-if="!store.error && store.items.length === 0"
       class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
     >
       No prompts yet. Click "+ New" to create one.

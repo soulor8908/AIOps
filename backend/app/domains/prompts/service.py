@@ -107,17 +107,16 @@ async def create_version(
     prompt = (await session.execute(lock_stmt)).scalar_one_or_none()
     if prompt is None:
         raise NotFoundError(f"Prompt {prompt_id} 不存在")
-    count_stmt = select(func.count()).select_from(PromptVersion).where(
-        PromptVersion.prompt_id == prompt_id
-    )
-    count = int((await session.execute(count_stmt)).scalar_one())
+    # P3：合并 count + max 为单条查询，缩短行级锁持有时间（原 2 次 DB 往返 → 1 次）。
+    stats_stmt = select(
+        func.count(),
+        func.coalesce(func.max(PromptVersion.version_num), 0),
+    ).where(PromptVersion.prompt_id == prompt_id)
+    count, max_num = (await session.execute(stats_stmt)).one()
+    count = int(count)
     if count >= MAX_VERSIONS:
         raise ConflictError(f"Prompt 版本数已达上限 {MAX_VERSIONS}")
-    max_stmt = select(func.max(PromptVersion.version_num)).where(
-        PromptVersion.prompt_id == prompt_id
-    )
-    max_num = (await session.execute(max_stmt)).scalar_one()
-    next_num = (max_num or 0) + 1
+    next_num = int(max_num) + 1
     version = PromptVersion(
         prompt_id=prompt_id,
         version_num=next_num,

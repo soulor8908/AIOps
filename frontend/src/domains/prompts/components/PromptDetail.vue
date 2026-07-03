@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { watch, ref, computed } from "vue";
 import { usePromptStore } from "../store";
-import { Button, Badge } from "@/shared/ui";
+import { Button, Badge, AlertDialog } from "@/shared/ui";
 import { Card, CardHeader, CardTitle, CardContent } from "@/shared/ui";
 import { formatDate } from "@/shared/utils";
 
@@ -9,10 +9,20 @@ const store = usePromptStore();
 const newContent = ref("");
 const showNewVersion = ref(false);
 
+// P3-UX-M2：用 AlertDialog 替代原生 confirm()，回滚前二次确认。
+const rollbackTarget = ref<string | null>(null);
+const rollbackOpen = ref(false);
+const rolling = ref(false);
+
 const currentVersion = computed(() => {
   const p = store.selected;
   if (!p || !p.current_version_id) return null;
   return p.versions.find((v) => v.id === p.current_version_id) ?? null;
+});
+
+const rollbackTargetVersion = computed(() => {
+  if (!rollbackTarget.value) return null;
+  return store.versions.find((v) => v.id === rollbackTarget.value) ?? null;
 });
 
 watch(
@@ -26,16 +36,34 @@ watch(
   },
 );
 
-async function onRollback(versionId: string) {
-  if (store.selectedId === null) return;
-  if (!confirm("Rollback to this version?")) return;
-  await store.rollback(store.selectedId, versionId);
-  await store.fetchVersions(store.selectedId);
+function onRollback(versionId: string) {
+  rollbackTarget.value = versionId;
+  rollbackOpen.value = true;
+}
+
+async function confirmRollback() {
+  if (store.selectedId === null || rollbackTarget.value === null) return;
+  rolling.value = true;
+  try {
+    await store.rollback(store.selectedId, rollbackTarget.value);
+    await store.fetchVersions(store.selectedId);
+    rollbackOpen.value = false;
+    rollbackTarget.value = null;
+  } catch {
+    // error 已写入 store.error
+  } finally {
+    rolling.value = false;
+  }
 }
 
 async function onCreateVersion() {
   if (store.selectedId === null || !newContent.value.trim()) return;
-  await store.createVersion(store.selectedId, { content: newContent.value, variables: [] });
+  try {
+    await store.createVersion(store.selectedId, { content: newContent.value, variables: [] });
+  } catch {
+    // error 已写入 store.error，保留输入供修正后重试
+    return;
+  }
   newContent.value = "";
   showNewVersion.value = false;
 }
@@ -126,5 +154,15 @@ async function onCreateVersion() {
         </div>
       </CardContent>
     </Card>
+
+    <AlertDialog
+      v-model:open="rollbackOpen"
+      title="Rollback to this version?"
+      :description="rollbackTargetVersion ? `This will create a new version with the content of v${rollbackTargetVersion.version_num}. The current version will be replaced.` : ''"
+      confirm-text="Rollback"
+      variant="destructive"
+      :loading="rolling"
+      @confirm="confirmRollback"
+    />
   </div>
 </template>

@@ -1,8 +1,12 @@
 <script setup lang="ts">
-import { RouterLink, RouterView } from "vue-router";
+import { computed } from "vue";
+import { RouterLink, RouterView, useRoute } from "vue-router";
 import { useAppStore } from "@/shared/stores/app";
+import { useUserStore } from "@/shared/stores/user";
 
 const appStore = useAppStore();
+const userStore = useUserStore();
+const route = useRoute();
 
 interface NavItem {
   to: string;
@@ -19,10 +23,19 @@ const navItems: NavItem[] = [
   { to: "/analytics", label: "Analytics", icon: "C" },
   { to: "/evals", label: "Eval Suite", icon: "E" },
 ];
+
+// P3-UX-H3：登录页 / 404 走无侧边栏的 blank 布局，其余走 app 布局。
+const showChrome = computed(() => route.meta.public !== true);
+
+function onLogout() {
+  userStore.logout();
+}
 </script>
 
 <template>
-  <div class="flex h-screen overflow-hidden bg-background">
+  <RouterView v-if="!showChrome" />
+
+  <div v-else class="flex h-screen overflow-hidden bg-background">
     <aside
       class="flex flex-col border-r bg-card transition-all duration-200"
       :class="appStore.sidebarCollapsed ? 'w-16' : 'w-64'"
@@ -72,8 +85,16 @@ const navItems: NavItem[] = [
         class="flex h-14 shrink-0 items-center justify-between border-b bg-card px-6"
       >
         <h1 class="text-base font-semibold">AIOps Console</h1>
-        <div class="text-sm text-muted-foreground">
-          v0.1.0
+        <div class="flex items-center gap-4 text-sm text-muted-foreground">
+          <span v-if="userStore.user" class="hidden sm:inline">
+            {{ userStore.user.email }}
+          </span>
+          <button
+            class="rounded-md px-2 py-1 text-sm hover:bg-accent hover:text-accent-foreground"
+            @click="onLogout"
+          >
+            Sign out
+          </button>
         </div>
       </header>
 

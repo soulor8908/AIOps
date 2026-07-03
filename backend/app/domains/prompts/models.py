@@ -43,6 +43,12 @@ class PromptVersion(Base):
         back_populates="versions", foreign_keys=[prompt_id]
     )
 
+    __table_args__ = (
+        # P3：diff_versions / _fetch_version_content 按 (prompt_id, version_num) 查询，
+        # create_version 按 prompt_id 聚合 count+max。复合索引覆盖两者，避免回表。
+        Index("idx_prompt_versions_pid_vnum", "prompt_id", "version_num"),
+    )
+
 
 class Prompt(Base):
     """Prompt 主表。current_version_id 指向当前生效版本。"""

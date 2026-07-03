@@ -46,7 +46,11 @@ class Conversation(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
-    __table_args__ = (Index("idx_conversations_created", "created_at"),)
+    __table_args__ = (
+        Index("idx_conversations_created", "created_at"),
+        # P3：dashboard _active_models 按 model_alias GROUP BY 聚合，缺索引走 Seq Scan。
+        Index("idx_conversations_model_alias", "model_alias"),
+    )
 
     messages: Mapped[list[Message]] = relationship(
         back_populates="conversation",

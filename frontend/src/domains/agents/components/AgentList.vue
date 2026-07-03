@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { useAgentStore } from "../store";
-import { Button, Input, Badge } from "@/shared/ui";
+import { Button, Input, Badge, Alert, Skeleton } from "@/shared/ui";
 import { Card, CardHeader, CardTitle, CardContent } from "@/shared/ui";
 import { formatDate } from "@/shared/utils";
 import type { AgentCreate } from "@/shared/api/types";
@@ -26,7 +26,12 @@ async function onCreate() {
     .map((s) => s.trim())
     .filter(Boolean)
     .map((name) => ({ name, type: "custom" as const, config: {} }));
-  await store.create(form.value);
+  try {
+    await store.create(form.value);
+  } catch {
+    // error 已写入 store.error，保留表单内容供用户修正后重试
+    return;
+  }
   form.value = { name: "", description: "", system_prompt: "", model_alias: "", tools: [], max_turns: 10, temperature: 0.7 };
   toolsInput.value = "";
   showForm.value = false;
@@ -73,8 +78,13 @@ onMounted(() => store.fetchAgents());
       </CardContent>
     </Card>
 
-    <div v-if="store.loading" class="text-sm text-muted-foreground">Loading...</div>
-    <div v-else-if="store.agents.length === 0" class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
+    <Alert v-if="store.error" :message="store.error" @retry="store.fetchAgents()" />
+
+    <div v-if="store.loading" class="space-y-2">
+      <Skeleton v-for="i in 4" :key="i" class="h-16 w-full" />
+    </div>
+
+    <div v-else-if="!store.error && store.agents.length === 0" class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
       No agents yet.
     </div>
     <div v-else class="overflow-hidden rounded-md border">

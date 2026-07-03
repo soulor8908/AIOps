@@ -37,51 +37,78 @@ export const usePromptStore = defineStore("prompts", () => {
   }
 
   async function create(data: PromptCreate) {
-    const prompt = await api.createPrompt(data);
-    items.value = [prompt, ...items.value];
-    return prompt;
+    error.value = null;
+    try {
+      const prompt = await api.createPrompt(data);
+      items.value = [prompt, ...items.value];
+      return prompt;
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : "Failed to create prompt";
+      throw e;
+    }
   }
 
   async function remove(promptId: UUID) {
-    await api.deletePrompt(promptId);
-    items.value = items.value.filter((p) => p.id !== promptId);
-    if (selectedId.value === promptId) selectedId.value = null;
+    error.value = null;
+    try {
+      await api.deletePrompt(promptId);
+      items.value = items.value.filter((p) => p.id !== promptId);
+      if (selectedId.value === promptId) selectedId.value = null;
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : "Failed to delete prompt";
+      throw e;
+    }
   }
 
   async function fetchVersions(promptId: UUID) {
     versionsLoading.value = true;
+    error.value = null;
     try {
       versions.value = await api.listVersions(promptId);
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : "Failed to load versions";
     } finally {
       versionsLoading.value = false;
     }
   }
 
   async function createVersion(promptId: UUID, data: PromptVersionCreate) {
-    const version = await api.createVersion(promptId, data);
-    versions.value = [version, ...versions.value];
-    const idx = items.value.findIndex((p) => p.id === promptId);
-    if (idx >= 0) {
-      // 后端 PromptOut 字段为 current_version_id（UUID）。
-      items.value[idx] = {
-        ...items.value[idx],
-        current_version_id: version.id,
-        versions: [version, ...items.value[idx].versions],
-      };
+    error.value = null;
+    try {
+      const version = await api.createVersion(promptId, data);
+      versions.value = [version, ...versions.value];
+      const idx = items.value.findIndex((p) => p.id === promptId);
+      if (idx >= 0) {
+        // 后端 PromptOut 字段为 current_version_id（UUID）。
+        items.value[idx] = {
+          ...items.value[idx],
+          current_version_id: version.id,
+          versions: [version, ...items.value[idx].versions],
+        };
+      }
+      return version;
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : "Failed to create version";
+      throw e;
     }
-    return version;
   }
 
   async function rollback(promptId: UUID, versionId: UUID) {
-    const version = await api.rollbackVersion(promptId, versionId);
-    const idx = items.value.findIndex((p) => p.id === promptId);
-    if (idx >= 0) {
-      items.value[idx] = {
-        ...items.value[idx],
-        current_version_id: version.id,
-      };
+    error.value = null;
+    try {
+      const version = await api.rollbackVersion(promptId, versionId);
+      const idx = items.value.findIndex((p) => p.id === promptId);
+      if (idx >= 0) {
+        items.value[idx] = {
+          ...items.value[idx],
+          current_version_id: version.id,
+        };
+      }
+      return version;
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : "Failed to rollback";
+      throw e;
     }
-    return version;
   }
 
   function select(promptId: UUID | null) {
