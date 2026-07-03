@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.core.exceptions import NotFoundError
@@ -372,5 +373,81 @@ def test_metrics_endpoint_label_uses_template(client: TestClient) -> None:
         out = metrics.render_prometheus()
         assert 'endpoint="/metrics"' in out
     finally:
+        metrics.reset()
+
+
+# ===================== request_id 贯穿日志链路（observability.spec.md§4/§8） =====================
+
+def test_request_id_propagates_to_request_log(
+    client: TestClient, caplog: pytest.LogCaptureFixture[str], healthy_deps: None
+) -> None:
+    """request_id 贯穿到请求结束日志行（observability.spec.md§4/§8 端到端验证）。
+
+    携带 X-Request-ID 请求 → 该值同时出现在响应头与 "request completed" 日志记录，
+    证明 ContextVar 注入链路完整（中间件 set → filter 注入 → 日志携带）。
+    """
+    import logging
+
+    from app.core.logging import RequestContextFilter
+
+    # caplog 自带 handler 无 RequestContextFilter，手动挂载使 request_id 注入捕获记录
+    caplog.set_level(logging.INFO, logger="app.main")
+    caplog.handler.addFilter(RequestContextFilter())
+
+    custom_rid = "trace-e2e-abc-123"
+    resp = client.get("/health", headers={"X-Request-ID": custom_rid})
+    assert resp.status_code == 200
+    # 响应头回传（§4）
+    assert resp.headers["X-Request-ID"] == custom_rid
+
+    # 请求结束日志应携带同一 request_id（§4 贯穿日志）
+    completed = [
+        r for r in caplog.records if r.getMessage() == "request completed"
+    ]
+    assert completed, "未捕获到 request completed 日志"
+    assert getattr(completed[-1], "request_id", None) == custom_rid
+
+
+# ===================== 错误率指标（observability.spec.md§5.1 error_rate） =====================
+
+def test_4xx_recorded_in_request_count(client: TestClient) -> None:
+    """4xx 请求被记入 request_count（error_rate 可观测）。"""
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    try:
+        # 触发 404（GET 不存在的 prompt）
+        import uuid
+
+        resp = client.get(f"/api/v1/prompts/{uuid.uuid4()}")
+        assert resp.status_code == 404
+        # 404 应出现在 request_count（中间件对所有 HTTP 请求记录指标）。
+        # endpoint 标签为路由模板（不含 /api/v1 前缀，scope["route"].path 返回子路由路径）。
+        assert metrics.get_counter("request_count", ("GET", "/prompts/{prompt_id}", "404")) >= 1.0
+    finally:
+        metrics.reset()
+
+
+def test_5xx_recorded_in_request_count(client: TestClient) -> None:
+    """5xx 请求被记入 request_count（error_rate 可观测，§5.1）。"""
+    from app.core.metrics import metrics
+    from app.main import app
+
+    async def raise_500() -> None:
+        raise RuntimeError("simulated failure")
+
+    app.add_api_route("/__test_500__", raise_500, methods=["GET"])
+    transport = client._transport
+    original = transport.raise_server_exceptions
+    transport.raise_server_exceptions = False
+
+    metrics.reset()
+    try:
+        resp = client.get("/__test_500__")
+        assert resp.status_code == 500
+        # 500 应出现在 request_count（异常路径 effective_status=500）
+        assert metrics.get_counter("request_count", ("GET", "/__test_500__", "500")) >= 1.0
+    finally:
+        transport.raise_server_exceptions = original
         metrics.reset()
 
