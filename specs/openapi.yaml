@@ -98,7 +98,7 @@ paths:
     get:
       tags: [meta]
       summary: Health
-      description: 健康检查。
+      description: 健康检查。依赖（DB/Redis）可达返回 ok，否则 degraded（仍 200）。
       operationId: health_health_get
       responses:
         '200':
@@ -106,9 +106,25 @@ paths:
           content:
             application/json:
               schema:
-                additionalProperties: {type: string}
                 type: object
-                title: Response Health Health Get
+                title: HealthResponse
+                required: [status, version, checks]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok, degraded]
+                  version:
+                    type: string
+                  checks:
+                    type: object
+                    required: [database, redis]
+                    properties:
+                      database:
+                        type: string
+                        enum: [ok, down]
+                      redis:
+                        type: string
+                        enum: [ok, down]
         '500': {$ref: '#/components/responses/InternalServerError'}
   /:
     get:

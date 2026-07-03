@@ -19,7 +19,7 @@ from app.core.exceptions import NotFoundError
 
 # ===================== health =====================
 
-def test_health_endpoint(client: TestClient) -> None:
+def test_health_endpoint(client: TestClient, healthy_deps: None) -> None:
     """GET /health 返回 200 和 {status: ok, version}。"""
     resp = client.get("/health")
     assert resp.status_code == 200

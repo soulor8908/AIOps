@@ -108,7 +108,7 @@ Phase 6       生产化与文档          →  v0.1.0 GA
 > 目标：生产可部署、可观测。对应 SPEC §8.4 / §8.5。
 
 - [x] **4.1** K8s 补 HPA + PDB，frontend 升至 2 replicas，ConfigMap/Secret 分离（G2）
-- [ ] **4.2** `/health` 返回 status + version；镜像含 HEALTHCHECK + 非 root（UID 1000）回归
+- [x] **4.2** `/health` 返回 status + version；镜像含 HEALTHCHECK + 非 root（UID 1000）回归
 - [ ] **4.3** 结构化 JSON 日志 + request_id 贯穿链路验证
 - [ ] **4.4** 指标采集（请求数/延迟/错误率/LLM token 与成本）接入 Prometheus
 - [ ] **4.5** 告警规则：错误率 >5%、P99 >2s、LLM 成本超阈值（G5）
