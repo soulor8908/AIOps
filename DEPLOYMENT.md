@@ -14,10 +14,10 @@
 
 ```bash
 # 后端
-docker build -f ops/Dockerfile.backend -t aiops/backend:0.1.0 backend/
+docker build -f ops/Dockerfile.backend -t aiops/backend:0.1.0 .
 
 # 前端（builder: node:20-alpine → runtime: nginx 托管 dist/）
-docker build -f ops/Dockerfile.frontend -t aiops/frontend:0.1.0 frontend/
+docker build -f ops/Dockerfile.frontend -t aiops/frontend:0.1.0 .
 ```
 
 > 前端生产由 **nginx 托管静态文件**，禁止跑 dev server（`ops/nginx.conf`）。
@@ -121,7 +121,7 @@ kubectl exec -it deploy/aiops-backend -- alembic upgrade head
 
 ```bash
 # 1. 构建新镜像
-docker build -f ops/Dockerfile.backend -t aiops/backend:0.1.1 backend/
+docker build -f ops/Dockerfile.backend -t aiops/backend:0.1.1 .
 
 # 2. 推送 + 更新 manifest image tag
 # 3. 迁移（先于滚动更新，避免新代码读旧 schema）

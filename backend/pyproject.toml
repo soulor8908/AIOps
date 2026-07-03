@@ -69,6 +69,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.ruff.lint.per-file-ignores]
 # FastAPI 的 Depends()/Query()/Body() 等在默认参数中是框架约定，B008 误报
 "app/**/router.py" = ["B008"]
+"app/main.py" = ["B008"]
 "app/core/security.py" = ["B008"]
 "app/core/deps.py" = ["B008"]
 "app/domains/auth/router.py" = ["B008"]

@@ -178,12 +178,13 @@ async def _active_models(
 async def _conversations_by_day(
     session: AsyncSession, since: datetime
 ) -> list[dict[str, Any]]:
-    """按天聚合对话数（最近 N 天）。"""
+    """按天聚合对话数与成本（最近 N 天）。"""
     stmt = (
         select(
             func.date_trunc("day", Conversation.created_at).label("day"),
             func.count().label("count"),
             func.sum(Conversation.total_tokens).label("tokens"),
+            func.coalesce(func.sum(Conversation.total_cost), Decimal("0")).label("cost"),
         )
         .where(Conversation.created_at >= since)
         .group_by("day")
@@ -196,6 +197,7 @@ async def _conversations_by_day(
             "date": str(row.day)[:10] if row.day is not None else "",
             "count": int(cast(Any, row.count)),
             "tokens": int(row.tokens or 0),
+            "cost": str(row.cost or Decimal("0")),
         }
         for row in rows
     ]

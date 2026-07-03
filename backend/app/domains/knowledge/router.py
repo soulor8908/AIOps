@@ -28,9 +28,11 @@ logger = logging.getLogger("app.audit.knowledge")
 router = APIRouter(prefix="/knowledge-bases", tags=["knowledge"])
 
 # security.spec.md§7.2 — 文件上传 content-type 白名单。
-# 禁止 octet-stream、可执行类、脚本类 MIME。
+# 仅放行文本类 MIME：当前 pipeline 对内容做 UTF-8 decode + 文本分块，
+# 二进制格式（PDF/DOCX）需专用提取器，暂不支持以避免静默数据损坏
+# （PDF 逐字节 UTF-8 decode 会全替换为 U+FFFD，产出垃圾 embedding）。
 ALLOWED_MIME_TYPES: frozenset[str] = frozenset(
-    {"text/plain", "text/markdown", "application/pdf"}
+    {"text/plain", "text/markdown"}
 )
 # Content-Length 预检阈值：50MB 文档 + 1MB multipart 开销余量（security.spec.md§7.1）。
 _MAX_CONTENT_LENGTH = MAX_DOC_BYTES + 1024 * 1024

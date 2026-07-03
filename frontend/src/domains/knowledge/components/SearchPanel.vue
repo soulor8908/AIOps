@@ -47,7 +47,7 @@ async function onFileChange(e: Event) {
             ref="fileInput"
             type="file"
             class="hidden"
-            accept=".pdf,.txt,.md,.docx"
+            accept=".txt,.md"
             @change="onFileChange"
           />
         </div>

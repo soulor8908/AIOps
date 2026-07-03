@@ -2,6 +2,9 @@
   "name": "aiops-console-frontend",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=20 <21"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",

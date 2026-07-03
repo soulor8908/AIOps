@@ -45,11 +45,14 @@ def _is_llm_endpoint(path: str) -> bool:
 
 
 def _extract_user_id(scope: Scope) -> str | None:
-    """从 Authorization Bearer token 解码 user_id（不验证签名，仅用于限流 keying）。
+    """从 Authorization Bearer token 解码 user_id（验签 + 验过期，仅用于限流 keying）。
 
     实际认证校验由路由依赖 ``get_current_user`` 完成。此处仅提取 ``sub`` claim
     作为限流维度——即使伪造 token 也无法绕过限流（配额按 user_id 计），
     且伪造 token 在路由层会被拒绝。
+
+    P2：启用 ``verify_exp``——过期 token 不应消耗目标用户配额（攻击者持有泄露的
+    过期 token 可借限流 keying 挤占真实用户配额）。过期/无效 token 退化为按 IP 限流。
     """
     for name, value in scope.get("headers", []):
         if name == b"authorization":
@@ -62,12 +65,12 @@ def _extract_user_id(scope: Scope) -> str | None:
                     token,
                     settings.effective_secret_key,
                     algorithms=["HS256"],
-                    options={"verify_exp": False},
+                    options={"verify_exp": True},
                 )
                 sub = payload.get("sub")
                 return sub if isinstance(sub, str) else None
             except PyJWTError:
-                # 限流 keying 容错：token 无效/格式错误时退化为按 IP 限流。
+                # 限流 keying 容错：token 无效/过期/格式错误时退化为按 IP 限流。
                 # 实际认证由 get_current_user 路由依赖完成。
                 return None
     return None

@@ -8,17 +8,20 @@ Schema: ModelProvider / ModelConfigCreate / ModelConfigOut /
 from __future__ import annotations
 
 import enum
+import ipaddress
 import uuid
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import Boolean, Float, Index, Integer, Numeric, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
+from app.core.exceptions import ValidationError
 
 # ===================== 枚举 =====================
 
@@ -74,6 +77,41 @@ class ModelConfig(Base):
 
 # ===================== Schemas =====================
 
+
+def _validate_api_base(value: str | None) -> str | None:
+    """SSRF 防护：拒绝指向内网/环回/元数据地址的 api_base。
+
+    security.spec.md — LLM/embedder 出站地址不得指向私网段、环回、link-local
+    或云元数据端点（169.254.169.254），否则普通用户可借 chat/RAG 探测内网。
+    None 表示使用 provider 默认地址（如 OpenAI 官方），放行。
+    """
+    if value is None or value == "":
+        return value
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https"):
+        raise ValidationError(
+            f"api_base 必须使用 http/https 协议（当前: {parsed.scheme or '空'}）"
+        )
+    host = parsed.hostname
+    if not host:
+        raise ValidationError(f"api_base 缺少 host: {value}")
+    # 拒绝 localhost 主机名
+    if host.lower() in ("localhost",):
+        raise ValidationError("api_base 禁止指向 localhost")
+    # 尝试解析为 IP 地址（IPv4/IPv6），拒绝私网/环回/link-local/保留段
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # 非 IP 字面量（域名），放行——DNS 解析后的 IP 校验应在 httpx transport 层
+        # 完成（更彻底），此处先拦截明显的 IP 字面量 SSRF
+        return value
+    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+        raise ValidationError(
+            f"api_base 禁止指向内网/环回/link-local 地址: {host}"
+        )
+    return value
+
+
 class ModelConfigCreate(BaseModel):
     """创建模型配置入参。"""
 
@@ -89,6 +127,11 @@ class ModelConfigCreate(BaseModel):
     priority: int = Field(default=100, ge=0, le=1000)
     is_active: bool = True
 
+    @field_validator("api_base")
+    @classmethod
+    def _check_api_base(cls, v: str | None) -> str | None:
+        return _validate_api_base(v)
+
 
 class ModelConfigUpdate(BaseModel):
     """更新模型配置入参。"""
@@ -102,6 +145,11 @@ class ModelConfigUpdate(BaseModel):
     cost_per_1k_output: Decimal | None = None
     is_active: bool | None = None
     priority: int | None = Field(default=None, ge=0, le=1000)
+
+    @field_validator("api_base")
+    @classmethod
+    def _check_api_base(cls, v: str | None) -> str | None:
+        return _validate_api_base(v)
 
 
 class ModelConfigOut(BaseModel):

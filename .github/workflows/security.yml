@@ -1,0 +1,39 @@
+name: security
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"  # 每周一 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit
+      - run: pip-audit -r <(cd backend && pip install --dry-run -e . 2>/dev/null | grep 'Would install' | awk '{print $3}') || true
+        # 简化：直接扫描 backend 的依赖
+      - name: pip-audit backend
+        working-directory: backend
+        run: |
+          pip install .
+          pip-audit
+        continue-on-error: true
+
+  npm-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: npm audit frontend
+        working-directory: frontend
+        run: npm audit --audit-level=high
+        continue-on-error: true

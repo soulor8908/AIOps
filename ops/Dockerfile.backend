@@ -23,10 +23,20 @@ RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 COPY backend/pyproject.toml ./
+# pyproject.toml 中 readme = "SPEC.md"，setuptools 构建元数据需要该文件存在
+COPY backend/SPEC.md ./
 RUN pip install --upgrade pip && pip install .
 
 # ---------- Stage 2: runtime ----------
 FROM python:3.12-slim AS runtime
+
+# OCI 标准标签（deployment.spec.md §可观测性 / 供应链安全）
+ARG GIT_SHA=""
+ARG VERSION="0.1.0"
+LABEL org.opencontainers.image.title="aiops-console-backend" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.source="https://github.com/soulor8908/AIOps"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

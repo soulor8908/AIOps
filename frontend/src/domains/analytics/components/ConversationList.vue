@@ -27,7 +27,7 @@ onMounted(() => store.fetchConversations());
       <Button @click="onFilter">Filter</Button>
       <!-- P3：Refresh 复用当前日期筛选，避免一点刷新就丢失已选时间范围 -->
       <Button variant="outline" @click="onFilter">Refresh</Button>
-      <span class="text-sm text-muted-foreground">{{ formatNumber(store.total) }} total</span>
+      <span class="text-sm text-muted-foreground">{{ formatNumber(store.total) }} loaded</span>
     </div>
 
     <Alert v-if="store.error" :message="store.error" @retry="store.fetchConversations()" />

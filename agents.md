@@ -137,3 +137,24 @@ prompts add version rollback
 | 可观测性 | `specs/observability.spec.md` | JSON 结构化日志、request_id 追踪、指标、告警、前端监控 |
 
 每次涉及横切关注点的变更，必须先更新对应 `specs/*.spec.md`，再更新 eval，再更新代码。
+
+## 12. 分支与合并规则
+
+> 统一分支策略与合并门槛，保证主干线性、可追溯、可回滚。
+
+- **分支命名**：
+  - `feat/<scope>`：新功能
+  - `fix/<scope>`：bug 修复
+  - `chore/<scope>`：杂项维护（依赖升级、配置调整等）
+  - `docs/<scope>`：文档变更
+  - `<scope>` 用简短 kebab-case，能体现变更范围（如 `fix/p5-cors-bugs-workflow`）。
+- **主干保护**：`main` 分支禁止直推，所有变更必须通过 Pull Request 合并。
+- **合并方式**：使用 `git merge --no-ff` 保留分支拓扑（与现有历史一致），禁止 fast-forward 合并以保留特性分支上下文。
+- **Commit Message 格式**：保持现有 `<domain> <action> <target>` 风格（§7）或 Conventional Commits（`feat:` / `fix:` / `chore:` / `docs:`），二者择一，单条 commit 内保持一致。
+- **PR 审批**：至少 1 名 reviewer 审批通过方可合并（CODEOWNERS 自动请求 review）。
+- **Tag 命名**：`vMAJOR.MINOR.PATCH`（如 `v0.1.0`），与 `pyproject.toml` / `package.json` 版本号对齐。
+- **发布前置条件**：
+  1. CI 全绿（L1–L3 100% 通过、L4 > 0.85、secret-scan 通过、openapi-sync 无漂移）。
+  2. Docker 镜像可构建（CI `docker-build` job 验证 `ops/Dockerfile.{backend,frontend}`）。
+  3. 涉及 schema 变更时迁移一致性校验通过（`migration-consistency` job）。
+

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { useModelStore } from "../store";
-import { Button, Badge } from "@/shared/ui";
+import { Alert, Button, Badge } from "@/shared/ui";
 import { Card, CardHeader, CardTitle, CardContent } from "@/shared/ui";
 import { chatCompletion } from "../api";
 import type { ChatMessage } from "@/shared/api/types";
@@ -12,11 +12,13 @@ const response = ref("");
 const usage = ref<string>("");
 const cost = ref<string>("");
 const sending = ref(false);
+const error = ref<string | null>(null);
 
 async function onSend() {
   if (!store.selected || !userInput.value.trim()) return;
   sending.value = true;
   response.value = "";
+  error.value = null;
   try {
     const messages: ChatMessage[] = [{ role: "user", content: userInput.value }];
     const res = await chatCompletion(store.selected.alias, { messages });
@@ -24,7 +26,7 @@ async function onSend() {
     usage.value = JSON.stringify(res.usage);
     cost.value = res.cost;
   } catch (e) {
-    response.value = e instanceof Error ? e.message : "Request failed";
+    error.value = e instanceof Error ? e.message : "Request failed";
   } finally {
     sending.value = false;
   }
@@ -59,6 +61,8 @@ async function onSend() {
             {{ sending ? "Sending..." : "Send" }}
           </Button>
         </div>
+
+        <Alert v-if="error" :message="error" />
 
         <div v-if="response || cost !== ''" class="mt-4 space-y-2">
           <div class="text-xs font-medium text-muted-foreground">Response</div>
