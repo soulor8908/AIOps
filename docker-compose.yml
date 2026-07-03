@@ -1,4 +1,8 @@
 # 本地开发环境（dev server + 热重载）。生产部署见 DEPLOYMENT.md 与 ops/k8s/。
+#
+# deploy.resources.limits 为开发机资源上限（防止单容器吃满宿主机内存/CPU
+# 影响其他服务）。生产环境资源限制由 K8s deployment.yaml 的 resources.requests/
+# limits 管理，与此处独立。
 services:
   db:
     image: pgvector/pgvector:pg16
@@ -16,6 +20,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
 
   redis:
     image: redis:7-alpine
@@ -26,6 +35,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
 
   backend:
     build: ./backend
@@ -44,6 +58,11 @@ services:
       redis:
         condition: service_healthy
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
 
   frontend:
     # dev server 跑 Vite（热重载）；生产镜像（nginx 托管 dist/）见 ops/Dockerfile.frontend，
@@ -60,6 +79,11 @@ services:
     depends_on:
       - backend
     command: sh -c "npm install && npm run dev -- --host"
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
 
 volumes:
   postgres_data:

@@ -152,7 +152,10 @@ async def chat_completion(
                 cost=cost,
                 fallback_used=idx > 0,
             )
-        except Exception as exc:  # noqa: BLE001
+        except LLMError as exc:
+            # LLMClient.chat 已将所有 HTTP/JSON/结构异常统一包装为 LLMError。
+            # 仅捕获 LLMError 以便降级到下一个候选模型；其它意外异常（如编程错误）
+            # 应直接向上传播而非被 fallback 逻辑吞掉。
             last_error = exc
             continue
         finally:

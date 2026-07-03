@@ -4,6 +4,9 @@
 - access token 默认 24h，refresh token 默认 7d（可配置）
 - ``type`` claim 区分 access / refresh，``verify_token`` 拒绝 refresh 类型
 - 过期单独抛 ``TokenExpiredError``，其它无效抛 ``AuthenticationError``
+
+依赖：``PyJWT``（活跃维护；python-jose 自 2022 年停止维护后迁移至此）。
+PyJWT 2.x ``encode`` 直接返回 str，``decode`` 返回 dict，API 简洁。
 """
 
 from __future__ import annotations
@@ -11,7 +14,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from jose import ExpiredSignatureError, JWTError, jwt
+import jwt as pyjwt
+from jwt import ExpiredSignatureError, PyJWTError
 
 from app.core.config import settings
 from app.core.exceptions import AuthenticationError, TokenExpiredError
@@ -22,7 +26,8 @@ TOKEN_TYPE_REFRESH = "refresh"
 
 
 def _encode(payload: dict[str, object]) -> str:
-    return jwt.encode(payload, settings.effective_secret_key, algorithm=ALGORITHM)
+    # PyJWT 2.x encode 返回 str（1.x 返回 bytes），无需 .decode()。
+    return pyjwt.encode(payload, settings.effective_secret_key, algorithm=ALGORITHM)
 
 
 def create_access_token(subject: str, expires_seconds: int | None = None) -> str:
@@ -48,10 +53,15 @@ def decode_token(token: str) -> dict[str, object]:
     - 其它无效 → ``AuthenticationError``（``error_code="token_invalid"``）
     """
     try:
-        return jwt.decode(token, settings.effective_secret_key, algorithms=[ALGORITHM])
+        # PyJWT 自动校验 exp（默认）。返回类型为 dict[str, Any]，此处窄化为业务类型。
+        payload: dict[str, object] = pyjwt.decode(
+            token, settings.effective_secret_key, algorithms=[ALGORITHM]
+        )
+        return payload
     except ExpiredSignatureError as exc:
         raise TokenExpiredError("认证凭据已过期") from exc
-    except JWTError as exc:
+    except PyJWTError as exc:
+        # PyJWTError 覆盖所有解码失败：签名错误、格式错误、claim 校验失败等。
         raise AuthenticationError(f"认证凭据无效: {exc}") from exc
 
 

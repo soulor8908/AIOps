@@ -17,8 +17,12 @@ dependencies = [
     "pgvector>=0.3",
     "httpx>=0.27",
     "redis>=5.2",
-    "python-jose[cryptography]>=3.3",
-    "passlib[bcrypt]>=1.7",
+    # JWT：PyJWT 是活跃维护的实现，python-jose 已停止维护（最后发布 2022）。
+    # PyJWT 2.x 直接返回 str（jose 1.x 返回 bytes），API 简洁。
+    "pyjwt>=2.8",
+    # bcrypt 直接调用：passlib 1.7.4 与 bcrypt >= 4.1 不兼容（passlib 读取已删除的
+    # __about__ 属性），且 passlib 维护停滞。bcrypt 4.x 内置类型注解。
+    "bcrypt>=4.0",
     "python-multipart>=0.0.12",
     # EmailStr（auth 域 UserCreate/LoginRequest）依赖 email-validator 运行期校验
     "email-validator>=2.1",
@@ -33,8 +37,6 @@ dev = [
     "mypy>=1.13",
     # 测试用 SQLite async 驱动（conftest 以 sqlite+aiosqlite:///:memory: 跑 L1/L2）
     "aiosqlite>=0.20",
-    "types-python-jose",
-    "types-passlib",
     # L2 契约测试（schemathesis）：覆盖所有 OpenAPI 端点的状态码/schema 校验
     "schemathesis>=3.36",
     # 数据库迁移（specs/migration.spec.md §3）：ORM 单一真源，autogenerate 派生迁移

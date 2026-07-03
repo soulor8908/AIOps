@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.core.exceptions import LLMError
+from app.core.exceptions import ValidationError
 from app.core.llm_client import LLMClient, LLMResponse, Message, parse_tool_calls_json
 from app.domains.agents.executor import (
     AgentExecutor,
@@ -215,6 +215,8 @@ async def test_executor_max_turns_reached() -> None:
     result = await executor.run(agent, "loop")
 
     assert result.final_answer == "达到最大轮次仍未给出最终答案。"
+    # 达到 max_turns 截断视为失败（success 语义修正）
+    assert result.success is False
     assert len(result.traces) == 2  # 每轮一个 trace
     assert result.traces[0].turn == 1
     assert result.traces[1].turn == 2
@@ -434,13 +436,13 @@ async def test_execute_workflow_dag_basic() -> None:
 
 
 async def test_execute_workflow_dag_empty_nodes_raises() -> None:
-    """空节点列表抛 LLMError。"""
-    with pytest.raises(LLMError, match="无节点"):
+    """空节点列表抛 ValidationError（输入校验，非 LLM 调用失败）。"""
+    with pytest.raises(ValidationError, match="无节点"):
         await execute_workflow_dag(uuid.uuid4(), [], [], lambda *_: None, "input")
 
 
 async def test_execute_workflow_dag_too_many_nodes_raises() -> None:
-    """节点数超 50 抛 LLMError。"""
+    """节点数超 50 抛 ValidationError（输入校验，非 LLM 调用失败）。"""
     nodes = [{"id": f"n{i}", "name": f"s{i}", "agent_id": None} for i in range(51)]
-    with pytest.raises(LLMError, match="超 50"):
+    with pytest.raises(ValidationError, match="超 50"):
         await execute_workflow_dag(uuid.uuid4(), nodes, [], lambda *_: None, "input")

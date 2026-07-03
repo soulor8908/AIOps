@@ -10,7 +10,7 @@
 - RBAC 角色控制：`admin` / `user` 两级角色，按角色限制资源操作
 
 ## Constraints
-- 密码最小长度 8，使用 bcrypt 哈希（`passlib[bcrypt]`，`security.hash_password`）
+- 密码最小长度 8，使用 bcrypt 哈希（`bcrypt` 直接调用，`security.hash_password`）
 - access token 过期时间默认 24h，可通过环境变量 `ACCESS_TOKEN_EXPIRE_MINUTES`（默认 `1440`）配置
 - token 格式：`Authorization: Bearer <jwt>`；算法 HS256
 - 支持 refresh token：默认 7d，可通过 `REFRESH_TOKEN_EXPIRE_DAYS`（默认 `7`）配置；JWT claim `type` 区分 `access` / `refresh`
@@ -68,7 +68,7 @@
 - `get_current_user(token=Depends(oauth2_scheme)) -> User`
   - 解析 Bearer token → `verify_token` → 按 `sub`(user_id) 查 `users` 表
   - 未带 / 无效 token → `AuthenticationError`（401，`error_code="token_invalid"`）
-  - token 过期 → `TokenExpiredError`（401，`error_code="token_expired"`；需在 `verify_token` 中捕获 `jose.ExpiredSignatureError` 单独标记）
+  - token 过期 → `TokenExpiredError`（401，`error_code="token_expired"`；需在 `verify_token` 中捕获 `jwt.ExpiredSignatureError` 单独标记）
   - 用户不存在 / `is_active=false` → `AuthenticationError`（401）
 - `get_current_admin(user=Depends(get_current_user)) -> User`
   - 在 `get_current_user` 基础上校验 `is_admin=true`

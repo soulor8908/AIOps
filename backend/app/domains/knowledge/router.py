@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile, status
@@ -21,6 +22,8 @@ from app.domains.knowledge.models import (
     SearchResult,
 )
 from app.domains.knowledge.service import MAX_DOC_BYTES
+
+logger = logging.getLogger("app.audit.knowledge")
 
 router = APIRouter(prefix="/knowledge-bases", tags=["knowledge"])
 
@@ -80,18 +83,52 @@ async def upload_document(
     # security.spec.md§7.1 — 先检 Content-Length，超限直接拒绝（防大文件耗尽内存）。
     content_length = int(request.headers.get("content-length", "0"))
     if content_length > _MAX_CONTENT_LENGTH:
+        # 审计：上传被拒绝（超大文件），记录 user/kb/size 便于追溯异常上传行为。
+        logger.warning(
+            "file_upload_rejected",
+            extra={
+                "event": "file_upload",
+                "outcome": "rejected",
+                "reason": "too_large",
+                "user_id": str(current_user.id),
+                "kb_id": str(kb_id),
+                "content_length": content_length,
+            },
+        )
         raise ValidationError(
             f"文件超 {MAX_DOC_BYTES // 1024 // 1024}MB 上限"
             f"（Content-Length: {content_length} bytes）"
         )
     # security.spec.md§7.2 — content-type 白名单校验。
     if file.content_type not in ALLOWED_MIME_TYPES:
+        logger.warning(
+            "file_upload_rejected",
+            extra={
+                "event": "file_upload",
+                "outcome": "rejected",
+                "reason": "unsupported_mime",
+                "user_id": str(current_user.id),
+                "kb_id": str(kb_id),
+                "mime_type": file.content_type,
+            },
+        )
         raise ValidationError(
             f"不支持的文件类型 '{file.content_type}'，"
             f"仅允许: {', '.join(sorted(ALLOWED_MIME_TYPES))}"
         )
     content = (await file.read()).decode("utf-8", errors="replace")
     if not content.strip():
+        logger.warning(
+            "file_upload_rejected",
+            extra={
+                "event": "file_upload",
+                "outcome": "rejected",
+                "reason": "empty_content",
+                "user_id": str(current_user.id),
+                "kb_id": str(kb_id),
+                "title": title,
+            },
+        )
         raise ValidationError("文档内容为空")
     # security.spec.md§7.4 — 文件名 UUID 重命名，禁止保留用户原始文件名（防目录穿越）。
     source_uri = str(uuid.uuid4())
@@ -102,6 +139,20 @@ async def upload_document(
         content=content,
         mime_type=file.content_type,
         source_uri=source_uri,
+    )
+    # 审计：上传成功，记录 user/kb/doc/title/mime/size 便于追溯（不记录原始文件名）。
+    logger.info(
+        "file_upload_success",
+        extra={
+            "event": "file_upload",
+            "outcome": "success",
+            "user_id": str(current_user.id),
+            "kb_id": str(kb_id),
+            "doc_id": str(doc.id),
+            "title": title,
+            "mime_type": file.content_type,
+            "content_length": content_length,
+        },
     )
     return DocumentOut.model_validate(doc)
 

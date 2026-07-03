@@ -59,7 +59,9 @@ async def judge_llm(
     )
     try:
         resp = await client.chat([Message(role="user", content=prompt)])
-    except Exception as exc:  # noqa: BLE001
+    except LLMError as exc:
+        # LLMClient.chat 已将所有 HTTP/JSON/结构异常统一包装为 LLMError，
+        # 此处仅重抛并附加上下文，无需捕获更宽异常。
         raise LLMError(f"LLM 判官调用失败: {exc}") from exc
     import json
 

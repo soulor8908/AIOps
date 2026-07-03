@@ -2,7 +2,7 @@
 
 覆盖 6 项验收：
 1. ReAct 循环在无工具调用时正确终止并返回最终答案
-2. 达到 max_turns 仍无最终答案时返回截断提示且 success=True
+2. 达到 max_turns 仍无最终答案时返回截断提示且 success=False（截断视为失败）
 3. 单工具执行异常被隔离捕获，不中断整体循环
 4. DAG 节点 > 50 时创建与执行均报错
 5. 每轮 ExecutionTrace 完整记录 thought/action/observation/tokens
@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.core.exceptions import LLMError, ValidationError
+from app.core.exceptions import ValidationError
 from app.core.llm_client import LLMResponse
 from app.domains.agents import service as agent_service
 from app.domains.agents.executor import (
@@ -105,12 +105,12 @@ async def test_react_terminates_when_no_tool_calls() -> None:
     assert executor.llm.chat.await_count == 1  # type: ignore[attr-defined]
 
 
-# ===================== 2. max_turns 截断 → success=True =====================
+# ===================== 2. max_turns 截断 → success=False =====================
 
 
 @pytest.mark.asyncio
-async def test_max_turns_truncation_returns_success() -> None:
-    """达到 max_turns 仍无最终答案 → 截断提示且 success=True（SPEC 2）。"""
+async def test_max_turns_truncation_returns_failure() -> None:
+    """达到 max_turns 仍无最终答案 → 截断提示且 success=False（SPEC 2，截断视为失败）。"""
     agent = _agent(max_turns=2)
     # 每轮都返回工具调用，永远不给出最终答案
     executor = _executor_with_chat(
@@ -119,7 +119,7 @@ async def test_max_turns_truncation_returns_success() -> None:
 
     result = await executor.run(agent, "查询天气")
 
-    assert result.success is True  # 截断也视为 success
+    assert result.success is False  # 截断视为失败（success 语义修正）
     assert "最大轮次" in result.final_answer
     # 应尝试了 max_turns 轮（2 轮）
     assert executor.llm.chat.await_count == 2  # type: ignore[attr-defined]
@@ -193,10 +193,10 @@ async def test_dag_create_workflow_rejects_over_50_nodes() -> None:
 
 @pytest.mark.asyncio
 async def test_dag_execute_rejects_over_50_nodes() -> None:
-    """execute_workflow_dag 在节点 > 50 时抛 LLMError（SPEC 4 - 执行路径）。"""
+    """execute_workflow_dag 节点 > 50 时抛 ValidationError（SPEC 4：输入校验，非 LLM 失败）。"""
     nodes = [{"id": f"n{i}", "name": f"node-{i}"} for i in range(51)]
 
-    with pytest.raises(LLMError) as exc_info:
+    with pytest.raises(ValidationError) as exc_info:
         await execute_workflow_dag(
             uuid.uuid4(), nodes, [], AsyncMock(), "input"
         )
@@ -205,8 +205,8 @@ async def test_dag_execute_rejects_over_50_nodes() -> None:
 
 @pytest.mark.asyncio
 async def test_dag_empty_nodes_raises() -> None:
-    """DAG 节点为空时抛 LLMError（SPEC Error Cases 补充验证）。"""
-    with pytest.raises(LLMError) as exc_info:
+    """DAG 节点为空时抛 ValidationError（SPEC Error Cases 补充验证）。"""
+    with pytest.raises(ValidationError) as exc_info:
         await execute_workflow_dag(uuid.uuid4(), [], [], AsyncMock(), "x")
     assert "无节点" in str(exc_info.value)
 
