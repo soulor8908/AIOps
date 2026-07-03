@@ -25,7 +25,7 @@ app/
 │   ├── __init__.py
 │   ├── config.py        # Pydantic Settings，12 个字段
 │   ├── database.py      # async engine + sessionmaker + Base + init_db
-│   ├── security.py      # JWT + OAuth2 + passlib（极简）
+│   ├── security.py      # bcrypt 密码哈希（直接调用，无 passlib）
 │   ├── llm_client.py    # 自研 LLM 客户端（~80 行）：openai/anthropic/local
 │   └── exceptions.py    # 全局异常层级
 └── domains/
@@ -132,7 +132,7 @@ app/
 - JWT (HS256) + OAuth2PasswordBearer
 - `create_access_token` / `verify_token` / `hash_password` / `verify_password`
 - Token 默认 30 分钟过期
-- 密码 bcrypt via passlib
+- 密码 bcrypt via bcrypt（直接调用）
 
 ## 6. LLM 客户端
 

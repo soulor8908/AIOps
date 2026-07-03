@@ -16,35 +16,11 @@ import contextlib
 from datetime import datetime
 from typing import Any
 
-# ---------- bcrypt / passlib 兼容性修复 ----------
-# passlib 1.7.4 与 bcrypt >= 4.1 存在两处不兼容：
-# 1. passlib 读取 bcrypt.__about__.__version__ 检测版本，但 bcrypt >= 4.1
-#    移除了 __about__ 属性 → 补回。
-# 2. passlib 的 detect_wrap_bug 内部使用 255 字节测试密码，依赖旧版 bcrypt
-#    的静默截断行为（>72 字节自动截断），但 bcrypt 5.x 改为严格校验并抛出
-#    ValueError → 用包装函数恢复静默截断语义。
-import bcrypt as _bcrypt
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import event
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.compiler import compiles
-
-if not hasattr(_bcrypt, "__about__"):
-    _bcrypt.__about__ = type("about", (), {"__version__": _bcrypt.__version__})
-
-_orig_hashpw = _bcrypt.hashpw
-
-
-def _truncating_hashpw(secret, *args, **kwargs):
-    """bcrypt 5.x 兼容包装：超过 72 字节的密码静默截断（旧行为）。"""
-    if isinstance(secret, (bytes, bytearray, memoryview)):
-        secret = bytes(secret)[:72]
-    return _orig_hashpw(secret, *args, **kwargs)
-
-
-_bcrypt.hashpw = _truncating_hashpw
-
 
 # ---------- PG 类型在 SQLite 上的 DDL 渲染 ----------
 

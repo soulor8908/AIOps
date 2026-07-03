@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import time
 
+import jwt as pyjwt
 import pytest
-from jose import jwt
 
 from app.core.config import settings
 from app.core.exceptions import AuthenticationError, TokenExpiredError
@@ -32,7 +32,7 @@ from app.core.security import hash_password, verify_password
 def test_create_access_token_returns_valid_jwt() -> None:
     """创建 token 并验证可解码。"""
     token = create_access_token("user-123")
-    payload = jwt.decode(token, settings.effective_secret_key, algorithms=[ALGORITHM])
+    payload = pyjwt.decode(token, settings.effective_secret_key, algorithms=[ALGORITHM])
     assert payload["sub"] == "user-123"
     assert payload["type"] == TOKEN_TYPE_ACCESS
 
@@ -40,7 +40,7 @@ def test_create_access_token_returns_valid_jwt() -> None:
 def test_create_access_token_contains_sub_and_exp() -> None:
     """验证 token payload 包含 sub / exp / type。"""
     token = create_access_token("user-456")
-    payload = jwt.decode(token, settings.effective_secret_key, algorithms=[ALGORITHM])
+    payload = pyjwt.decode(token, settings.effective_secret_key, algorithms=[ALGORITHM])
     assert "sub" in payload
     assert "exp" in payload
     assert payload["sub"] == "user-456"
@@ -55,8 +55,8 @@ def test_create_access_token_with_custom_expiry() -> None:
     token_short = create_access_token("user-a", expires_seconds=60)
     token_long = create_access_token("user-b", expires_seconds=36000)
 
-    payload_short = jwt.decode(token_short, settings.effective_secret_key, algorithms=[ALGORITHM])
-    payload_long = jwt.decode(token_long, settings.effective_secret_key, algorithms=[ALGORITHM])
+    payload_short = pyjwt.decode(token_short, settings.effective_secret_key, algorithms=[ALGORITHM])
+    payload_long = pyjwt.decode(token_long, settings.effective_secret_key, algorithms=[ALGORITHM])
 
     # 60s vs 36000s，exp 差距应大于 30000s
     diff = payload_long["exp"] - payload_short["exp"]
@@ -68,7 +68,7 @@ def test_create_access_token_with_custom_expiry() -> None:
 def test_create_refresh_token_has_refresh_type() -> None:
     """refresh token 的 type claim 必须为 refresh。"""
     token = create_refresh_token("user-r")
-    payload = jwt.decode(token, settings.effective_secret_key, algorithms=[ALGORITHM])
+    payload = pyjwt.decode(token, settings.effective_secret_key, algorithms=[ALGORITHM])
     assert payload["sub"] == "user-r"
     assert payload["type"] == TOKEN_TYPE_REFRESH
 
@@ -77,8 +77,8 @@ def test_refresh_token_lives_longer_than_access() -> None:
     """refresh token 默认过期（7d）应远晚于 access token（24h）。"""
     access = create_access_token("user-x")
     refresh = create_refresh_token("user-x")
-    pa = jwt.decode(access, settings.effective_secret_key, algorithms=[ALGORITHM])
-    pr = jwt.decode(refresh, settings.effective_secret_key, algorithms=[ALGORITHM])
+    pa = pyjwt.decode(access, settings.effective_secret_key, algorithms=[ALGORITHM])
+    pr = pyjwt.decode(refresh, settings.effective_secret_key, algorithms=[ALGORITHM])
     assert pr["exp"] > pa["exp"]
 
 
@@ -129,7 +129,7 @@ def test_verify_token_invalid() -> None:
 
 def test_verify_token_wrong_secret() -> None:
     """用错误密钥签发的 token 应被拒绝。"""
-    token = jwt.encode(
+    token = pyjwt.encode(
         {"sub": "user-x", "exp": int(time.time()) + 3600, "type": TOKEN_TYPE_ACCESS},
         "wrong-secret",
         algorithm=ALGORITHM,
@@ -140,7 +140,7 @@ def test_verify_token_wrong_secret() -> None:
 
 def test_verify_token_missing_sub() -> None:
     """token 缺少 sub 字段时抛异常。"""
-    token = jwt.encode(
+    token = pyjwt.encode(
         {"exp": int(time.time()) + 3600, "type": TOKEN_TYPE_ACCESS},
         settings.effective_secret_key,
         algorithm=ALGORITHM,

@@ -69,9 +69,10 @@
 
 ## Error Cases
 - Agent / Workflow 不存在 → `NotFoundError` (404)
-- DAG 节点为空 → `LLMError` (502, "工作流无节点")
-- DAG 节点 > 50 → `LLMError` (502)
+- DAG 节点为空 → `ValidationError` (422, "工作流无节点")
+- DAG 节点 > 50 → `ValidationError` (422)
 - LLM 调用 HTTP 失败 → `LLMError` (502)
 - 未知工具名 → 记录 `[未知工具: name]` 观察结果，不抛错
 - 工具执行异常 → 记录 `[{name} 错误] {exc}` 观察结果，不中断循环
 - `tool_executor` 未配置 → 记录 `[tool executor 未配置，跳过工具调用]`
+- 达到 `max_turns` 截断 → `ExecutionResult.success = False`（视为执行失败而非成功）

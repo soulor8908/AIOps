@@ -11,7 +11,7 @@ import uuid
 from collections import deque
 from typing import Any, Protocol, cast
 
-from app.core.exceptions import LLMError
+from app.core.exceptions import ValidationError
 from app.core.llm_client import LLMClient, LLMResponse, Message
 from app.domains.agents.models import (
     Agent,
@@ -66,6 +66,8 @@ class AgentExecutor:
         traces: list[ExecutionTrace] = []
         total_tokens = 0
         final_answer = ""
+        # success 仅在 LLM 给出最终答案时为 True；达到 max_turns 截断视为失败。
+        success = False
         for turn in range(1, turns + 1):
             done, answer = await self._run_turn(
                 turn, messages, tool_defs, traces
@@ -73,6 +75,7 @@ class AgentExecutor:
             total_tokens = traces[-1].tokens if traces else 0
             if done:
                 final_answer = answer
+                success = True
                 break
         else:
             final_answer = "达到最大轮次仍未给出最终答案。"
@@ -81,7 +84,7 @@ class AgentExecutor:
             final_answer=final_answer,
             traces=traces,
             total_tokens=total_tokens,
-            success=bool(final_answer),
+            success=success,
         )
 
     def _init_messages(
@@ -173,9 +176,9 @@ async def execute_workflow_dag(
 ) -> ExecutionResult:
     """DAG 执行：从 entry 节点沿 edges BFS 遍历，逐节点执行并传递上下文。"""
     if not nodes:
-        raise LLMError("工作流无节点")
+        raise ValidationError("工作流无节点")
     if len(nodes) > 50:
-        raise LLMError("DAG 节点数超 50 上限")
+        raise ValidationError("DAG 节点数超 50 上限")
     node_map = {node["id"]: node for node in nodes}
     if edges:
         adjacency: dict[str, list[str]] = {nid: [] for nid in node_map}

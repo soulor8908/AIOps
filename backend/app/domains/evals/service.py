@@ -98,8 +98,9 @@ async def run_eval(
             results.append(result)
             if result.passed:
                 pass_count += 1
-    except Exception:
-        # 独立事务落库 ERROR 状态，避免被 get_session rollback 吞掉。
+    except Exception:  # noqa: BLE001
+        # predict_fn 为调用方注入的任意可调用对象，可能抛任意异常；
+        # 任何异常都需把 eval 标记为 ERROR 状态后重抛，由调用方决定如何处理。
         await _persist_error_status(session.bind, eval_id)
         # 同步内存中的 run 对象，供直接 catch 异常且不 rollback 的调用方
         # （如部分测试）读到一致状态。注意：HTTP 路径下 get_session 会 rollback

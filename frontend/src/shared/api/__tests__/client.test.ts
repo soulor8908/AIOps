@@ -120,4 +120,44 @@ describe("upload", () => {
     // upload 仅设置 Authorization，Content-Type 由浏览器为 FormData 自动补充 boundary
     expect((init.headers as Record<string, string>)["Content-Type"]).toBeUndefined();
   });
+
+  it("401 时清除 token（与 request 行为一致）", async () => {
+    setToken("valid-token");
+    mockFetch(async () => jsonResponse({ detail: "unauthorized" }, { status: 401 }));
+    const file = new File(["x"], "f.txt", { type: "text/plain" });
+    await expect(upload("/upload", file, "t")).rejects.toMatchObject({ status: 401 });
+    expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
+  });
+
+  it("非 2xx 时抛 ApiError 携带状态码与 payload", async () => {
+    mockFetch(async () => jsonResponse({ detail: "too large" }, { status: 413 }));
+    const file = new File(["x"], "f.txt", { type: "text/plain" });
+    await expect(upload("/upload", file, "t")).rejects.toMatchObject({
+      status: 413,
+      payload: { detail: "too large" },
+    });
+  });
+});
+
+describe("fetchWithTimeout 错误包装", () => {
+  it("网络错误（fetch 抛 TypeError）转为 ApiError(status=0, kind=network)", async () => {
+    mockFetch(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+    await expect(request("/anywhere")).rejects.toMatchObject({
+      status: 0,
+      payload: { kind: "network" },
+    });
+  });
+
+  it("AbortError（超时）转为 ApiError(status=0, kind=timeout)", async () => {
+    mockFetch(async () => {
+      const err: unknown = new DOMException("Aborted", "AbortError");
+      throw err;
+    });
+    await expect(request("/slow")).rejects.toMatchObject({
+      status: 0,
+      payload: { kind: "timeout" },
+    });
+  });
 });

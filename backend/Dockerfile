@@ -31,8 +31,8 @@ RUN pip install --no-cache-dir \
     "pgvector>=0.3" \
     "httpx>=0.27" \
     "redis>=5.2" \
-    "python-jose[cryptography]>=3.3" \
-    "passlib[bcrypt]>=1.7" \
+    "pyjwt>=2.8" \
+    "bcrypt>=4.0" \
     "python-multipart>=0.0.12"
 
 # ---- 运行时镜像 ----

@@ -1,0 +1,75 @@
+# Dependabot 依赖更新配置
+# 周维度检查 npm/pip/docker/github-actions 依赖更新，自动开 PR。
+# 优先合并安全更新（patch/minor）；major 升级单独 PR 便于评审。
+# 与 specs/security.spec.md§10 依赖审计对齐。
+
+version: 2
+
+updates:
+  # 前端 npm 依赖（frontend/package.json + package-lock.json）
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    # 安全更新优先；major 单独 PR 便于评审
+    commit-message:
+      prefix: "deps(frontend)"
+    labels:
+      - dependencies
+      - frontend
+    # 自动合并 patch 更新（需配合 repo branch protection + auto-merge 设置）
+    groups:
+      # 开发依赖打组（@types/* / vitest / playwright 等同步升级减少 PR 噪声）
+      dev-dependencies:
+        patterns:
+          - "@types/*"
+          - "@vitest/*"
+          - "vitest"
+          - "@playwright/*"
+          - "vue-tsc"
+          - "typescript"
+
+  # 后端 Python 依赖（backend/pyproject.toml）
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(backend)"
+    labels:
+      - dependencies
+      - backend
+
+  # GitHub Actions 自身依赖（actions/checkout / actions/setup-node 等）
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "deps(ci)"
+    labels:
+      - dependencies
+      - ci
+
+  # Docker 镜像基础镜像更新（ops/Dockerfile.backend / ops/Dockerfile.frontend）
+  - package-ecosystem: docker
+    directory: /ops
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "deps(docker)"
+    labels:
+      - dependencies
+      - docker

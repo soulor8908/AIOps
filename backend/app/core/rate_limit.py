@@ -18,7 +18,8 @@ import logging
 import time
 from typing import Any
 
-from jose import JWTError, jwt
+import jwt as pyjwt
+from jwt import PyJWTError
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -56,7 +57,7 @@ def _extract_user_id(scope: Scope) -> str | None:
                 return None
             token = header[7:]
             try:
-                payload = jwt.decode(
+                payload = pyjwt.decode(
                     token,
                     settings.effective_secret_key,
                     algorithms=["HS256"],
@@ -64,7 +65,9 @@ def _extract_user_id(scope: Scope) -> str | None:
                 )
                 sub = payload.get("sub")
                 return sub if isinstance(sub, str) else None
-            except (JWTError, Exception):
+            except PyJWTError:
+                # 限流 keying 容错：token 无效/格式错误时退化为按 IP 限流。
+                # 实际认证由 get_current_user 路由依赖完成。
                 return None
     return None
 

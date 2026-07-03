@@ -15,8 +15,8 @@
 | `pgvector` | >=0.3 | PostgreSQL 向量扩展的 Python 适配，提供 VECTOR 类型与算子。RAG 检索核心，无需独立向量数据库。 | pinecone/weaviate（额外运维成本，违背单租户极简部署）。pgvector 复用现有 PG。 |
 | `httpx` | >=0.27 | 同步+异步 HTTP 客户端，用于自研 LLM 客户端调用 OpenAI/Anthropic。API 与 requests 一致但支持 async。 | aiohttp（API 复杂）、requests（仅同步）。httpx 是现代 Python HTTP 事实标准。 |
 | `redis` | >=5.2 | Redis 客户端，async 支持完善。用于缓存（Prompt/模型配置）、分布式锁（Agent 执行）、限流。 | aioredis（已合并入 redis-py 5.x）。 |
-| `python-jose` | >=3.3 | JWT 编解码，标准 JOSE 实现，支持 HS256/RS256。认证层核心，无状态 Token。 | PyJWT（功能重叠，jose 支持更全的 JOSE 标准）。 |
-| `passlib` | >=1.7 | 密码哈希，bcrypt 后端，自动处理版本迁移。用户认证必备。 | bcrypt 直调（无版本迁移能力）。 |
+| `pyjwt` | >=2.8 | JWT 编解码。PyJWT 是活跃维护实现，HS256/RS256/ES256 全支持。认证层核心，无状态 Token。 | python-jose（已停止维护，最后发布 2022；功能重叠但维护停滞）。 |
+| `bcrypt` | >=4.0 | 密码哈希，bcrypt 算法直接调用。用户认证必备。 | passlib（1.7.4 与 bcrypt>=4.1 不兼容，且维护停滞；bcrypt 4.x 内置类型注解，直调更轻量）。 |
 | `python-multipart` | >=0.0.12 | FastAPI 文件上传（`UploadFile`）依赖。知识库文档上传必需。 | 无（FastAPI 文件上传硬依赖）。 |
 | `email-validator` | >=2.1 | Pydantic `EmailStr` 运行期校验依赖（auth 域 `UserCreate`/`LoginRequest`）。原 alpha 代码已用 `EmailStr` 但未声明，现补齐。 | 无（`EmailStr` 硬依赖）。 |
 
