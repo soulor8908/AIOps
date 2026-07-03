@@ -8,6 +8,8 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
+from app.core.deps import get_current_user
+from app.domains.auth.models import User
 from app.domains.evals import service
 from app.domains.evals.models import EvalRunCreate, EvalRunOut
 
@@ -19,6 +21,7 @@ async def list_evals(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> list[EvalRunOut]:
     runs = await service.list_evals(session, limit=limit, offset=offset)
     return [EvalRunOut.model_validate(r) for r in runs]
@@ -26,7 +29,9 @@ async def list_evals(
 
 @router.post("", response_model=EvalRunOut, status_code=status.HTTP_201_CREATED)
 async def create_eval(
-    payload: EvalRunCreate, session: AsyncSession = Depends(get_session)
+    payload: EvalRunCreate,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> EvalRunOut:
     run = await service.create_eval(session, payload)
     return EvalRunOut.model_validate(run)
@@ -34,7 +39,9 @@ async def create_eval(
 
 @router.get("/{eval_id}", response_model=EvalRunOut)
 async def get_eval(
-    eval_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+    eval_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> EvalRunOut:
     run = await service.get_eval(session, eval_id)
     return EvalRunOut.model_validate(run)
@@ -42,7 +49,9 @@ async def get_eval(
 
 @router.post("/{eval_id}/run", response_model=EvalRunOut)
 async def run_eval(
-    eval_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+    eval_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> EvalRunOut:
     """同步执行 eval。predict_fn 为 None 时用 case.expected 自比对。"""
     run = await service.run_eval(session, eval_id)

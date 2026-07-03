@@ -11,6 +11,8 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
+from app.core.deps import get_current_admin, get_current_user
+from app.domains.auth.models import User
 from app.domains.prompts import service
 from app.domains.prompts.models import (
     DiffResult,
@@ -30,6 +32,7 @@ async def list_prompts(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> list[PromptOut]:
     prompts = await service.list_prompts(session, q=q, limit=limit, offset=offset)
     return [service.to_prompt_out(p) for p in prompts]
@@ -37,7 +40,9 @@ async def list_prompts(
 
 @router.post("", response_model=PromptOut, status_code=status.HTTP_201_CREATED)
 async def create_prompt(
-    payload: PromptCreate, session: AsyncSession = Depends(get_session)
+    payload: PromptCreate,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_admin),
 ) -> PromptOut:
     prompt = await service.create_prompt(session, payload)
     refreshed = await service.get_prompt(session, prompt.id)
@@ -46,7 +51,9 @@ async def create_prompt(
 
 @router.get("/{prompt_id}", response_model=PromptOut)
 async def get_prompt(
-    prompt_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+    prompt_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> PromptOut:
     prompt = await service.get_prompt(session, prompt_id)
     return service.to_prompt_out(prompt)
@@ -57,6 +64,7 @@ async def update_prompt(
     prompt_id: uuid.UUID,
     payload: PromptUpdate,
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_admin),
 ) -> PromptOut:
     prompt = await service.update_prompt(session, prompt_id, payload)
     refreshed = await service.get_prompt(session, prompt.id)
@@ -65,14 +73,18 @@ async def update_prompt(
 
 @router.delete("/{prompt_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_prompt(
-    prompt_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+    prompt_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_admin),
 ) -> None:
     await service.delete_prompt(session, prompt_id)
 
 
 @router.get("/{prompt_id}/versions", response_model=list[PromptVersionOut])
 async def list_versions(
-    prompt_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+    prompt_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> list[PromptVersionOut]:
     prompt = await service.get_prompt(session, prompt_id)
     return [service.to_version_out(v) for v in prompt.versions]
@@ -87,6 +99,7 @@ async def create_version(
     prompt_id: uuid.UUID,
     payload: PromptVersionCreate,
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_admin),
 ) -> PromptVersionOut:
     version = await service.create_version(session, prompt_id, payload)
     return service.to_version_out(version)
@@ -101,6 +114,7 @@ async def rollback_version(
     prompt_id: uuid.UUID,
     version_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_admin),
 ) -> PromptVersionOut:
     version = await service.rollback_prompt(session, prompt_id, version_id)
     return service.to_version_out(version)
@@ -112,5 +126,6 @@ async def diff_versions(
     frm: int = Query(..., alias="from", ge=1, description="起始版本号"),
     to: int = Query(..., ge=1, description="目标版本号"),
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> DiffResult:
     return await service.diff_versions(session, prompt_id, frm, to)

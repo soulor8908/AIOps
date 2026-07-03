@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
+from app.core.deps import get_current_admin, get_current_user
 from app.domains.agents import service
 from app.domains.agents.models import (
     AgentCreate,
@@ -17,6 +18,7 @@ from app.domains.agents.models import (
     WorkflowDef,
     WorkflowOut,
 )
+from app.domains.auth.models import User
 
 router = APIRouter(tags=["agents"])
 
@@ -28,6 +30,7 @@ async def list_agents(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> list[AgentOut]:
     agents = await service.list_agents(session, limit=limit, offset=offset)
     return [AgentOut.model_validate(a) for a in agents]
@@ -35,7 +38,9 @@ async def list_agents(
 
 @router.post("/agents", response_model=AgentOut, status_code=status.HTTP_201_CREATED)
 async def create_agent(
-    payload: AgentCreate, session: AsyncSession = Depends(get_session)
+    payload: AgentCreate,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_admin),
 ) -> AgentOut:
     agent = await service.create_agent(session, payload)
     return AgentOut.model_validate(agent)
@@ -43,7 +48,9 @@ async def create_agent(
 
 @router.get("/agents/{agent_id}", response_model=AgentOut)
 async def get_agent(
-    agent_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+    agent_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> AgentOut:
     agent = await service.get_agent(session, agent_id)
     return AgentOut.model_validate(agent)
@@ -54,6 +61,7 @@ async def execute_agent(
     agent_id: uuid.UUID,
     payload: ExecuteRequest,
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> ExecutionResult:
     return await service.execute_agent(session, agent_id, payload)
 
@@ -65,6 +73,7 @@ async def list_workflows(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> list[WorkflowOut]:
     wfs = await service.list_workflows(session, limit=limit, offset=offset)
     return [WorkflowOut.model_validate(w) for w in wfs]
@@ -72,7 +81,9 @@ async def list_workflows(
 
 @router.post("/workflows", response_model=WorkflowOut, status_code=status.HTTP_201_CREATED)
 async def create_workflow(
-    payload: WorkflowDef, session: AsyncSession = Depends(get_session)
+    payload: WorkflowDef,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_admin),
 ) -> WorkflowOut:
     wf = await service.create_workflow(session, payload)
     return WorkflowOut.model_validate(wf)
@@ -83,5 +94,6 @@ async def execute_workflow(
     workflow_id: uuid.UUID,
     payload: ExecuteRequest,
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> ExecutionResult:
     return await service.execute_workflow(session, workflow_id, payload)

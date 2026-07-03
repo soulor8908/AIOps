@@ -8,7 +8,9 @@ from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile, 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
+from app.core.deps import get_current_admin, get_current_user
 from app.core.exceptions import ValidationError
+from app.domains.auth.models import User
 from app.domains.knowledge import service
 from app.domains.knowledge.models import (
     DocumentOut,
@@ -36,6 +38,7 @@ async def list_kbs(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> list[KnowledgeBaseOut]:
     kbs = await service.list_kbs(session, limit=limit, offset=offset)
     return [KnowledgeBaseOut.model_validate(k) for k in kbs]
@@ -43,7 +46,9 @@ async def list_kbs(
 
 @router.post("", response_model=KnowledgeBaseOut, status_code=status.HTTP_201_CREATED)
 async def create_kb(
-    payload: KnowledgeBaseCreate, session: AsyncSession = Depends(get_session)
+    payload: KnowledgeBaseCreate,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_admin),
 ) -> KnowledgeBaseOut:
     kb = await service.create_kb(session, payload)
     return KnowledgeBaseOut.model_validate(kb)
@@ -51,7 +56,9 @@ async def create_kb(
 
 @router.get("/{kb_id}", response_model=KnowledgeBaseOut)
 async def get_kb(
-    kb_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+    kb_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> KnowledgeBaseOut:
     kb = await service.get_kb(session, kb_id)
     return KnowledgeBaseOut.model_validate(kb)
@@ -68,6 +75,7 @@ async def upload_document(
     title: str = Form(...),
     file: UploadFile = File(...),
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> DocumentOut:
     # security.spec.md§7.1 — 先检 Content-Length，超限直接拒绝（防大文件耗尽内存）。
     content_length = int(request.headers.get("content-length", "0"))
@@ -103,6 +111,7 @@ async def search_kb(
     kb_id: uuid.UUID,
     payload: SearchQuery,
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> list[SearchResult]:
     return await service.search_kb(session, kb_id, payload)
 
@@ -112,5 +121,6 @@ async def rag_query(
     kb_id: uuid.UUID,
     payload: RAGQuery,
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> dict[str, object]:
     return await service.rag_query(session, kb_id, payload)

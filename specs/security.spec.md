@@ -111,7 +111,7 @@
 ## 10. 验收清单
 
 - [x] JWT 过期可配置，默认 24h，签名密钥来自环境变量。
-- [ ] RBAC 依赖注入实现，admin/user 权限边界测试通过。
+- [x] RBAC 依赖注入实现，admin/user 权限边界测试通过。
 - [x] 生产 CORS 无 `*` + credentials 组合。
 - [x] 限流：默认 100/min，LLM 端点 20/min，超限返回 429 + 限流头。
 - [x] 密码 bcrypt 哈希，最小 8 位。
@@ -133,9 +133,15 @@
     （`text/plain` / `text/markdown` / `application/pdf`）、UUID 重命名防目录穿越，3 安全测试。
   - §2 JWT / §6 密码 / §8 API Key：既存实现满足（bcrypt 哈希、`min_length=8`、
     LLM 凭据仅服务端注入转发、`frontend/src` 无 key 引用，已校验）。
-- **下一轮（Phase 3 batch 2）**：§3.2 RBAC — 挂载 `get_current_user` /
-  `get_current_admin` 到所有非公开路由（agents / prompts / evals / models / analytics /
-  knowledge），补 401/403 回归测试，按 §3.2「默认拒绝」原则。
+- **Phase 3 batch 2**（分支 `feat/phase3-rbac`，合并到 main）：
+  - §3.2 RBAC — 6 个 domain router（agents / prompts / evals / models / analytics /
+    knowledge）全部挂载 `get_current_user` / `get_current_admin` 依赖；读取类端点
+    → `user`，创建/更新/删除类端点 → `admin`，执行类端点 → `user`（auth/SPEC.md §60-62）。
+  - 测试 fixture 三层覆盖：`client`（默认 admin，既有功能测试零改动）、`anon_client`
+    （关闭认证覆盖，401 边界）、`user_client`（普通用户，403 边界）。
+  - `tests/test_rbac_boundary.py`：14 个 401 参数化（无 token）+ 12 个 403（user 访问
+    admin 端点）+ 8 个 200 正向校验（user 访问 user 级端点），共 34 测试全绿。
+  - §10 验收清单 8/8 全部勾选，Phase 3 安全基线落地完成。
 
 ---
 

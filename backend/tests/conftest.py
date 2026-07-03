@@ -44,6 +44,9 @@ from sqlalchemy.pool import StaticPool
 import app.main as app_main
 from app.core.config import settings
 from app.core.database import Base, get_session
+from app.core.deps import get_current_admin, get_current_user
+from app.core.security import hash_password
+from app.domains.auth.models import User
 from app.main import app
 
 # 强制无 LLM API key，避免 embedder / LLMClient 发起真实网络请求。
@@ -112,11 +115,95 @@ def client(monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator[TestClient, None]:
 
     try:
         with TestClient(app) as c:
+            # security.spec.md§3 — 默认以 admin 身份运行既有功能测试，
+            # 使各 domain 路由的认证依赖无需逐个传 token；
+            # 401/403 边界测试用 ``anon_client`` fixture 关闭本覆盖。
+            default_admin = _create_default_admin(c)
+            app.dependency_overrides[get_current_user] = lambda: default_admin
+            app.dependency_overrides[get_current_admin] = lambda: default_admin
             yield c
     finally:
         app.dependency_overrides.pop(get_session, None)
+        app.dependency_overrides.pop(get_current_user, None)
+        app.dependency_overrides.pop(get_current_admin, None)
         # lifespan 关闭时已对 test_engine 执行 dispose，此处兜底再清理一次
         import asyncio
 
         with contextlib.suppress(Exception):
             asyncio.run(test_engine.dispose())
+
+
+def _create_default_admin(client: TestClient) -> User:
+    """在测试 DB 中创建一个 admin 用户，供 ``client`` fixture 的认证覆盖使用。
+
+    直接经测试会话工厂写入（不走 /auth/register，避免对该端点形成循环依赖）。
+    """
+    session_factory = app.dependency_overrides[get_session]
+
+    async def _make() -> User:
+        user = User(
+            email="default-admin@test.local",
+            username="default_admin",
+            hashed_password=hash_password("DefaultAdmin123!"),
+            is_active=True,
+            is_admin=True,
+        )
+        async for session in session_factory():
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+            break
+        return user
+
+    return client.portal.call(_make)
+
+
+@pytest.fixture
+def anon_client(client: TestClient) -> TestClient:
+    """关闭默认认证覆盖，使用真实认证依赖（401/403 边界测试用）。
+
+    依赖 ``client`` 以共享同一测试 DB 与 ``get_session`` 覆盖，仅移除
+    ``get_current_user`` / ``get_current_admin`` 覆盖，使请求必须携带有效
+    Bearer token 方能通过认证。
+    """
+    app.dependency_overrides.pop(get_current_user, None)
+    app.dependency_overrides.pop(get_current_admin, None)
+    return client
+
+
+@pytest.fixture
+def user_client(client: TestClient) -> TestClient:
+    """以普通用户（is_admin=False）身份运行，admin 端点应返回 403。
+
+    依赖 ``client`` 共享测试 DB 与 ``get_session`` 覆盖；覆盖
+    ``get_current_user`` 为普通用户，并移除 ``get_current_admin`` 覆盖
+    使其走真实链路（调用 get_current_user → 校验 is_admin → 403）。
+    """
+    regular_user = _create_regular_user(client)
+    app.dependency_overrides[get_current_user] = lambda: regular_user
+    app.dependency_overrides.pop(get_current_admin, None)
+    return client
+
+
+def _create_regular_user(client: TestClient) -> User:
+    """在测试 DB 中创建一个普通用户（is_admin=False），供 ``user_client`` 使用。"""
+    session_factory = app.dependency_overrides[get_session]
+
+    async def _make() -> User:
+        user = User(
+            email="regular-user@test.local",
+            username="regular_user",
+            hashed_password=hash_password("RegularUser123!"),
+            is_active=True,
+            is_admin=False,
+        )
+        async for session in session_factory():
+            session.add(user)
+            await session.commit()
+            # expunge 使 user 脱离 session（detach），避免跨 session refresh 冲突；
+            # server defaults（created_at/updated_at）已由 INSERT RETURNING 填充。
+            session.expunge(user)
+            break
+        return user
+
+    return client.portal.call(_make)
