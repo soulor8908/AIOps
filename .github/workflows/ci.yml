@@ -204,7 +204,7 @@ jobs:
       # 命中缓存时跳过下载，节省 ~30s/运行。缓存 key 用 lockfile 哈希，
       # 升级 @playwright/test 时自动失效。
       - name: Cache Playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('frontend/package-lock.json') }}
