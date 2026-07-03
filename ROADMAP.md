@@ -126,7 +126,7 @@ Phase 6       生产化与文档          →  v0.1.0 GA
 - [x] **5.3 Knowledge Base**: 重排序、RAG 端到端检索质量 eval（重排序为 Non-Goal，交付上传/检索/RAG pipeline eval）
 - [x] **5.4 Model Router**: round_robin / least_cost / latency 策略 + fallback 链路
 - [x] **5.5 Analytics**: 按用户/模型/时间维度统计 + 满意度
-- [ ] **5.6 Eval Suite**: 回归检测、L4 > 0.85 全量验证
+- [x] **5.6 Eval Suite**: 回归检测、L4 > 0.85 全量验证（L4 LLM-as-judge 已含 skipif 守卫；交付 service+judge 8 项 SC eval）
 
 **验收**: 各领域 SPEC.md 中声明的核心能力均有 eval 覆盖且通过。
 

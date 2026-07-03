@@ -26,14 +26,30 @@
 - CI pipeline 集成
 
 ## Success Criteria (Eval)
-- [ ] `create_eval` 拒绝空 cases
-- [ ] `run_eval` 状态流转 pending → running → passed/failed
-- [ ] `run_eval` 任一 case 抛异常时状态置为 `error` 并附 `finished_at`
-- [ ] `score = pass_count / total`，`PASSED` 当 `score ≥ 0.85`
-- [ ] `judge_exact` 归一化空白后精确匹配
-- [ ] `judge_llm` 输出无法解析 JSON 时返回 passed=False / score=0（不抛错）
-- [ ] `judge_semantic` 余弦相似度 < 0.75 判定不通过
-- [ ] 无 `predict_fn` 时用 case 的 `actual` / `expected` 自比对
+- [x] `create_eval` 拒绝空 cases
+- [x] `run_eval` 状态流转 pending → running → passed/failed
+- [x] `run_eval` 任一 case 抛异常时状态置为 `error` 并附 `finished_at`
+- [x] `score = pass_count / total`，`PASSED` 当 `score ≥ 0.85`
+- [x] `judge_exact` 归一化空白后精确匹配
+- [x] `judge_llm` 输出无法解析 JSON 时返回 passed=False / score=0（不抛错）
+- [x] `judge_semantic` 余弦相似度 < 0.75 判定不通过
+- [x] 无 `predict_fn` 时用 case 的 `actual` / `expected` 自比对
+
+## Eval 落地记录
+
+测试文件：`backend/tests/test_eval_suite.py`（12 tests，覆盖全部 8 项 Success Criteria）
+补充：`backend/app/domains/evals/tests/test_evals.py`（13 tests，领域内嵌单元测试，覆盖 judge 纯函数 + service 基础流程）
+
+| SC | 测试 | 策略 |
+|----|------|------|
+| 1 | `test_create_eval_rejects_empty_cases` | `EvalRunCreate(cases=[])` 抛 `ValidationError` |
+| 2 | `test_run_eval_status_pending_to_running_to_passed` / `test_run_eval_status_pending_to_running_to_failed` | 在 `predict_fn` 内 `session.get(EvalRun, run.id)` 读取执行期状态断言 `RUNNING`；最终断言 `PASSED`（2/2 全过）或 `FAILED`（2/3 ≈ 0.667 < 0.85） |
+| 3 | `test_run_eval_error_status_has_finished_at` | `predict_fn` 抛 `RuntimeError`，断言异常透传；`session.rollback()` 后用独立 session 读取，验证 `status=error` + `finished_at is not None`（service 通过 `_persist_error_status` 独立事务落库） |
+| 4 | `test_run_eval_score_at_threshold_passes` / `test_run_eval_score_below_threshold_fails` | 临界值精确验证：6/7 ≈ 0.857 ≥ 0.85 → PASSED；5/6 ≈ 0.833 < 0.85 → FAILED |
+| 5 | `test_judge_exact_normalizes_whitespace` | `_normalize`（strip + lower + `re.sub(r"\s+", " ")`) 后比对：`"Hello   World"` / `"Hello\n\tWorld"` / `"  hello  "` 均匹配 `"hello world"`；`"foo" vs "bar"` score=0.0 |
+| 6 | `test_judge_llm_unparseable_json_returns_failed_zero_score` / `test_judge_llm_missing_score_field_returns_zero` | stub `LLMClient.chat` 返回非 JSON 文本 / 缺 score 字段 JSON，断言 `passed=False` / `score=0.0` / reason 含「无法解析」，不抛错 |
+| 7 | `test_judge_semantic_below_threshold_fails` | stub embedder 构造可控向量：正交（cosine=0.0）/ 完全相同（1.0）/ cos(45°)≈0.707，断言 < 0.75 时 `passed=False` |
+| 8 | `test_run_eval_without_predict_fn_uses_case_actual` / `test_run_eval_without_predict_fn_falls_back_to_expected` | 无 `predict_fn`：case 顶层 `actual="wrong"` → 与 expected 不匹配 → FAILED；无 actual → 回退 `expected` → 自比对全过 → PASSED |
 
 ## Data Models
 - ORM `EvalRule`（`eval_rules` 表）：`id`(UUID)、`name`、`description`、`judge_type`、`expected`、`config`(JSONB)、`created_at`
