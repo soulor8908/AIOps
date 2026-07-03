@@ -23,12 +23,19 @@
 - 自动告警
 
 ## Success Criteria (Eval)
-- [ ] 列表支持按 `user_id` 过滤，并预加载 messages
-- [ ] dashboard 正确聚合 total_conversations / total_messages / total_tokens / total_cost
-- [ ] `avg_messages_per_conversation` = total_messages / total_conversations（空集为 0）
-- [ ] 活跃模型按 token 总量降序取 top 10
-- [ ] `conversations_last_7d` 按天聚合 count 与 tokens
-- [ ] `avg_latency_ms` 仅对非空 `latency_ms` 求平均
+- [x] 列表支持按 `user_id` 过滤，并预加载 messages
+- [x] dashboard 正确聚合 total_conversations / total_messages / total_tokens / total_cost
+- [x] `avg_messages_per_conversation` = total_messages / total_conversations（空集为 0）
+- [x] 活跃模型按 token 总量降序取 top 10
+- [x] `conversations_last_7d` 按天聚合 count 与 tokens
+- [x] `avg_latency_ms` 仅对非空 `latency_ms` 求平均
+
+> Eval 落地：`tests/test_analytics_aggregation.py`（Phase 5 batch 3），8 测试覆盖全部 6 项
+> Success Criteria。经 `client` fixture 获得独立 SQLite in-memory DB，通过 session_factory
+> 直接 seed Conversation / Message 数据，再调用 service 层（list_conversations /
+> get_dashboard_metrics）断言聚合结果。验证 user_id 过滤 + selectinload 预加载、四个总量
+> 聚合、avg_messages 计算（含空集 0）、活跃模型 top 10 降序截断、按天聚合 count/tokens、
+> avg_latency_ms 排除 NULL 等行为。
 
 ## Data Models
 - ORM `Conversation`（`conversations` 表）：`id`(UUID)、`user_id`(UUID, index)、`agent_id`(UUID, index)、`model_alias`、`title`、`metadata`(JSONB)、`total_tokens`(默认 0)、`total_cost`(Numeric(12,6), 默认 0)、`created_at`、`updated_at`；`messages` 关系（cascade all, delete-orphan，按 `created_at` 升序）
