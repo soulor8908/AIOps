@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.exceptions import LLMError, NotFoundError
-from app.core.llm_client import LLMClient, LLMConfig, Message
+from app.core.llm_client import LLMClient, LLMConfig, Message, Provider
 from app.domains.models.models import (
     ChatRequest,
     ChatResponse,
@@ -26,6 +26,17 @@ from app.domains.models.models import (
 )
 
 _round_robin_index: dict[str, int] = {}
+
+# ModelConfig.provider 值 → LLMClient 支持的 Provider（Literal["openai","anthropic","local"]）。
+# Azure OpenAI 与 custom 兼容 OpenAI 协议，映射到 "openai"。
+# 与 agents/service.py 的 _PROVIDER_MAP 保持一致。
+_PROVIDER_MAP: dict[str, Provider] = {
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "local": "local",
+    "azure_openai": "openai",
+    "custom": "openai",
+}
 
 
 async def create_model(session: AsyncSession, payload: ModelConfigCreate) -> ModelConfig:
@@ -150,7 +161,12 @@ async def chat_completion(
 
 
 def _to_llm_config(config: ModelConfig, request: ChatRequest) -> LLMConfig:
-    """ORM → LLMConfig。api_key 从环境变量读取（api_key_env 指定变量名）。"""
+    """ORM → LLMConfig。api_key 从环境变量读取（api_key_env 指定变量名）。
+
+    provider 经 ``_PROVIDER_MAP`` 映射到 LLMClient 支持的合法值，
+    避免 azure_openai/custom 等兼容 OpenAI 协议的 provider 直接传入导致
+    LLMClient 抛 "不支持的 provider"。
+    """
     api_key = ""
     if config.api_key_env:
         api_key = os.environ.get(config.api_key_env, "")
@@ -158,8 +174,9 @@ def _to_llm_config(config: ModelConfig, request: ChatRequest) -> LLMConfig:
         api_key = settings.openai_api_key
     elif config.provider == "anthropic":
         api_key = settings.anthropic_api_key
+    provider = _PROVIDER_MAP.get(config.provider, "openai")
     return LLMConfig(
-        provider=config.provider,  # type: ignore[arg-type]
+        provider=provider,
         model=config.model_name,
         api_key=api_key,
         base_url=config.api_base or "",

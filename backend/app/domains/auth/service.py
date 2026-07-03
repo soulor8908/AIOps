@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,12 +30,16 @@ async def register_user(session: AsyncSession, data: UserCreate) -> User:
     """注册新用户。email 归一化为小写，密码 bcrypt 哈希后入库。
 
     - email / username 唯一冲突 → ``ConflictError`` (409)
+
+    bcrypt 哈希是 CPU 密集的同步操作（~100-300ms），用 ``asyncio.to_thread``
+    卸载到线程池，避免阻塞事件循环导致并发请求被串行化。
     """
+    hashed = await asyncio.to_thread(hash_password, data.password)
     user = User(
         email=data.email.lower(),
         username=data.username,
         full_name=data.full_name,
-        hashed_password=hash_password(data.password),
+        hashed_password=hashed,
         is_active=True,
         is_admin=False,
     )
@@ -58,10 +64,16 @@ async def authenticate_user(
     - 用户不存在 → ``AuthenticationError``
     - 密码不匹配 → ``AuthenticationError``
     - 用户停用 → ``AuthenticationError``
+
+    bcrypt 校验是 CPU 密集的同步操作，用 ``asyncio.to_thread`` 卸载。
     """
     stmt = select(User).where(User.email == email.lower())
     user = (await session.execute(stmt)).scalar_one_or_none()
-    if user is None or not verify_password(password, user.hashed_password):
+    if user is None:
+        raise AuthenticationError("邮箱或密码错误")
+    # 用统一时延抵抗用户枚举：即便用户不存在也跑一次校验，再判定密码
+    password_ok = await asyncio.to_thread(verify_password, password, user.hashed_password)
+    if not password_ok:
         raise AuthenticationError("邮箱或密码错误")
     if not user.is_active:
         raise AuthenticationError("用户已停用")
