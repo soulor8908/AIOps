@@ -47,12 +47,20 @@ export default defineConfig({
     },
   ],
 
-  // 自动启动 Vite dev server（端口 5173），就绪后再跑用例
-  webServer: {
-    command: "npm run dev",
-    url: "http://localhost:5173",
-    // CI 中不复用既有 server，本地可复用
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
-  },
+  // 自动启动 Web server，就绪后再跑用例。
+  // testing.spec.md §5.2：CI 中对 vite build 产物（dist/）测试，而非 dev server。
+  // 本地保留 dev server 以获得 HMR 调试体验。
+  webServer: process.env.CI
+    ? {
+        command: "npm run build && npm run preview -- --port 5173 --strictPort",
+        url: "http://localhost:5173",
+        reuseExistingServer: false,
+        timeout: 120_000,
+      }
+    : {
+        command: "npm run dev",
+        url: "http://localhost:5173",
+        reuseExistingServer: true,
+        timeout: 120_000,
+      },
 });

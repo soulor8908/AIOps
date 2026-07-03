@@ -116,12 +116,22 @@
 
 ## 10. 验收清单
 
-- [ ] `pytest --cov-fail-under=80` 在 CI 通过。
-- [ ] schemathesis 覆盖所有 OpenAPI 端点。
-- [ ] Playwright 覆盖"登录→创建 Prompt→版本管理→回滚"路径，对 `dist/` 运行。
-- [ ] L4 eval 框架存在，门槛 > 0.85 生效。
-- [ ] CI 中 L1–L3 阻断合并配置就绪。
-- [ ] 测试数据采用 factory pattern，无共享状态。
+- [x] `pytest --cov-fail-under=80` 在 CI 通过（backend-test job，pyproject addopts 含门槛）。
+- [x] schemathesis 覆盖所有 OpenAPI 端点（contract-test job 独立运行 `tests/test_api_contract.py`）。
+- [x] Playwright 覆盖"登录→创建 Prompt→版本管理→回滚"路径，对 `dist/` 运行
+      （`e2e/prompt-version-rollback.spec.ts`；CI 下 webServer 切换为 `vite build + preview`）。
+- [x] L4 eval 框架存在，门槛 > 0.85 生效（llm-judge job，`continue-on-error` 非阻断）。
+- [x] CI 中 L1–L3 阻断合并配置就绪（backend-test / contract-test / frontend-test 均为阻断 job）。
+- [x] 测试数据采用 factory pattern，无共享状态（`tests/factories.py` + 每用例独立 fixture）。
+
+### 10.1 已知待完善项（不阻塞 Phase 2 验收）
+
+- **前端单元覆盖率未达 80%**：当前仅 `shared/api` + `shared/utils` 有单测（整体 ~7%）。
+  CI 已收集覆盖率报告（`continue-on-error` 信息性），待补齐 stores/views 单测后转为硬门禁（Phase 5 领域深化）。
+- **OpenAPI `gen:api` diff 校验未入 CI**：`src/shared/api/types.ts` 为手维护命名导出，
+  而 `openapi-typescript@7` 生成 `components["schemas"]` 结构，二者不兼容——运行 gen:api 会破坏 type-check。
+  OpenAPI 结构漂移暂由 L2 契约测试（`test_openapi_yaml_has_all_domains` 等）覆盖；
+  全量 gen:api diff 强制待 types.ts 迁移到生成输出后启用。
 
 ---
 
