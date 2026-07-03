@@ -1,6 +1,6 @@
 # 横切关注点 Spec — 错误处理（Error Handling）
 
-> Version: v0.1.0-alpha | Date: 2026-06-30
+> Version: v0.1.0 | Date: 2026-07-03
 > Scope: 全栈（backend FastAPI + frontend Vue/Pinia）统一错误处理
 > 关联: SPEC.md#错误处理、agents.md#5-禁止模式
 

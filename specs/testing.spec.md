@@ -1,6 +1,6 @@
 # 横切关注点 Spec — 测试（Testing）
 
-> Version: v0.1.0-alpha | Date: 2026-06-30
+> Version: v0.1.0 | Date: 2026-07-03
 > Scope: 四层测试金字塔、CI 门禁、覆盖率门槛、测试数据策略
 > 关联: SPEC.md#测试、agents.md#6-Eval规范、errors.spec.md（错误码契约测试）
 

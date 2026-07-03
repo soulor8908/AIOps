@@ -1,6 +1,6 @@
 {
   "name": "aiops-console-frontend",
-  "version": "0.1.0-alpha",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,7 +11,7 @@
     "test": "vitest",
     "test:run": "vitest run",
     "e2e": "playwright test",
-    "gen:api": "openapi-typescript ../specs/openapi.yaml -o src/shared/api/types.ts"
+    "gen:api": "openapi-typescript ../specs/openapi.yaml -o src/shared/api/types.generated.ts"
   },
   "dependencies": {
     "pinia": "^3.0.1",

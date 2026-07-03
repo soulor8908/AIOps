@@ -1,6 +1,6 @@
 [project]
 name = "aiops-console-backend"
-version = "0.1.0-alpha"
+version = "0.1.0"
 description = "AIOps Console — AI 原生运营控制台后端"
 requires-python = ">=3.10"
 readme = "SPEC.md"

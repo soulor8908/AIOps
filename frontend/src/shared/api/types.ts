@@ -1,6 +1,9 @@
 // Core types mirroring the backend OpenAPI 3.1 schemas.
 // Faithfully reflects the FastAPI pydantic models in backend/app/domains/*/models.py.
-// Normally regenerated via `npm run gen:api` (openapi-typescript); hand-maintained here.
+// 手动维护兜底（frontend SPEC.md §4.1：API 类型从 OpenAPI 生成，手动维护作为兜底）。
+// 前端实际从此文件导入具名类型（如 KnowledgeBaseCreate / UserOut 等）。
+// openapi.yaml 变更后：先 `npm run gen:api` 刷新 types.generated.ts（CI 漂移校验守门），
+// 再参照其结构手动同步本文件，保持与后端契约一致。
 //
 // Backend contract facts (all verified against source):
 // - List endpoints return a BARE JSON array `[]` (response_model=list[<Out>]).

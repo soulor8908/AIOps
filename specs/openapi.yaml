@@ -3,7 +3,7 @@
 # 本文件在导出 schema 基础上补齐 metadata、tags、描述与统一错误响应。
 
 openapi: 3.1.0
-info: {title: AIOps Console API, description: AI原生运营控制台后端API, version: 0.1.0-alpha}
+info: {title: AIOps Console API, description: AI原生运营控制台后端API, version: 0.1.0}
 servers:
 - {url: 'http://localhost:8000', description: Local}
 - {url: 'https://api.aiops.local', description: Production}

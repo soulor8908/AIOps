@@ -1,6 +1,6 @@
 # AIOps Console — 后端规格 (SPEC.md)
 
-> **版本**: v0.1.0-alpha | **对齐**: 项目总 SPEC.md v0.1.0
+> **版本**: v0.1.0 | **对齐**: 项目总 SPEC.md v0.1.0
 > **技术栈**: Python 3.12 · FastAPI 0.115 · Pydantic v2.9 · SQLAlchemy 2.0 · pgvector · Redis
 
 ---
@@ -159,7 +159,7 @@ app/
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `APP_VERSION` | 0.1.0-alpha | 版本 |
+| `APP_VERSION` | 0.1.0 | 版本 |
 | `DEBUG` | true | 调试模式 |
 | `DATABASE_URL` | postgresql+asyncpg://aiops:aiops@localhost:5432/aiops | DB |
 | `REDIS_URL` | redis://localhost:6379 | Redis |

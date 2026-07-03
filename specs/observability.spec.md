@@ -1,6 +1,6 @@
 # 横切关注点 Spec — 可观测性（Observability）
 
-> Version: v0.1.0-alpha | Date: 2026-06-30
+> Version: v0.1.0 | Date: 2026-07-03
 > Scope: 结构化日志、请求追踪、指标、告警、前端监控
 > 关联: SPEC.md#可观测性、errors.spec.md（500 兜底日志）、deployment.spec.md（健康检查）
 

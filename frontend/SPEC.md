@@ -1,6 +1,6 @@
 # AIOps Console Frontend Spec
 
-> Version: v0.1.0-alpha | Date: 2026-06-30
+> Version: v0.1.0 | Date: 2026-07-03
 > Philosophy: Agentic Engineering · Spec-Driven · Minimalism · Understanding-First
 
 ---
