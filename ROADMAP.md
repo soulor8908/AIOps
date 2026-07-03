@@ -124,7 +124,7 @@ Phase 6       生产化与文档          →  v0.1.0 GA
 - [ ] **5.1 Prompt Studio**: A/B 测试、变量模板渲染
 - [ ] **5.2 Agent Orchestrator**: 工作流 DAG（≤50 节点）执行追踪、工具注册面板
 - [ ] **5.3 Knowledge Base**: 重排序、RAG 端到端检索质量 eval
-- [ ] **5.4 Model Router**: round_robin / least_cost / latency 策略 + fallback 链路
+- [x] **5.4 Model Router**: round_robin / least_cost / latency 策略 + fallback 链路
 - [ ] **5.5 Analytics**: 按用户/模型/时间维度统计 + 满意度
 - [ ] **5.6 Eval Suite**: 回归检测、L4 > 0.85 全量验证
 
