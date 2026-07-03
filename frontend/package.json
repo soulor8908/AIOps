@@ -10,6 +10,7 @@
     "type-check": "vue-tsc --noEmit",
     "test": "vitest",
     "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "e2e": "playwright test",
     "gen:api": "openapi-typescript ../specs/openapi.yaml -o src/shared/api/types.generated.ts"
   },

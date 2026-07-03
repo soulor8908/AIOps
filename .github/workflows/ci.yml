@@ -195,14 +195,10 @@ jobs:
         run: npm run build
 
       # L1 前端单元测试（testing.spec.md §9）— 测试必须 100% 通过（阻断）。
-      - name: Unit tests (Vitest)
-        run: npm run test:run
-
-      # 覆盖率报告（信息性，非阻断）— vitest.config.ts 门槛 80%，当前覆盖率未达标
-      # （前端单测覆盖尚处早期）。先收集报告使覆盖率可见，待补齐测试后转为硬门禁。
-      - name: Coverage report (informational)
-        continue-on-error: true
-        run: npm run test:run -- --coverage
+      # 同时收集覆盖率（vitest.config.ts 基线门槛防回退；目标 80%，domains/views
+      # 测试补齐后上调门槛并转为硬阻断）。当前 shared 层 ~90%，整体因 views 待补偏低。
+      - name: Unit tests + coverage (Vitest)
+        run: npm run test:coverage
 
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium

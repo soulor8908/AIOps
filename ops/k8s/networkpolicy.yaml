@@ -1,0 +1,107 @@
+# NetworkPolicy — Pod 间网络隔离（security.spec.md / deployment.spec.md §4 安全隔离）
+#
+# 默认拒绝所有入站，再按依赖关系显式放行：
+#   - ingress controller → frontend (8080) / backend (8000)
+#   - frontend → backend (8000)        # nginx 反代 /api
+#   - backend → db (5432) / redis (6379)
+# 部署：kubectl apply -f ops/k8s/networkpolicy.yaml
+---
+# backend：仅允许 frontend 与 ingress 流量入站（/health 供探针与抓取，同 namespace 内 kubelet 不受 NetworkPolicy 限制）。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aiops-backend-ingress
+  labels:
+    app.kubernetes.io/name: aiops-console
+    app.kubernetes.io/component: backend
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: aiops-console
+      app.kubernetes.io/component: backend
+  policyTypes: [Ingress]
+  ingress:
+    # frontend 容器（nginx 反代 /api）→ backend
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: aiops-console
+              app.kubernetes.io/component: frontend
+      ports:
+        - protocol: TCP
+          port: 8000
+    # ingress controller → backend（同 namespace 放行；跨 namespace 需按实际 ingress namespace 加 namespaceSelector）
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+# frontend：仅允许 ingress 流量入站（8080）。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aiops-frontend-ingress
+  labels:
+    app.kubernetes.io/name: aiops-console
+    app.kubernetes.io/component: frontend
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: aiops-console
+      app.kubernetes.io/component: frontend
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# db：仅允许 backend 入站（5432）。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aiops-db-ingress
+  labels:
+    app.kubernetes.io/name: aiops-console
+    app.kubernetes.io/component: database
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: aiops-console
+      app.kubernetes.io/component: database
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: aiops-console
+              app.kubernetes.io/component: backend
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+# redis：仅允许 backend 入站（6379）。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aiops-redis-ingress
+  labels:
+    app.kubernetes.io/name: aiops-console
+    app.kubernetes.io/component: redis
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: aiops-console
+      app.kubernetes.io/component: redis
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: aiops-console
+              app.kubernetes.io/component: backend
+      ports:
+        - protocol: TCP
+          port: 6379
