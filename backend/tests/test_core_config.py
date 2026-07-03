@@ -62,6 +62,19 @@ def test_production_accepts_strong_secret() -> None:
     assert s.effective_secret_key == strong
 
 
+def test_production_rejects_debug_true() -> None:
+    """生产环境 debug=True 应启动失败（errors.spec.md§5.4 禁止明文 traceback）。"""
+    strong = "x" * 48
+    with pytest.raises(ValidationError, match="DEBUG"):
+        _make_settings(environment="production", jwt_secret=strong, debug=True)
+
+
+def test_debug_defaults_to_false() -> None:
+    """debug 默认 False，避免生产环境遗忘设置导致泄漏 traceback。"""
+    s = _make_settings(environment="development")
+    assert s.debug is False
+
+
 def test_production_secret_key_alias_fallback_rejected() -> None:
     """仅设置 SECRET_KEY 别名但仍是占位值时，生产环境也应 fail-fast。"""
     with pytest.raises(ValidationError):

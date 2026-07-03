@@ -67,10 +67,15 @@ async def get_prompt(session: AsyncSession, prompt_id: uuid.UUID) -> Prompt:
 async def list_prompts(
     session: AsyncSession, q: str | None = None, limit: int = 50, offset: int = 0
 ) -> list[Prompt]:
-    """列出 Prompt，支持名称模糊搜索。"""
+    """列出 Prompt，支持名称模糊搜索。
+
+    搜索词中的 ``%`` / ``_`` / ``\\`` 被转义为字面量，避免通配符注入
+    （如搜索 ``%`` 匹配全部、``_`` 匹配任意单字符）破坏搜索语义。
+    """
     stmt = select(Prompt).options(selectinload(Prompt.versions))
     if q:
-        stmt = stmt.where(Prompt.name.ilike(f"%{q}%"))
+        q_escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        stmt = stmt.where(Prompt.name.ilike(f"%{q_escaped}%", escape="\\"))
     stmt = stmt.order_by(Prompt.created_at.desc()).limit(limit).offset(offset)
     return list((await session.execute(stmt)).scalars().all())
 

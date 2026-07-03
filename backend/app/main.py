@@ -30,7 +30,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.api import api_router
 from app.core import health as health_mod
-from app.core.config import settings
+from app.core.config import _PROD_ENVS, settings
 from app.core.database import engine, init_db
 from app.core.exceptions import AppError
 from app.core.logging import (
@@ -52,14 +52,17 @@ logger = logging.getLogger("app.main")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """应用生命周期：启动建表（``create_all`` 幂等），关闭 engine。
+    """应用生命周期：启动建表（仅开发/测试），关闭 engine。
 
-    不再以 ``settings.debug`` 为门槛——``create_all`` 对已存在的表是 no-op，
-    生产环境通过 Alembic 迁移建表时 ``create_all`` 不会破坏既有 schema。
-    同时避免 ``debug=True`` 导致 Starlette ``ServerErrorMiddleware`` 返回
-    明文 traceback（违反 `errors.spec.md`§5.4 禁止泄漏 ``str(exc)``）。
+    生产环境（``environment`` ∈ {production, prod, staging}）必须通过 Alembic
+    迁移管理 schema，``create_all`` 在此跳过——避免 ORM 模型与迁移不一致时
+    ``create_all`` 跳过未覆盖的新列/索引导致运行时 ``UndefinedColumn`` 错误，
+    也避免对已存在的表产生与迁移不符的结构。
+
+    开发/测试环境保留 ``create_all`` 以降低本地启动门槛（无需手动 alembic upgrade）。
     """
-    await init_db()
+    if settings.environment.lower() not in _PROD_ENVS:
+        await init_db()
     yield
     await engine.dispose()
     await close_redis()

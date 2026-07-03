@@ -101,13 +101,10 @@ async def run_eval(
     except Exception:  # noqa: BLE001
         # predict_fn 为调用方注入的任意可调用对象，可能抛任意异常；
         # 任何异常都需把 eval 标记为 ERROR 状态后重抛，由调用方决定如何处理。
-        await _persist_error_status(session.bind, eval_id)
-        # 同步内存中的 run 对象，供直接 catch 异常且不 rollback 的调用方
-        # （如部分测试）读到一致状态。注意：HTTP 路径下 get_session 会 rollback
-        # 导致 expire，调用方再读 run.status 会触发 lazy load 失败；持久化状态
-        # 已由 _persist_error_status 独立事务保证。
-        run.status = EvalStatus.ERROR.value
-        run.finished_at = datetime.now(UTC)
+        # 先取 bind（可能为 None），再持久化；访问 session.bind 本身不在 try 内
+        # 可避免二次异常掩盖原始错误。
+        bind = session.bind
+        await _persist_error_status(bind, eval_id)
         raise
     finally:
         if client is not None:

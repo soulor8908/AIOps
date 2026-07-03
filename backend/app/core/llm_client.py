@@ -93,7 +93,19 @@ class LLMClient:
     ) -> None:
         self.config = config
         self.max_retries = max_retries
-        self._http = httpx.AsyncClient(timeout=timeout)
+        self._timeout = timeout
+        # 懒初始化：避免构造期即创建 httpx.AsyncClient 连接池。
+        # 调用方常以 ``LLMClient(config)`` 构造，若随后因异常未进入
+        # ``try/finally close``（如 ``_build_llm_config`` 抛错），急切创建的
+        # 连接池会泄漏。懒初始化确保仅在真正发请求时才占用连接资源。
+        self._http: httpx.AsyncClient | None = None
+
+    @property
+    def http(self) -> httpx.AsyncClient:
+        """懒初始化 httpx.AsyncClient（首次访问或上次已关闭时创建）。"""
+        if self._http is None or self._http.is_closed:
+            self._http = httpx.AsyncClient(timeout=self._timeout)
+        return self._http
 
     async def __aenter__(self) -> LLMClient:
         return self
@@ -206,7 +218,7 @@ class LLMClient:
         ``base_url`` 与 ``headers`` 注入。
         """
         try:
-            resp = await self._http.post(
+            resp = await self.http.post(
                 f"{base_url}/chat/completions",
                 headers=headers,
                 json={
@@ -251,7 +263,7 @@ class LLMClient:
             if m.role != "system"
         ]
         try:
-            resp = await self._http.post(
+            resp = await self.http.post(
                 f"{url}/messages",
                 headers={
                     "x-api-key": self.config.api_key,
@@ -287,7 +299,8 @@ class LLMClient:
         return LLMResponse(content=text, usage=data.get("usage", {}), raw=data)
 
     async def close(self) -> None:
-        await self._http.aclose()
+        if self._http is not None and not self._http.is_closed:
+            await self._http.aclose()
 
 
 class _RetryableLLMError(LLMError):

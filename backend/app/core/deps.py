@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_session
 from app.core.exceptions import AuthenticationError, AuthorizationError
 from app.core.jwt import verify_token
+from app.core.logging import user_id_var
 
 if TYPE_CHECKING:
     from app.domains.auth.models import User
@@ -47,6 +48,9 @@ async def get_current_user(
         raise AuthenticationError("用户不存在")
     if not user.is_active:
         raise AuthenticationError("用户已停用")
+    # 设置 user_id 日志上下文（observability.spec.md§2.2）。
+    # ObservabilityMiddleware 在请求结束时 reset，此处无需管理 token。
+    user_id_var.set(str(user.id))
     return user
 
 

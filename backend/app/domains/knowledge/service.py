@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import uuid
 from typing import Any
 
@@ -174,8 +173,6 @@ async def rag_query(
     ]
     try:
         resp = await client.chat(messages)
-    except json.JSONDecodeError as exc:
-        raise LLMError(f"LLM 返回非法 JSON: {exc}") from exc
     finally:
         await client.close()
     return {

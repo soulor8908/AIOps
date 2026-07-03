@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections import deque
 from typing import Any, Protocol, cast
@@ -20,6 +21,8 @@ from app.domains.agents.models import (
     ToolDef,
     ToolType,
 )
+
+logger = logging.getLogger("app.agents.executor")
 
 
 class ToolExecutor(Protocol):
@@ -72,13 +75,15 @@ class AgentExecutor:
             done, answer = await self._run_turn(
                 turn, messages, tool_defs, traces
             )
-            total_tokens = traces[-1].tokens if traces else 0
             if done:
                 final_answer = answer
                 success = True
                 break
         else:
             final_answer = "达到最大轮次仍未给出最终答案。"
+        # total_tokens 由 _run_turn 逐轮累积（traces[-1].tokens 即为当前累计值），
+        # 此处取末轮值即可，无需在循环内反复覆盖。
+        total_tokens = traces[-1].tokens if traces else 0
         return ExecutionResult(
             agent_id=agent.id,
             final_answer=final_answer,
@@ -163,6 +168,9 @@ class AgentExecutor:
                 output = await self.tools.execute(tool, args)
                 results.append(f"[{name}] {output}")
             except Exception as exc:  # noqa: BLE001
+                # 工具异常拼入 observation 供 LLM 决策（如换工具或放弃），
+                # 同时记录完整 traceback 便于排障（编程错误不应被静默吞掉）。
+                logger.warning("tool %s execution failed", name, exc_info=True)
                 results.append(f"[{name} 错误] {exc}")
         return "\n".join(results)
 

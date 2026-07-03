@@ -75,7 +75,11 @@ async def get_conversation(
 async def get_dashboard_metrics(
     session: AsyncSession, days: int = 7
 ) -> DashboardMetrics:
-    """聚合仪表盘指标。默认统计最近 7 天。
+    """聚合仪表盘指标，统计最近 ``days`` 天（默认 7 天）。
+
+    所有聚合（total_* / active_models / conversations_last_7d）均按 ``since``
+    时间窗口过滤，确保指标自洽——避免 total_conversations 与
+    conversations_last_7d 不一致误导用户。
 
     P3：Redis 缓存 60s TTL + 查询合并（原 6 次独立聚合 → 3 次）。
     """
@@ -92,24 +96,32 @@ async def get_dashboard_metrics(
     since = datetime.now(UTC) - timedelta(days=days)
 
     # P3：合并 conversations 的 count + sum(tokens) + sum(cost) 为单条查询（原 3 次 → 1 次）
-    conv_stmt = select(
-        func.count(),
-        func.coalesce(func.sum(Conversation.total_tokens), 0),
-        func.coalesce(func.sum(Conversation.total_cost), Decimal("0")),
-    ).select_from(Conversation)
+    conv_stmt = (
+        select(
+            func.count(),
+            func.coalesce(func.sum(Conversation.total_tokens), 0),
+            func.coalesce(func.sum(Conversation.total_cost), Decimal("0")),
+        )
+        .select_from(Conversation)
+        .where(Conversation.created_at >= since)
+    )
     total_conv, total_tokens, total_cost = (await session.execute(conv_stmt)).one()
 
     # P3：合并 messages 的 count + avg(latency) 为单条查询（原 2 次 → 1 次）
-    msg_stmt = select(
-        func.count(),
-        func.avg(Message.latency_ms),
-    ).select_from(Message)
+    msg_stmt = (
+        select(
+            func.count(),
+            func.avg(Message.latency_ms),
+        )
+        .select_from(Message)
+        .where(Message.created_at >= since)
+    )
     total_msg, avg_latency_val = (await session.execute(msg_stmt)).one()
 
     avg_msgs = float(total_msg) / float(total_conv) if total_conv else 0.0
     avg_latency = float(avg_latency_val) if avg_latency_val is not None else 0.0
 
-    active_models = await _active_models(session)
+    active_models = await _active_models(session, since)
     conv_7d = await _conversations_by_day(session, since)
 
     result = DashboardMetrics(
@@ -134,15 +146,20 @@ async def get_dashboard_metrics(
     return result
 
 
-async def _active_models(session: AsyncSession) -> list[dict[str, Any]]:
-    """活跃模型排行（按 token 总量降序）。"""
+async def _active_models(
+    session: AsyncSession, since: datetime
+) -> list[dict[str, Any]]:
+    """活跃模型排行（按 token 总量降序），仅统计 ``since`` 之后。"""
     stmt = (
         select(
             Conversation.model_alias,
             func.sum(Conversation.total_tokens).label("tokens"),
             func.count().label("conversations"),
         )
-        .where(Conversation.model_alias.is_not(None))
+        .where(
+            Conversation.model_alias.is_not(None),
+            Conversation.created_at >= since,
+        )
         .group_by(Conversation.model_alias)
         .order_by(func.sum(Conversation.total_tokens).desc())
         .limit(10)

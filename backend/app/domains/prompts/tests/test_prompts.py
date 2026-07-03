@@ -47,6 +47,23 @@ async def test_create_prompt_initial_version(session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_prompts_search_escapes_wildcards(session: AsyncSession) -> None:
+    """P2：搜索词中的 % / _ 被转义为字面量，避免通配符注入。"""
+    await service.create_prompt(session, PromptCreate(name="a%b", content="c"))
+    await service.create_prompt(session, PromptCreate(name="acd", content="c"))
+    await service.create_prompt(session, PromptCreate(name="normal", content="c"))
+
+    # 搜索字面 "%" 应只匹配 "a%b"，而非匹配全部
+    result = await service.list_prompts(session, q="%")
+    assert len(result) == 1
+    assert result[0].name == "a%b"
+
+    # 搜索字面 "_" 应只匹配 "a%b"（无单独 "_" 名），不应匹配 "acd"（_ 匹配任意单字符）
+    result_underscore = await service.list_prompts(session, q="a_b")
+    assert {p.name for p in result_underscore} == {"a%b"}
+
+
+@pytest.mark.asyncio
 async def test_create_version_increments(session: AsyncSession) -> None:
     prompt = await service.create_prompt(
         session, PromptCreate(name="p1", content="v1 content")

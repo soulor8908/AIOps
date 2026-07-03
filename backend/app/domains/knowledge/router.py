@@ -81,7 +81,11 @@ async def upload_document(
     current_user: User = Depends(get_current_user),
 ) -> DocumentOut:
     # security.spec.md§7.1 — 先检 Content-Length，超限直接拒绝（防大文件耗尽内存）。
-    content_length = int(request.headers.get("content-length", "0"))
+    try:
+        content_length = int(request.headers.get("content-length", "0"))
+    except (ValueError, TypeError):
+        # 非数字 Content-Length（如 "abc"）→ 422，而非 500
+        raise ValidationError("Content-Length 头格式非法") from None
     if content_length > _MAX_CONTENT_LENGTH:
         # 审计：上传被拒绝（超大文件），记录 user/kb/size 便于追溯异常上传行为。
         logger.warning(

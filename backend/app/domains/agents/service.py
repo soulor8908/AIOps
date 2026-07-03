@@ -247,6 +247,13 @@ def _llm_config_from_row(mc: ModelConfig, temperature: float | None) -> LLMConfi
     api_key = ""
     if mc.api_key_env:
         api_key = os.environ.get(mc.api_key_env, "")
+        if not api_key:
+            logger.warning(
+                "model_config alias=%s 配置 api_key_env=%s 但环境变量未注入，"
+                "LLM 调用将返回 401",
+                mc.alias,
+                mc.api_key_env,
+            )
     elif mc.provider == "openai":
         api_key = settings.openai_api_key
     elif mc.provider == "anthropic":
