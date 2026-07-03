@@ -4,7 +4,7 @@
 # 构建上下文为仓库根目录（docker build -f ops/Dockerfile.frontend .）。
 
 # ---------- Stage 1: build ----------
-FROM node:20-alpine AS build
+FROM node:26-alpine AS build
 
 WORKDIR /app
 
