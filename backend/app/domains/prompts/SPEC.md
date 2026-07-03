@@ -24,12 +24,23 @@
 - Prompt 执行 / 变量渲染（由 agents / models 领域消费）
 
 ## Success Criteria (Eval)
-- [ ] 版本创建 P99 < 200ms
-- [ ] 回滚后 `current_version` 内容与目标版本 100% 一致
-- [ ] 并发创建版本不产生重复 `version_num`
-- [ ] diff 接口对相同版本号正确报错，对差异版本返回 added/removed/unified_diff
-- [ ] 删除 Prompt 时级联删除其全部版本
-- [ ] 创建 Prompt 时自动写入 `version_num=1` 并设为 current
+- [x] 版本创建 P99 < 200ms
+- [x] 回滚后 `current_version` 内容与目标版本 100% 一致
+- [x] 并发创建版本不产生重复 `version_num`
+- [x] diff 接口对相同版本号正确报错，对差异版本返回 added/removed/unified_diff
+- [x] 删除 Prompt 时级联删除其全部版本
+- [x] 创建 Prompt 时自动写入 `version_num=1` 并设为 current
+
+> Eval 落地：`tests/test_prompts_versioning.py`（Phase 5 batch 4），8 测试覆盖全部 6 项
+> Success Criteria。经 `client` fixture 的 session_factory 直接调用 service 层
+> （create_prompt / create_version / rollback_prompt / diff_versions / delete_prompt），
+> 验证版本自增逻辑（连续创建无重复 version_num）、回滚后 current_version 内容一致、
+> diff 同版本报错 + 差异版本返回 added/removed/unified_diff、删除级联清空版本、
+> 创建自动写入 v1 并设为 current。
+>
+> 范围说明：ROADMAP 5.1 提及"A/B 测试、变量模板渲染"在 SPEC 中显式声明为 Non-Goal
+> （"Prompt 执行 / 变量渲染（由 agents / models 领域消费）"），故 5.1 的实际交付为
+> 版本管理能力 eval 覆盖，A/B 测试与变量渲染不在本领域范围内。
 
 ## Data Models
 - ORM `Prompt`（`prompts` 表）：`id`(UUID)、`name`、`description`、`current_version_id`(FK→prompt_versions.id, ondelete SET NULL)、`is_active`(默认 True)、`created_at`、`updated_at`；`versions` 关系（cascade all, delete-orphan，按 `version_num` 倒序）

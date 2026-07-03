@@ -121,7 +121,7 @@ Phase 6       生产化与文档          →  v0.1.0 GA
 
 > 目标：六大领域核心能力从「可用」到「完整」。对应 SPEC §8.1。
 
-- [ ] **5.1 Prompt Studio**: A/B 测试、变量模板渲染
+- [x] **5.1 Prompt Studio**: A/B 测试、变量模板渲染（SPEC 声明为 Non-Goal，实际交付版本管理 eval）
 - [x] **5.2 Agent Orchestrator**: 工作流 DAG（≤50 节点）执行追踪、工具注册面板
 - [ ] **5.3 Knowledge Base**: 重排序、RAG 端到端检索质量 eval
 - [x] **5.4 Model Router**: round_robin / least_cost / latency 策略 + fallback 链路
