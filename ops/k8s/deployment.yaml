@@ -38,7 +38,7 @@ spec:
                     app.kubernetes.io/component: backend
       containers:
         - name: backend
-          image: aiops/backend:latest
+          image: aiops/backend:0.1.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -170,7 +170,7 @@ spec:
                     app.kubernetes.io/component: frontend
       containers:
         - name: frontend
-          image: aiops/frontend:latest
+          image: aiops/frontend:0.1.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

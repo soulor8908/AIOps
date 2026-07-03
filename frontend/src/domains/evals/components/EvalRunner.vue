@@ -22,17 +22,23 @@ async function onSubmit() {
     error.value = "Name is required.";
     return;
   }
+  // P2：前端预校验 cases 非空，避免空 payload 往返后端再报错
+  const cases = form.value.cases
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((input) => ({ input }));
+  if (cases.length === 0) {
+    error.value = "At least one case is required.";
+    return;
+  }
   submitting.value = true;
   error.value = null;
   try {
     const payload: EvalRunCreate = {
       name: form.value.name,
       description: form.value.description || undefined,
-      cases: form.value.cases
-        .split("\n")
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .map((input) => ({ input })),
+      cases,
     };
     await store.create(payload);
     emit("created");

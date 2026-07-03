@@ -10,12 +10,14 @@ import os
 from decimal import Decimal
 from typing import Any
 
+import redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.exceptions import LLMError, NotFoundError
 from app.core.llm_client import LLMClient, LLMConfig, Message, Provider
+from app.core.redis import get_redis
 from app.domains.models.models import (
     ChatRequest,
     ChatResponse,
@@ -24,8 +26,6 @@ from app.domains.models.models import (
     ModelConfigUpdate,
     RoutingStrategy,
 )
-
-_round_robin_index: dict[str, int] = {}
 
 # ModelConfig.provider 值 → LLMClient 支持的 Provider（Literal["openai","anthropic","local"]）。
 # Azure OpenAI 与 custom 兼容 OpenAI 协议，映射到 "openai"。
@@ -120,10 +120,30 @@ async def route_model(
     if primary in candidates:
         candidates.remove(primary)
     if strategy == RoutingStrategy.ROUND_ROBIN and candidates:
-        shift = _round_robin_index.get(alias, 0) % len(candidates)
-        _round_robin_index[alias] = _round_robin_index.get(alias, 0) + 1
+        # P2：用 Redis INCR 维护跨 worker 的轮询计数器，避免多 worker 各自计数
+        # 导致 round_robin 退化为近似随机。Redis 不可用时回退到进程内计数（单 worker 仍正确）。
+        shift = await _round_robin_shift(alias, len(candidates))
         candidates = candidates[shift:] + candidates[:shift]
     return [primary, *candidates]
+
+
+async def _round_robin_shift(alias: str, count: int) -> int:
+    """获取 round_robin 偏移量，优先用 Redis INCR 跨 worker 共享计数。"""
+    try:
+        redis_client = get_redis()
+        key = f"ratelimit:rr:{alias}"
+        idx = await redis_client.incr(key)
+        await redis_client.expire(key, 3600)
+        return (idx - 1) % count
+    except redis.RedisError:
+        # Redis 不可用 → 回退到进程内字典（单 worker 下仍正确）
+        global _rr_fallback_index
+        idx = _rr_fallback_index.get(alias, 0)
+        _rr_fallback_index[alias] = idx + 1
+        return idx % count
+
+
+_rr_fallback_index: dict[str, int] = {}
 
 
 async def chat_completion(

@@ -24,8 +24,18 @@ def _default_cors_origins() -> list[str]:
     """开发环境默认放宽到本地前端；生产须通过环境变量显式覆盖。
 
     `security.spec.md`§4 禁止生产环境 ``allow_origins=["*"]`` + ``allow_credentials=True``。
+
+    同时放行 ``localhost`` 与 ``127.0.0.1``：浏览器视二者为不同 Origin，
+    用户用 127.0.0.1 访问 dev server 时若不在白名单会被 CORS 拦截。
+    同源部署（dev Vite proxy / prod nginx 反代）默认不触发 CORS，
+    此列表仅覆盖前端直连后端 8000 端口的场景。
     """
-    return ["http://localhost:5173", "http://localhost:3000"]
+    return [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
 
 
 class Settings(BaseSettings):

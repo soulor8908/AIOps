@@ -99,10 +99,19 @@ async def test_direct_strategy_returns_only_primary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_round_robin_primary_first_and_rotates() -> None:
+async def test_round_robin_primary_first_and_rotates(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """round_robin：primary 始终居首，其余 active 候选轮转。"""
-    # 重置 round_robin 索引避免跨测试污染
-    model_service._round_robin_index.clear()
+    # P2：round_robin 改用 Redis INCR 跨 worker 共享计数，回退到进程内字典。
+    # 测试环境无 Redis：强制 get_redis 抛 RedisError 走 fallback 路径，避免真实
+    # 网络连接尝试（与 conftest._skip_rate_limit 同样模式）。
+    import redis as _redis
+
+    def _raise_redis_error() -> None:
+        raise _redis.RedisError("no redis in test env")
+
+    monkeypatch.setattr(model_service, "get_redis", _raise_redis_error)
+    # 重置 fallback 索引避免跨测试污染
+    model_service._rr_fallback_index.clear()
 
     a = _config("a", priority=10)
     b = _config("b", priority=20)

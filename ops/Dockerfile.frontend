@@ -13,7 +13,8 @@ COPY frontend/package.json ./
 COPY frontend/package-lock.json* ./
 
 # 安装依赖（含 devDependencies 以支持构建）
-RUN npm install
+# npm ci 依据 package-lock.json 做可重复安装，禁止隐式修改 lockfile（testing.spec.md §CI）
+RUN npm ci
 
 # 复制源码并构建产物（vue-tsc 类型检查 + vite build）
 COPY frontend/ ./
@@ -22,6 +23,14 @@ RUN npm run build
 # ---------- Stage 2: runtime ----------
 # nginx-unprivileged 以 UID 101 非 root 运行，监听非特权端口 8080（deployment.spec.md §2.2）。
 FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime
+
+# OCI 标准标签（deployment.spec.md §可观测性 / 供应链安全）
+ARG GIT_SHA=""
+ARG VERSION="0.1.0"
+LABEL org.opencontainers.image.title="aiops-console-frontend" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.source="https://github.com/soulor8908/AIOps"
 
 # 移除默认配置，使用 SPA 路由配置
 RUN rm /etc/nginx/conf.d/default.conf

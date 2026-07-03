@@ -22,7 +22,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -32,6 +32,7 @@ from app.api import api_router
 from app.core import health as health_mod
 from app.core.config import _PROD_ENVS, settings
 from app.core.database import engine, init_db
+from app.core.deps import get_current_admin
 from app.core.exceptions import AppError
 from app.core.logging import (
     request_id_var,
@@ -42,6 +43,7 @@ from app.core.logging import (
 from app.core.metrics import metrics
 from app.core.rate_limit import RateLimitMiddleware
 from app.core.redis import close_redis
+from app.domains.auth.models import User
 from app.domains.knowledge.embedder import close_embedder_client
 
 # 导入期配置 JSON 日志（observability.spec.md§2）。
@@ -285,8 +287,14 @@ async def health() -> dict[str, Any]:
 
 
 @app.get("/metrics", tags=["meta"])
-async def metrics_endpoint() -> PlainTextResponse:
+async def metrics_endpoint(
+    _admin: User = Depends(get_current_admin),
+) -> PlainTextResponse:
     """Prometheus 指标导出（observability.spec.md§5）。
+
+    需 admin 权限——指标含 request_count/llm_tokens/llm_cost 等运营敏感数据，
+    匿名暴露会泄露业务量级、各模型用量与错误率，可被用于侧信道侦察。
+    Prometheus scraper 通过 Authorization 头携带 admin token 抓取。
 
     返回 ``text/plain; version=0.0.4``，可被 Prometheus scraper 直接抓取。
     包含 ``request_count`` / ``request_latency`` / ``llm_tokens`` / ``llm_cost``。

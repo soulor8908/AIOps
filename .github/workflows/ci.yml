@@ -6,6 +6,15 @@ on:
   pull_request:
     branches: [main]
 
+# 同分支重复 push/PR 取消旧运行，节省 CI 资源；main 分支不取消以保证发布前必跑完
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# 最小权限原则：CI 仅需读取仓库内容
+permissions:
+  contents: read
+
 jobs:
   backend-test:
     runs-on: ubuntu-latest
@@ -219,6 +228,15 @@ jobs:
       - name: E2E tests (Playwright, against build)
         run: npm run e2e
 
+      # E2E 失败时上传 Playwright HTML 报告，便于离线排查（always() 保证失败也上传）
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 7
+
   # L4 LLM-as-Judge（testing.spec.md §6）— 语义质量评估，非阻断门禁。
   # 得分 > 0.85 为通过；未达不阻断合并（continue-on-error）但标红评审。
   # 无 OPENAI_API_KEY secret 时 eval 内 skipif 自动跳过。
@@ -267,3 +285,23 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_CONFIG: .gitleaks.toml
+
+  # Docker 镜像可构建性验证（deployment.spec.md §2 / agents.md §12 发布前置条件）。
+  # push: false 仅本地构建不推送，拦截 Dockerfile / .dockerignore / 构建上下文回归。
+  docker-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ops/Dockerfile.backend
+          push: false
+      - name: Build frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ops/Dockerfile.frontend
+          push: false
