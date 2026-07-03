@@ -54,10 +54,11 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 
 async def init_db() -> None:
     """开发期建表（生产用 alembic）。需先导入所有 ORM 模块。"""
-    # 触发 ORM 注册（避免循环导入，仅副作用）
+    # 触发 ORM 注册（避免循环导入，仅副作用）。含 auth/users，否则 users 表不会被建。
     from app.domains import (  # noqa: F401
         agents,
         analytics,
+        auth,
         evals,
         knowledge,
         models,

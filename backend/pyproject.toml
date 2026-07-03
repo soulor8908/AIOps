@@ -20,6 +20,8 @@ dependencies = [
     "python-jose[cryptography]>=3.3",
     "passlib[bcrypt]>=1.7",
     "python-multipart>=0.0.12",
+    # EmailStr（auth 域 UserCreate/LoginRequest）依赖 email-validator 运行期校验
+    "email-validator>=2.1",
 ]
 
 [project.optional-dependencies]
@@ -29,10 +31,14 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.7",
     "mypy>=1.13",
+    # 测试用 SQLite async 驱动（conftest 以 sqlite+aiosqlite:///:memory: 跑 L1/L2）
+    "aiosqlite>=0.20",
     "types-python-jose",
     "types-passlib",
     # L2 契约测试（schemathesis）：覆盖所有 OpenAPI 端点的状态码/schema 校验
     "schemathesis>=3.36",
+    # 数据库迁移（specs/migration.spec.md §3）：ORM 单一真源，autogenerate 派生迁移
+    "alembic>=1.13",
 ]
 
 [build-system]

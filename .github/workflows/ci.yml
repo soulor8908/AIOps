@@ -40,6 +40,70 @@ jobs:
       - name: Test with pytest (coverage)
         run: pytest
 
+  # 迁移一致性校验（specs/migration.spec.md §8）。
+  # 真正用 PG + pgvector 跑迁移：upgrade → ORM/DB 一致性 → downgrade → replay。
+  # 这是 SQLite 跑不了的 PG 专属类型/索引（HNSW、UUID、JSONB）的唯一守门人。
+  migration-consistency:
+    runs-on: ubuntu-latest
+    env:
+      # asyncpg 驱动 + pgvector 镜像默认 user/pass/db
+      DATABASE_URL: postgresql+asyncpg://aiops:aiops@localhost:5432/aiops
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: aiops
+          POSTGRES_PASSWORD: aiops
+          POSTGRES_DB: aiops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aiops -d aiops"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # init.sql 仅 CREATE EXTENSION（migration.spec.md §4）：vector / pgcrypto / citext。
+      # 必须在 alembic upgrade 之前执行，否则 0001 的 create_all 会因 VECTOR 类型不存在失败。
+      - name: Bootstrap extensions (init.sql)
+        env:
+          PGPASSWORD: aiops
+        run: psql -h localhost -U aiops -d aiops -v ON_ERROR_STOP=1 -f init.sql
+
+      - name: Alembic upgrade head
+        run: alembic upgrade head
+
+      - name: Schema consistency (ORM vs DB 表/列)
+        run: python scripts/check_schema_consistency.py
+
+      # 0002 是数据迁移：downgrade 仅删种子，schema 不变；验证迁移可回滚。
+      - name: Alembic downgrade -1 (rollback)
+        run: alembic downgrade -1
+
+      - name: Alembic upgrade head (replay)
+        run: alembic upgrade head
+
+      - name: Schema consistency (replay 后复检)
+        run: python scripts/check_schema_consistency.py
+
   frontend-test:
     runs-on: ubuntu-latest
     env:

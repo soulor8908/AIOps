@@ -18,6 +18,7 @@
 | `python-jose` | >=3.3 | JWT 编解码，标准 JOSE 实现，支持 HS256/RS256。认证层核心，无状态 Token。 | PyJWT（功能重叠，jose 支持更全的 JOSE 标准）。 |
 | `passlib` | >=1.7 | 密码哈希，bcrypt 后端，自动处理版本迁移。用户认证必备。 | bcrypt 直调（无版本迁移能力）。 |
 | `python-multipart` | >=0.0.12 | FastAPI 文件上传（`UploadFile`）依赖。知识库文档上传必需。 | 无（FastAPI 文件上传硬依赖）。 |
+| `email-validator` | >=2.1 | Pydantic `EmailStr` 运行期校验依赖（auth 域 `UserCreate`/`LoginRequest`）。原 alpha 代码已用 `EmailStr` 但未声明，现补齐。 | 无（`EmailStr` 硬依赖）。 |
 
 ## 开发依赖（dev）
 
@@ -28,6 +29,8 @@
 | `pytest-cov` | >=5.0 | 覆盖率统计，L1 单元测试覆盖率门槛验证。 |
 | `ruff` | >=0.7 | Linter + Formatter，Rust 实现 100x 快于 flake8。 |
 | `mypy` | >=1.13 | 静态类型检查，"Types as Docs" 原则的强制层。 |
+| `alembic` | >=1.13 | SQLAlchemy 官方迁移工具，autogenerate 从 `Base.metadata` 派生迁移，消除 init.sql/ORM 双真源漂移。对应 `specs/migration.spec.md` §3（ORM 单一真源）。原 alpha 阶段用 init.sql，现已按 `specs/migration.spec.md` 引入。 |
+| `aiosqlite` | >=0.20 | SQLite async 驱动。L1/L2 测试以 `sqlite+aiosqlite:///:memory:` 跑全异步栈（避免 PG 依赖），`conftest.py` 硬依赖。 | 无（async SQLite 唯一驱动）。 |
 
 ## 明确不引入（Rejected）
 
@@ -35,7 +38,6 @@
 |------|---------|
 | `langchain` / `llama-index` | 黑盒依赖，违背 Understanding-First。自研 80 行 LLM 客户端足够。 |
 | `celery` | 过重，Redis Stream + asyncio 足以支撑 Agent 异步执行。 |
-| `alembic` | alpha 阶段用 init.sql，GA 前再引入迁移。 |
 | `sqlmodel` | 与 Pydantic 耦合限制 ORM 表达力，SQLAlchemy 2.0 + Pydantic schema 分离更清晰。 |
 | `fastapi-users` | 认证逻辑 < 50 行，自实现更可控。 |
 

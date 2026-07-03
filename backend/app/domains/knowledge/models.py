@@ -13,7 +13,7 @@ from typing import Any
 
 from pgvector.sqlalchemy import Vector
 from pydantic import BaseModel, Field
-from sqlalchemy import BigInteger, ForeignKey, Integer, String, Text, func
+from sqlalchemy import BigInteger, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -64,6 +64,8 @@ class Document(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
+    __table_args__ = (Index("idx_documents_status", "status"),)
+
     knowledge_base: Mapped[KnowledgeBase] = relationship(back_populates="documents")
 
 
@@ -87,6 +89,17 @@ class Chunk(Base):
         "metadata", JSONB, nullable=False, default=dict
     )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    __table_args__ = (
+        # HNSW 向量索引，余弦距离；PG 专属，SQLite 上降级为普通索引（dialect kwargs 被忽略）
+        Index(
+            "idx_chunks_embedding",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
 
 
 # ===================== Schemas =====================

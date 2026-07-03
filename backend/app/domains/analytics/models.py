@@ -12,7 +12,7 @@ from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, Field
-from sqlalchemy import ForeignKey, Integer, Numeric, String, Text, func
+from sqlalchemy import ForeignKey, Index, Integer, Numeric, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -26,10 +26,14 @@ class Conversation(Base):
     __tablename__ = "conversations"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    # 跨域引用：users / agents 表由 init.sql 维护并强制 DB 级 FK。
-    # ORM 层仅存 UUID，避免跨域 metadata 耦合（init.sql 为 schema 真源）。
-    user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
-    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    # 跨域引用：以字符串 ForeignKey 声明 DB 级约束（ondelete=SET NULL），
+    # 不 import User/Agent ORM，避免跨域 metadata 耦合（migration.spec.md §9 #6）。
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id", ondelete="SET NULL"), index=True
+    )
     model_alias: Mapped[str | None] = mapped_column(String(64))
     title: Mapped[str | None] = mapped_column(String(255))
     metadata_: Mapped[dict[str, Any]] = mapped_column(
@@ -41,6 +45,8 @@ class Conversation(Base):
     )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (Index("idx_conversations_created", "created_at"),)
 
     messages: Mapped[list[Message]] = relationship(
         back_populates="conversation",
@@ -56,7 +62,7 @@ class Message(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     conversation_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE")
     )
     role: Mapped[str] = mapped_column(String(16), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
@@ -65,6 +71,10 @@ class Message(Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     model_alias: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_messages_conversation", "conversation_id", "created_at"),
+    )
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
 
