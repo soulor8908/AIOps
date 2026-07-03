@@ -1,0 +1,23 @@
+# Prometheus 抓取配置（observability.spec.md§5）
+#
+# 通过 K8s Service + Service port 抓取 backend /metrics 端点。
+# 部署：以 ConfigMap 形式挂载到 Prometheus，或供 prometheus-operator ServiceMonitor 参考。
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: aiops-backend-monitor
+  labels:
+    app.kubernetes.io/name: aiops-console
+    app.kubernetes.io/component: backend
+    release: prometheus  # prometheus-operator selector 约定
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aiops-console
+      app.kubernetes.io/component: backend
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      honorLabels: true

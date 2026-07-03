@@ -97,12 +97,25 @@
 
 ## 8. 验收清单
 
-- [ ] 生产日志为 JSON，含 §2.2 全部字段。
-- [ ] 每请求分配 request_id，贯穿日志并回传响应头。
-- [ ] ERROR/CRITICAL 不泄露密钥与堆栈到响应（仅日志）。
-- [ ] 请求数、延迟、错误率、LLM token/成本指标已采集。
-- [ ] 错误率 > 5%、P99 > 2s、LLM 成本超阈值告警已配置。
+- [x] 生产日志为 JSON，含 §2.2 全部字段。
+- [x] 每请求分配 request_id，贯穿日志并回传响应头。
+- [x] ERROR/CRITICAL 不泄露密钥与堆栈到响应（仅日志）。
+- [x] 请求数、延迟、错误率、LLM token/成本指标已采集。
+- [x] 错误率 > 5%、P99 > 2s、LLM 成本超阈值告警已配置。
 - [ ] 前端页面加载、API 错误率、关键操作追踪就绪。
+
+### 8.1 落地记录
+
+- **Phase 4 batch 3**（分支 `feat/phase4-observability`，合并到 main）：
+  - §4/§8 request_id 贯穿链路端到端验证：`test_request_id_propagates_to_request_log`
+    携带 X-Request-ID 请求，断言该值同时出现在响应头与 "request completed" 日志记录
+    （ContextVar set → RequestContextFilter 注入 → 日志携带，全链路）。
+  - §5.1 错误率指标可观测验证：`test_4xx/5xx_recorded_in_request_count` 断言 404/500
+    请求被记入 request_count（含 status 维度），error_rate 可由 Prometheus rate() 派生。
+  - §6 告警规则落地（G5 缺口）：新增 `ops/prometheus/alerts.yml`（4 条规则：可用性
+    /health 失败 critical、5xx 错误率 >5% high、P99 >2s medium、LLM 小时成本 >$50
+    medium）+ `ops/prometheus/scrape.yml`（ServiceMonitor 抓取 /metrics）。
+  - §8 验收清单 5/6 勾选（前端监控 §7 留待 Phase 5 前端加固）。测试总数 362 全绿。
 
 ---
 

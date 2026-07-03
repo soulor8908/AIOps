@@ -1,0 +1,72 @@
+# Prometheus 告警规则（observability.spec.md§6）
+#
+# 阈值通过此处集中管理，便于按环境调整（§6「阈值通过配置管理」）。
+# 部署：kubectl apply -f ops/prometheus/alerts.yml（ConfigMap 挂载到 Prometheus）。
+#
+# 指标来源：app/core/metrics.py 的 /metrics 端点（Prometheus exposition format）。
+# request_count / request_latency 为进程内计数，Prometheus scraper 汇总多 worker。
+groups:
+  - name: aiops-availability
+    interval: 30s
+    rules:
+      # §6 可用性告警：/health 持续失败（严重）
+      - alert: AIOpsHealthDown
+        expr: |
+          up{job="aiops-backend"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: aiops
+        annotations:
+          summary: "AIOps backend /health 探测持续失败"
+          description: "Prometheus 已连续 2 分钟无法抓取 backend 指标（up==0），服务可能不可用。"
+
+      # §6 错误率告警：5xx 错误率 > 5%（滑动 5 分钟，高）
+      - alert: AIOpsHighErrorRate
+        expr: |
+          (
+            sum(rate(request_count{status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(request_count[5m])), 1)
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: high
+          team: aiops
+        annotations:
+          summary: "AIOps 5xx 错误率超过 5%"
+          description: "5xx 错误率 {{ $value | humanizePercentage }}（阈值 5%），持续 5 分钟。检查近期部署与依赖状态。"
+
+  - name: aiops-latency
+    interval: 30s
+    rules:
+      # §6 延迟告警：P99 > 2s（滑动 5 分钟，中）
+      # histogram_quantile 估算 P99：取 +Inf 桶与各 le 桶累计计数插值。
+      - alert: AIOpsHighLatencyP99
+        expr: |
+          histogram_quantile(0.99,
+            sum by (endpoint, le) (rate(request_latency_bucket[5m]))
+          ) > 2000
+        for: 5m
+        labels:
+          severity: medium
+          team: aiops
+        annotations:
+          summary: "AIOps P99 延迟超过 2s"
+          description: "endpoint={{ $labels.endpoint }} P99 延迟 {{ $value }}ms（阈值 2000ms），持续 5 分钟。"
+
+  - name: aiops-cost
+    interval: 60s
+    rules:
+      # §6 LLM 成本告警：小时成本超阈值（中）
+      # 阈值 $50/h（默认，可按环境调整）。llm_cost 为累计 counter，rate() 求每秒增量。
+      - alert: AIOpsLLMCostExceeded
+        expr: |
+          sum(rate(llm_cost[1h])) * 3600 > 50
+        for: 10m
+        labels:
+          severity: medium
+          team: aiops
+        annotations:
+          summary: "AIOps LLM 小时成本超阈值"
+          description: "LLM 小时成本估算 ${{ $value }}（阈值 $50/h），持续 10 分钟。检查异常调用或配额配置。"
