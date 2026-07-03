@@ -25,12 +25,18 @@
 - 工具沙箱化安全执行
 
 ## Success Criteria (Eval)
-- [ ] ReAct 循环在无工具调用时正确终止并返回最终答案
-- [ ] 达到 `max_turns` 仍无最终答案时返回截断提示且 `success=True`
-- [ ] 单工具执行异常被隔离捕获，不中断整体循环
-- [ ] DAG 节点 > 50 时创建与执行均报错
-- [ ] 每轮 `ExecutionTrace` 完整记录 thought/action/observation/tokens
-- [ ] 工具说明通过 `_build_tool_prompt` 正确注入 system prompt
+- [x] ReAct 循环在无工具调用时正确终止并返回最终答案
+- [x] 达到 `max_turns` 仍无最终答案时返回截断提示且 `success=True`
+- [x] 单工具执行异常被隔离捕获，不中断整体循环
+- [x] DAG 节点 > 50 时创建与执行均报错
+- [x] 每轮 `ExecutionTrace` 完整记录 thought/action/observation/tokens
+- [x] 工具说明通过 `_build_tool_prompt` 正确注入 system prompt
+
+> Eval 落地：`tests/test_agents_execution.py`（Phase 5 batch 2），10 测试覆盖全部 6 项
+> Success Criteria。通过注入 mock `llm_client.chat`（AsyncMock side_effect）控制每轮 LLM
+> 输出（tool_calls JSON 块 / 最终答案），验证 ReAct 终止、max_turns 截断、工具异常隔离、
+> DAG 节点上限（创建路径抛 ValidationError + 执行路径抛 LLMError）、ExecutionTrace 字段
+> 完整性、`_build_tool_prompt` 工具说明注入 system prompt 等行为。
 
 ## Data Models
 - ORM `Agent`（`agents` 表）：`id`(UUID)、`name`、`description`、`system_prompt`、`model_alias`(默认 default)、`tools`(JSONB)、`max_turns`(默认 10)、`temperature`(默认 0.7)、`is_active`、`created_at`、`updated_at`
