@@ -55,6 +55,20 @@ settings.debug = False
 app.debug = False
 
 
+@pytest.fixture(autouse=True)
+def _skip_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """测试环境跳过限流（无 Redis 连接）。
+
+    使 ``get_redis`` 立即抛 ``ConnectionRefusedError``，中间件降级放行，
+    避免每个请求等待 Redis 连接超时。限流逻辑由 ``test_core_rate_limit.py``
+    用 fakeredis 独立测试。
+    """
+    def _raise() -> None:
+        raise ConnectionRefusedError("no redis in test env")
+
+    monkeypatch.setattr("app.core.rate_limit.get_redis", _raise)
+
+
 def _import_all_orm_models() -> None:
     """触发所有领域 ORM 注册，保证 ``Base.metadata`` 完整。"""
     from app.domains import agents, analytics, auth, evals, knowledge, models, prompts  # noqa: F401

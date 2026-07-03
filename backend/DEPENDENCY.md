@@ -31,6 +31,7 @@
 | `mypy` | >=1.13 | 静态类型检查，"Types as Docs" 原则的强制层。 |
 | `alembic` | >=1.13 | SQLAlchemy 官方迁移工具，autogenerate 从 `Base.metadata` 派生迁移，消除 init.sql/ORM 双真源漂移。对应 `specs/migration.spec.md` §3（ORM 单一真源）。原 alpha 阶段用 init.sql，现已按 `specs/migration.spec.md` 引入。 |
 | `aiosqlite` | >=0.20 | SQLite async 驱动。L1/L2 测试以 `sqlite+aiosqlite:///:memory:` 跑全异步栈（避免 PG 依赖），`conftest.py` 硬依赖。 | 无（async SQLite 唯一驱动）。 |
+| `fakeredis` | >=2.20 | Redis 限流测试用 in-memory fake（security.spec.md§5）。无需真实 Redis 即可验证滑动窗口逻辑、429 响应、per-user keying。 | 手写 ZSET fake 超 50 行门槛。 |
 
 ## 明确不引入（Rejected）
 

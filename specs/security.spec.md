@@ -110,14 +110,32 @@
 
 ## 10. 验收清单
 
-- [ ] JWT 过期可配置，默认 24h，签名密钥来自环境变量。
+- [x] JWT 过期可配置，默认 24h，签名密钥来自环境变量。
 - [ ] RBAC 依赖注入实现，admin/user 权限边界测试通过。
-- [ ] 生产 CORS 无 `*` + credentials 组合。
-- [ ] 限流：默认 100/min，LLM 端点 20/min，超限返回 429 + 限流头。
-- [ ] 密码 bcrypt 哈希，最小 8 位。
-- [ ] 文件上传：先检 Content-Length，白名单 MIME，50MB 上限。
-- [ ] CI secret 扫描通过，无硬编码密钥。
-- [ ] LLM API Key 不出现在任何前端可达路径。
+- [x] 生产 CORS 无 `*` + credentials 组合。
+- [x] 限流：默认 100/min，LLM 端点 20/min，超限返回 429 + 限流头。
+- [x] 密码 bcrypt 哈希，最小 8 位。
+- [x] 文件上传：先检 Content-Length，白名单 MIME，50MB 上限。
+- [x] CI secret 扫描通过，无硬编码密钥。
+- [x] LLM API Key 不出现在任何前端可达路径。
+
+### 10.1 落地记录
+
+- **Phase 3 batch 1**（分支 `feat/phase3-security-baseline`，合并到 main）：
+  - §5 限流：Redis ZSET 滑动窗口中间件（`app/core/rate_limit.py`），默认 100/min、
+    LLM 端点 20/min（独立 key 计数，互不挤占），429 + `X-RateLimit-*` 头，Redis 不可用降级放行。
+    `fakeredis` 覆盖 8 测试（`tests/test_core_rate_limit.py`）。
+  - §9 / §10 secret 扫描：CI 新增 `secret-scan` job（`gitleaks-action@v2`，阻断合并），
+    `.gitleaks.toml` 继承内置规则 + 测试/模板 allowlist。
+  - §4 CORS：`config.py` 新增 `_validate_cors` model_validator，禁止 `cors_origins` 含 `*`
+    （fail-fast，与 `allow_credentials=True` 互斥），4 测试覆盖。
+  - §7 文件上传：knowledge router Content-Length 预检（超 51MB 直接拒绝）、MIME 白名单
+    （`text/plain` / `text/markdown` / `application/pdf`）、UUID 重命名防目录穿越，3 安全测试。
+  - §2 JWT / §6 密码 / §8 API Key：既存实现满足（bcrypt 哈希、`min_length=8`、
+    LLM 凭据仅服务端注入转发、`frontend/src` 无 key 引用，已校验）。
+- **下一轮（Phase 3 batch 2）**：§3.2 RBAC — 挂载 `get_current_user` /
+  `get_current_admin` 到所有非公开路由（agents / prompts / evals / models / analytics /
+  knowledge），补 401/403 回归测试，按 §3.2「默认拒绝」原则。
 
 ---
 

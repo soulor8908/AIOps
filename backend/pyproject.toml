@@ -39,6 +39,8 @@ dev = [
     "schemathesis>=3.36",
     # 数据库迁移（specs/migration.spec.md §3）：ORM 单一真源，autogenerate 派生迁移
     "alembic>=1.13",
+    # 限流测试用 fakeredis（security.spec.md§5）：无需真实 Redis 即可验证滑动窗口逻辑
+    "fakeredis>=2.20",
 ]
 
 [build-system]

@@ -209,3 +209,20 @@ jobs:
 
       - name: L4 LLM-as-Judge eval
         run: pytest app/domains/evals/tests/eval_llm_as_judge.py -v --no-cov
+
+  # Secret 扫描（security.spec.md §9 / §10）— 阻断合并。
+  # gitleaks 扫描 git 历史与工作区，拦截硬编码密钥。
+  # .gitleaks.toml 继承内置规则集 + allowlist .env.example（占位符）与测试 fixture。
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 完整历史，gitleaks 需扫描所有 commit
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
