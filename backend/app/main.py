@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.api import api_router
+from app.core import health as health_mod
 from app.core.config import settings
 from app.core.database import engine, init_db
 from app.core.exceptions import AppError
@@ -259,9 +260,23 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 # ===================== 健康检查（deployment.spec.md§6） =====================
 
 @app.get("/health", tags=["meta"])
-async def health() -> dict[str, str]:
-    """健康检查。返回 status + version。"""
-    return {"status": "ok", "version": settings.app_version}
+async def health() -> dict[str, Any]:
+    """健康检查（deployment.spec.md§6）。
+
+    依赖（DB/Redis）均可达返回 ``ok``，否则 ``degraded``（仍 200，readiness
+    probe 据此摘流而非重启）。``checks`` 暴露各项依赖状态便于排障。
+    """
+    db_ok = await health_mod.check_db()
+    redis_ok = await health_mod.check_redis()
+    overall = "ok" if (db_ok and redis_ok) else "degraded"
+    return {
+        "status": overall,
+        "version": settings.app_version,
+        "checks": {
+            "database": "ok" if db_ok else "down",
+            "redis": "ok" if redis_ok else "down",
+        },
+    }
 
 
 @app.get("/metrics", tags=["meta"])

@@ -9,13 +9,56 @@ from fastapi.testclient import TestClient
 from app.main import app  # noqa: F401  (契约测试要求显式导入 app)
 
 
-def test_health_returns_ok(client: TestClient) -> None:
+def test_health_returns_ok(client: TestClient, healthy_deps: None) -> None:
     resp = client.get("/health")
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
     assert "version" in body
     assert isinstance(body["version"], str)
+    assert body["checks"]["database"] == "ok"
+    assert body["checks"]["redis"] == "ok"
+
+
+# ===================== 依赖感知（deployment.spec.md§6）=====================
+
+
+def test_health_degraded_when_redis_down(
+    client: TestClient, monkeypatch  # type: ignore[no-untyped-def]
+) -> None:
+    """Redis 不可达 → status=degraded，checks.redis=down，仍 200。"""
+    from unittest.mock import AsyncMock
+
+    import app.core.health as health_mod
+
+    monkeypatch.setattr(health_mod, "check_db", AsyncMock(return_value=True))
+    monkeypatch.setattr(health_mod, "check_redis", AsyncMock(return_value=False))
+
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "degraded"
+    assert body["checks"]["database"] == "ok"
+    assert body["checks"]["redis"] == "down"
+
+
+def test_health_degraded_when_db_down(
+    client: TestClient, monkeypatch  # type: ignore[no-untyped-def]
+) -> None:
+    """DB 不可达 → status=degraded，checks.database=down，仍 200。"""
+    from unittest.mock import AsyncMock
+
+    import app.core.health as health_mod
+
+    monkeypatch.setattr(health_mod, "check_db", AsyncMock(return_value=False))
+    monkeypatch.setattr(health_mod, "check_redis", AsyncMock(return_value=True))
+
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "degraded"
+    assert body["checks"]["database"] == "down"
+    assert body["checks"]["redis"] == "ok"
 
 
 def test_root_returns_service_info(client: TestClient) -> None:

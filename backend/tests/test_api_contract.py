@@ -135,13 +135,14 @@ def test_unauthorized_error_matches_schema(anon_client: TestClient) -> None:
     assert "message" in body
 
 
-def test_health_response_schema(client: TestClient) -> None:
+def test_health_response_schema(client: TestClient, healthy_deps: None) -> None:
     """GET /health 响应符合 OpenAPI HealthResponse schema。"""
     resp = client.get("/health")
     assert resp.status_code == 200
     body = resp.json()
     assert "status" in body
     assert body["status"] == "ok"
+    assert "checks" in body
 
 
 def test_openapi_yaml_has_all_domains() -> None:

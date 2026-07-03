@@ -117,6 +117,16 @@
     disruption 期间至少一个可用。
   - 镜像基线（§2 多阶段 / 非 root / HEALTHCHECK / `.dockerignore`）、前端 nginx
     托管、`/health` status+version 在 Phase 4 之前已就绪，本次确认勾选。
+- **Phase 4 batch 2**（分支 `feat/phase4-health`，合并到 main）：
+  - §6 `/health` 依赖感知：新增 `app/core/health.py`（`check_db` SELECT 1 /
+    `check_redis` PING，各带 2s 超时，异常一律 False 不影响状态码）；端点改为
+    DB/Redis 均可达返回 `ok`，否则 `degraded`（仍 200，readiness 据此摘流而非重启），
+    响应新增 `checks: {database, redis}` 便于排障。
+  - `specs/openapi.yaml` `/health` 响应 schema 更新为 HealthResponse（status/version/
+    checks，枚举 ok/degraded、ok/down）。
+  - 测试：`healthy_deps` fixture 桩依赖为可达（测试环境无真实 Redis）；新增
+    `tests/test_core_health.py`（5 个探测函数单测：可用/连接异常/超时）+ 2 个
+    degraded 端点测试。Phase 4 batch 2 后测试总数 359 全绿。
 
 ---
 

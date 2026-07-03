@@ -159,6 +159,22 @@ def _create_default_admin(client: TestClient) -> User:
 
 
 @pytest.fixture
+def healthy_deps(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """模拟依赖（DB/Redis）均可达，用于 /health ok 路径测试。
+
+    测试环境无真实 Redis，且 /health 默认会探测依赖；本 fixture 把
+    ``check_db`` / ``check_redis`` 桩为 True，使 ok 路径测试无需真实依赖。
+    degraded 路径测试自行 monkeypatch 单项为 False。
+    """
+    from unittest.mock import AsyncMock
+
+    import app.core.health as health_mod
+
+    monkeypatch.setattr(health_mod, "check_db", AsyncMock(return_value=True))
+    monkeypatch.setattr(health_mod, "check_redis", AsyncMock(return_value=True))
+
+
+@pytest.fixture
 def anon_client(client: TestClient) -> TestClient:
     """关闭默认认证覆盖，使用真实认证依赖（401/403 边界测试用）。
 
