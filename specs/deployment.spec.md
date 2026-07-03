@@ -95,13 +95,28 @@
 
 ## 7. 验收清单
 
-- [ ] backend/frontend 镜像均为多阶段构建、非 root（UID 1000）、含 HEALTHCHECK。
-- [ ] `.dockerignore` 排除测试/文档/git/node_modules。
-- [ ] 前端生产由 nginx 托管 `dist/`，无 dev server。
-- [ ] K8s：backend/frontend 均 2+ replicas、HPA、PDB、probe、resources。
-- [ ] Secret 与 ConfigMap 分离，无敏感值入 ConfigMap。
-- [ ] `.env` 不入 git，`.env.example` 为模板。
-- [ ] `/health` 返回 status + version，liveness/readiness 已配置。
+- [x] backend/frontend 镜像均为多阶段构建、非 root（UID 1000）、含 HEALTHCHECK。
+- [x] `.dockerignore` 排除测试/文档/git/node_modules。
+- [x] 前端生产由 nginx 托管 `dist/`，无 dev server。
+- [x] K8s：backend/frontend 均 2+ replicas、HPA、PDB、probe、resources。
+- [x] Secret 与 ConfigMap 分离，无敏感值入 ConfigMap。
+- [x] `.env` 不入 git，`.env.example` 为模板。
+- [x] `/health` 返回 status + version，liveness/readiness 已配置。
+
+### 7.1 落地记录
+
+- **Phase 4 batch 1**（分支 `feat/phase4-k8s-ha`，合并到 main）：
+  - §4.1 配置与密钥分离：新增 `aiops-config` ConfigMap（ENVIRONMENT / LOG_LEVEL /
+    JWT_EXPIRE_HOURS / CORS_ORIGINS / 限流阈值 / VITE_API_BASE_URL 等非敏感配置），
+    backend `envFrom` 整批注入；JWT_SECRET / OPENAI_API_KEY / ANTHROPIC_API_KEY /
+    DATABASE_URL / REDIS_URL 走 `aiops-secrets` Secret（逐字段 `secretKeyRef`）。
+  - §4.2/§4.3 frontend replicas 1 → 2（满足「最少两个副本」），backend 维持 2 replicas。
+  - §4.2/§4.3 HPA：backend（CPU>70% / memory>80%，2-6 replicas）、frontend
+    （CPU>70%，2-4 replicas），均 `autoscaling/v2`。
+  - §4.2/§4.3 PDB：backend / frontend 各一个 `minAvailable: 1`，保证 voluntary
+    disruption 期间至少一个可用。
+  - 镜像基线（§2 多阶段 / 非 root / HEALTHCHECK / `.dockerignore`）、前端 nginx
+    托管、`/health` status+version 在 Phase 4 之前已就绪，本次确认勾选。
 
 ---
 
