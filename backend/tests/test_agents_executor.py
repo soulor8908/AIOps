@@ -23,8 +23,11 @@ import pytest
 from app.core.exceptions import ValidationError
 from app.core.llm_client import LLMClient, LLMResponse, Message, ToolCall
 from app.domains.agents.executor import (
+    AgentDelegateExecutor,
     AgentExecutor,
     _agent_tools_to_llm_tools,
+    _SimpleToolDef,
+    _tool_parameters,
     execute_workflow_dag,
 )
 from app.domains.agents.models import (
@@ -41,6 +44,10 @@ def _make_agent(
     tools: list[dict[str, Any]] | None = None,
     max_turns: int = 3,
     system_prompt: str | None = None,
+    self_eval: bool = False,
+    self_heal: bool = False,
+    self_eval_threshold: float = 0.7,
+    self_heal_max_retries: int = 1,
 ) -> Agent:
     """构造无需 DB 的 Agent 实例。"""
     return Agent(
@@ -49,6 +56,10 @@ def _make_agent(
         system_prompt=system_prompt,
         tools=tools or [],
         max_turns=max_turns,
+        self_eval=self_eval,
+        self_heal=self_heal,
+        self_eval_threshold=self_eval_threshold,
+        self_heal_max_retries=self_heal_max_retries,
     )
 
 
@@ -419,3 +430,336 @@ async def test_execute_workflow_dag_too_many_nodes_raises() -> None:
     nodes = [{"id": f"n{i}", "name": f"s{i}", "agent_id": None} for i in range(51)]
     with pytest.raises(ValidationError, match="超 50"):
         await execute_workflow_dag(uuid.uuid4(), nodes, [], lambda *_: None, "input")
+
+
+# ===================== P3-11：自主运维（自评 + 自愈合） =====================
+
+
+async def test_self_eval_passing_skips_heal() -> None:
+    """P3-11：self_eval 开启但自评达标时，不触发自愈合。
+
+    mock 顺序：generation(答案) → judge(score=0.9 ≥ 0.7 阈值)。
+    heal_attempts=0，eval_score=0.9，final_answer 不变。
+    """
+    call_idx = {"n": 0}
+
+    async def chat_seq(
+        messages: list[Message],
+        tools: list[Any] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        idx = call_idx["n"]
+        call_idx["n"] += 1
+        if idx == 0:
+            return LLMResponse(content="答案是 42", usage={"total_tokens": 10})
+        # judge 调用
+        return LLMResponse(
+            content='{"score": 0.9, "reason": "ok"}', usage={"total_tokens": 3}
+        )
+
+    agent = _make_agent(self_eval=True, self_heal=True, self_eval_threshold=0.7)
+    mock_llm = MagicMock(spec=LLMClient)
+    mock_llm.chat = chat_seq
+    mock_llm.close = AsyncMock()
+    executor = AgentExecutor(mock_llm)
+    result = await executor.run(agent, "问题")
+
+    assert result.final_answer == "答案是 42"
+    assert result.eval_score == 0.9
+    assert result.heal_attempts == 0
+
+
+async def test_self_heal_retries_until_passing() -> None:
+    """P3-11：自评不达标时自愈合重试，重试后达标则停止。
+
+    mock 顺序：
+    1. generation → "差答案"
+    2. judge → score=0.3（不达标）
+    3. heal generation → "好答案"
+    4. judge → score=0.95（达标，停止）
+    """
+    call_idx = {"n": 0}
+
+    async def chat_seq(
+        messages: list[Message],
+        tools: list[Any] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        idx = call_idx["n"]
+        call_idx["n"] += 1
+        # generation 调用无 response_format，judge 调用带 response_format
+        if response_format is not None:
+            # judge 调用
+            if idx == 1:
+                return LLMResponse(
+                    content='{"score": 0.3, "reason": "不完整"}',
+                    usage={"total_tokens": 3},
+                )
+            return LLMResponse(
+                content='{"score": 0.95, "reason": "完整"}',
+                usage={"total_tokens": 3},
+            )
+        # generation 调用
+        if idx == 0:
+            return LLMResponse(content="差答案", usage={"total_tokens": 5})
+        return LLMResponse(content="好答案", usage={"total_tokens": 5})
+
+    agent = _make_agent(
+        self_eval=True, self_heal=True,
+        self_eval_threshold=0.7, self_heal_max_retries=2,
+    )
+    mock_llm = MagicMock(spec=LLMClient)
+    mock_llm.chat = chat_seq
+    mock_llm.close = AsyncMock()
+    executor = AgentExecutor(mock_llm)
+    result = await executor.run(agent, "问题")
+
+    assert result.final_answer == "好答案"
+    assert result.eval_score == 0.95
+    assert result.heal_attempts == 1
+
+
+async def test_self_heal_exhausts_retries_keeps_last_answer() -> None:
+    """P3-11：自愈合重试耗尽仍不达标，保留最后一次答案。
+
+    mock：generation → judge(0.3) → heal gen → judge(0.4) → heal gen → judge(0.5)
+    阈值 0.7，max_retries=2，最终保留第二次 heal 的答案。
+    """
+    call_idx = {"n": 0}
+
+    async def chat_seq(
+        messages: list[Message],
+        tools: list[Any] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        idx = call_idx["n"]
+        call_idx["n"] += 1
+        if response_format is not None:
+            # judge：始终返回低分
+            return LLMResponse(
+                content='{"score": 0.4, "reason": "仍不达标"}',
+                usage={"total_tokens": 2},
+            )
+        # generation：首次差答案，后续改进答案
+        if idx == 0:
+            return LLMResponse(content="差答案", usage={"total_tokens": 5})
+        return LLMResponse(content=f"改进答案v{idx}", usage={"total_tokens": 5})
+
+    agent = _make_agent(
+        self_eval=True, self_heal=True,
+        self_eval_threshold=0.7, self_heal_max_retries=2,
+    )
+    mock_llm = MagicMock(spec=LLMClient)
+    mock_llm.chat = chat_seq
+    mock_llm.close = AsyncMock()
+    executor = AgentExecutor(mock_llm)
+    result = await executor.run(agent, "问题")
+
+    # 重试耗尽，保留最后一次 heal 的答案
+    assert "改进答案" in result.final_answer
+    assert result.heal_attempts == 2
+    assert result.eval_score is not None and result.eval_score < 0.7
+
+
+async def test_self_eval_disabled_skips_judge() -> None:
+    """P3-11：self_eval=False 时不调用 judge，eval_score 为 None。"""
+    call_idx = {"n": 0}
+
+    async def chat_seq(
+        messages: list[Message],
+        tools: list[Any] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        call_idx["n"] += 1
+        return LLMResponse(content="答案", usage={"total_tokens": 5})
+
+    agent = _make_agent(self_eval=False)
+    mock_llm = MagicMock(spec=LLMClient)
+    mock_llm.chat = chat_seq
+    mock_llm.close = AsyncMock()
+    executor = AgentExecutor(mock_llm)
+    result = await executor.run(agent, "问题")
+
+    assert result.eval_score is None
+    assert result.eval_reason is None
+    assert result.heal_attempts == 0
+    assert call_idx["n"] == 1  # 仅一次 generation 调用，无 judge
+
+
+async def test_self_eval_judge_failure_degrades_gracefully() -> None:
+    """P3-11：judge 调用抛异常时降级，不阻塞主流程，eval_score=None。"""
+    from app.core.exceptions import LLMError
+
+    call_idx = {"n": 0}
+
+    async def chat_seq(
+        messages: list[Message],
+        tools: list[Any] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        idx = call_idx["n"]
+        call_idx["n"] += 1
+        if idx == 0:
+            return LLMResponse(content="答案", usage={"total_tokens": 5})
+        # judge 调用抛 LLMError
+        raise LLMError("judge API 不可用")
+
+    agent = _make_agent(self_eval=True, self_heal=True)
+    mock_llm = MagicMock(spec=LLMClient)
+    mock_llm.chat = chat_seq
+    mock_llm.close = AsyncMock()
+    executor = AgentExecutor(mock_llm)
+    result = await executor.run(agent, "问题")
+
+    # 降级：原答案保留，eval_score=None，无 heal
+    assert result.final_answer == "答案"
+    assert result.eval_score is None
+    assert result.heal_attempts == 0
+
+
+# ===================== P3-12：multi-agent A2A =====================
+
+
+def test_tool_parameters_agent_delegate_has_input_param() -> None:
+    """P3-12：agent_delegate 工具生成 input 参数 schema。"""
+    params = _tool_parameters("ask_expert", "agent_delegate", {"agent_id": "x"})
+    assert params["required"] == ["input"]
+    assert "input" in params["properties"]
+
+
+def test_agent_tools_to_llm_tools_agent_delegate() -> None:
+    """P3-12：agent_delegate 工具转为 LLM ToolDef，含 input 参数。"""
+    tools = [{
+        "name": "ask_researcher",
+        "type": "agent_delegate",
+        "description": "委托研究员",
+        "config": {"agent_id": "abc-123"},
+    }]
+    llm_tools = _agent_tools_to_llm_tools(tools)
+    assert len(llm_tools) == 1
+    assert llm_tools[0].name == "ask_researcher"
+    assert "input" in llm_tools[0].parameters["properties"]
+
+
+async def test_agent_delegate_executor_routes_delegate_to_runner() -> None:
+    """P3-12：AgentDelegateExecutor 把 agent_delegate 工具调用路由到 runner。"""
+    target_id = uuid.uuid4()
+    agent_tools = [{
+        "name": "ask_expert",
+        "type": "agent_delegate",
+        "config": {"agent_id": str(target_id)},
+    }]
+    runner_calls: list[tuple[uuid.UUID, str]] = []
+
+    async def runner(aid: uuid.UUID, inp: str) -> str:
+        runner_calls.append((aid, inp))
+        return f"专家回答: {inp}"
+
+    delegate_exec = AgentDelegateExecutor(agent_tools, runner)
+    tool_def = _SimpleToolDef(name="ask_expert")
+    result = await delegate_exec.execute(tool_def, {"input": "什么是 RAG?"})
+
+    assert result == "专家回答: 什么是 RAG?"
+    assert runner_calls == [(target_id, "什么是 RAG?")]
+
+
+async def test_agent_delegate_executor_falls_back_to_inner() -> None:
+    """P3-12：非 delegate 工具转交 inner ToolExecutor。"""
+
+    class InnerExecutor:
+        async def execute(self, tool: Any, args: dict[str, Any]) -> str:
+            return f"inner handled {tool.name}"
+
+        def can_handle(self, tool_type: ToolType) -> bool:
+            return tool_type != ToolType.AGENT_DELEGATE
+
+    delegate_exec = AgentDelegateExecutor(
+        agent_tools=[{"name": "calc", "type": "calculator"}],
+        agent_runner=lambda *_: None,
+        inner=InnerExecutor(),
+    )
+    tool_def = _SimpleToolDef(name="calc")
+    result = await delegate_exec.execute(tool_def, {"expr": "1+1"})
+    assert result == "inner handled calc"
+
+
+async def test_agent_delegate_executor_unknown_tool_no_inner() -> None:
+    """P3-12：未知工具且无 inner 时返回提示，不抛异常。"""
+    delegate_exec = AgentDelegateExecutor(
+        agent_tools=[], agent_runner=lambda *_: None
+    )
+    tool_def = _SimpleToolDef(name="unknown")
+    result = await delegate_exec.execute(tool_def, {})
+    assert "无可用执行器" in result
+
+
+async def test_agent_delegate_executor_runner_failure_returns_error_obs() -> None:
+    """P3-12：runner 抛异常时返回错误观察，不阻塞主循环。"""
+    target_id = uuid.uuid4()
+    agent_tools = [{
+        "name": "ask_expert",
+        "type": "agent_delegate",
+        "config": {"agent_id": str(target_id)},
+    }]
+
+    async def runner(aid: uuid.UUID, inp: str) -> str:
+        raise RuntimeError("目标 Agent 不可用")
+
+    delegate_exec = AgentDelegateExecutor(agent_tools, runner)
+    tool_def = _SimpleToolDef(name="ask_expert")
+    result = await delegate_exec.execute(tool_def, {"input": "问题"})
+    assert "委托失败" in result
+    assert "目标 Agent 不可用" in result
+
+
+async def test_executor_invokes_delegate_tool_end_to_end() -> None:
+    """P3-12：Agent A 通过 agent_delegate 工具调用 Agent B，B 的答案成为 A 的观察。
+
+    mock LLM 顺序：
+    1. A 首轮 → tool_call(ask_expert, {input: "什么是 RAG?"})
+    2. A 次轮 → 最终答案（基于 B 的观察）
+    delegate runner 返回 B 的 final_answer。
+    """
+    target_id = uuid.uuid4()
+    agent_a = _make_agent(
+        name="orchestrator",
+        tools=[{
+            "name": "ask_expert",
+            "type": "agent_delegate",
+            "config": {"agent_id": str(target_id)},
+        }],
+        max_turns=5,
+    )
+
+    async def runner(aid: uuid.UUID, inp: str) -> str:
+        assert aid == target_id
+        return f"B 的回答：{inp} 是检索增强生成"
+
+    call_idx = {"n": 0}
+
+    async def chat_seq(
+        messages: list[Message],
+        tools: list[Any] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        idx = call_idx["n"]
+        call_idx["n"] += 1
+        if idx == 0:
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="t1", name="ask_expert", args={"input": "什么是 RAG?"})],
+                usage={"total_tokens": 5},
+            )
+        # 次轮：基于观察给出最终答案
+        return LLMResponse(content="RAG 是检索增强生成", usage={"total_tokens": 3})
+
+    mock_llm = MagicMock(spec=LLMClient)
+    mock_llm.chat = chat_seq
+    mock_llm.close = AsyncMock()
+    delegate_exec = AgentDelegateExecutor(agent_a.tools, runner)
+    executor = AgentExecutor(mock_llm, tool_executor=delegate_exec)
+    result = await executor.run(agent_a, "解释 RAG")
+
+    assert "RAG" in result.final_answer
+    assert result.traces[0].observation == "[ask_expert] B 的回答：什么是 RAG? 是检索增强生成"
+    assert result.success is True

@@ -30,6 +30,9 @@ class ToolType(enum.StrEnum):
     CODE = "code"
     RAG = "rag"
     CUSTOM = "custom"
+    # P3-12：multi-agent A2A。把另一个 Agent 注册为可调用工具，
+    # 执行时把 args.input 传给目标 Agent，返回其 final_answer 作为观察。
+    AGENT_DELEGATE = "agent_delegate"
 
 
 # ===================== ORM =====================
@@ -47,6 +50,12 @@ class Agent(Base):
     tools: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     max_turns: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     temperature: Mapped[float] = mapped_column(Float, nullable=False, default=0.7)
+    # P3-11：自主运维。self_eval=True 时执行后用 LLM judge 自评答案质量；
+    # self_heal=True 且自评不达标时追加反馈重试，最多 self_heal_max_retries 次。
+    self_eval: Mapped[bool] = mapped_column(default=False)
+    self_heal: Mapped[bool] = mapped_column(default=False)
+    self_eval_threshold: Mapped[float] = mapped_column(Float, nullable=False, default=0.7)
+    self_heal_max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     is_active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
@@ -92,6 +101,11 @@ class AgentCreate(BaseModel):
     tools: list[ToolDef] = Field(default_factory=list)
     max_turns: int = Field(default=10, ge=1, le=10)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    # P3-11：自主运维开关（默认关闭，需显式启用）
+    self_eval: bool = False
+    self_heal: bool = False
+    self_eval_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+    self_heal_max_retries: int = Field(default=1, ge=0, le=3)
 
 
 class AgentOut(BaseModel):
@@ -105,6 +119,10 @@ class AgentOut(BaseModel):
     tools: list[dict[str, Any]]
     max_turns: int
     temperature: float
+    self_eval: bool
+    self_heal: bool
+    self_eval_threshold: float
+    self_heal_max_retries: int
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -171,6 +189,10 @@ class ExecutionResult(BaseModel):
     total_tokens: int = 0
     success: bool = True
     error: str | None = None
+    # P3-11：自主运维结果。self_eval 关闭时为 None。
+    eval_score: float | None = None
+    eval_reason: str | None = None
+    heal_attempts: int = 0
 
 
 class ExecuteRequest(BaseModel):
