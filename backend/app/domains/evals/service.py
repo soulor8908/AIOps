@@ -28,8 +28,11 @@ from app.domains.evals.models import (
     CaseResult,
     EvalRun,
     EvalRunCreate,
+    EvalSample,
+    EvalSampleCreate,
     EvalStatus,
     JudgeType,
+    OnlineEvalRequest,
 )
 
 logger = logging.getLogger("app.evals.service")
@@ -275,4 +278,210 @@ def _build_llm_client_if_needed(judge_type: str) -> LLMClient | None:
     )
 
 
-__all__ = ["create_eval", "get_eval", "list_evals", "run_eval"]
+# ===================== P0-3: Online eval 采样 + 评估 =====================
+
+# Online eval 通过门槛（与离线一致，0.85）
+_ONLINE_PASS_THRESHOLD = 0.85
+
+
+async def record_sample(session: AsyncSession, payload: EvalSampleCreate) -> EvalSample:
+    """记录一条生产采样样本。
+
+    由 ``execute_agent`` 采样钩子（``asyncio.create_task`` fire-and-forget）或
+    ``POST /evals/samples`` 手动录入调用。使用独立 session（worker 模式）避免
+    污染请求级事务。
+    """
+    sample = EvalSample(
+        agent_id=payload.agent_id,
+        workflow_id=payload.workflow_id,
+        trigger_source=payload.trigger_source,
+        input=payload.input,
+        actual_output=payload.actual_output,
+        expected_output=payload.expected_output,
+        metadata_=payload.metadata,
+    )
+    session.add(sample)
+    await session.commit()
+    await session.refresh(sample)
+    return sample
+
+
+async def list_samples(
+    session: AsyncSession,
+    *,
+    judged: bool | None = None,
+    agent_id: uuid.UUID | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[EvalSample]:
+    """列样本，支持按 judged / agent_id 过滤。默认按 sampled_at desc。"""
+    stmt = select(EvalSample)
+    if judged is not None:
+        stmt = stmt.where(EvalSample.judged.is_(judged))
+    if agent_id is not None:
+        stmt = stmt.where(EvalSample.agent_id == agent_id)
+    stmt = stmt.order_by(EvalSample.sampled_at.desc()).limit(limit).offset(offset)
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def _fetch_golden_cases(
+    session: AsyncSession, golden_run_name: str
+) -> list[dict[str, Any]]:
+    """取离线 golden EvalRun 的 cases 快照。
+
+    按 ``name`` 取最近一条 ``status ∈ {PASSED, FAILED}`` 的 run（与
+    ``_fetch_baseline_score`` 同口径），其 ``cases`` JSONB 即 golden 用例集。
+    """
+    stmt = (
+        select(EvalRun)
+        .where(
+            EvalRun.name == golden_run_name,
+            EvalRun.status.in_([EvalStatus.PASSED.value, EvalStatus.FAILED.value]),
+        )
+        .order_by(EvalRun.created_at.desc())
+        .limit(1)
+    )
+    run = (await session.execute(stmt)).scalar_one_or_none()
+    if run is None:
+        raise NotFoundError(f"未找到名为 '{golden_run_name}' 的 golden EvalRun")
+    return list(run.cases)
+
+
+def _match_golden(
+    sample_input: str, golden_cases: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """为样本匹配 golden case。
+
+    匹配优先级：
+    1. input 完全相等
+    2. 归一化（lower + 去多余空白）后相等
+    3. 无匹配返回 None（样本 expected 留空，judge 仍可跑——LLM judge 在
+       expected 为空时退化为"输出质量"评分）
+
+    返回匹配的 golden case dict（含 expected），供 run_online_eval 回填。
+    """
+    for case in golden_cases:
+        golden_input = str(case.get("input", ""))
+        if golden_input == sample_input:
+            return case
+    normalized_sample = " ".join(sample_input.lower().split())
+    for case in golden_cases:
+        golden_input = str(case.get("input", ""))
+        if " ".join(golden_input.lower().split()) == normalized_sample:
+            return case
+    return None
+
+
+async def run_online_eval(
+    session: AsyncSession, payload: OnlineEvalRequest
+) -> EvalRun:
+    """执行 online eval 闭环：取样本 → 匹配离线 golden → LLM judge → 写 EvalRun。
+
+    复用现有 ``EvalRun`` schema + ``_fetch_baseline_score`` + ``_detect_regression``
+    + ``judge_llm_with_sampling``，与离线 eval 共享同一基线回归机制。
+
+    流程：
+    1. 取待评估样本（payload.sample_ids 或所有未 judged 样本）
+    2. 取离线 golden cases（按 golden_run_name）
+    3. 为每条样本匹配 golden → 回填 expected_output
+    4. 逐条 judge（复用 _judge_case 逻辑）
+    5. 写 EvalRun（status=RUNNING → PASSED/FAILED），复用基线/回归检测
+    6. 回填样本 judged / judge_score / judge_reason / eval_run_id
+    """
+    # 1. 取样本
+    if payload.sample_ids:
+        stmt = select(EvalSample).where(EvalSample.id.in_(payload.sample_ids))
+        samples = list((await session.execute(stmt)).scalars().all())
+        if not samples:
+            raise NotFoundError("未找到指定的 sample_ids")
+    else:
+        samples = await list_samples(session, judged=False, limit=500)
+        if not samples:
+            raise ValidationError("无可评估的未判断样本")
+
+    # 2. 取 golden cases
+    golden_cases = await _fetch_golden_cases(session, payload.golden_run_name)
+
+    # 3. 创建 EvalRun（复用 schema，cases 用 golden 快照）
+    run_name = payload.run_name or payload.golden_run_name
+    run = EvalRun(
+        name=run_name,
+        description=f"online eval against golden='{payload.golden_run_name}'",
+        rules=[],
+        cases=golden_cases,
+        judge_type=payload.judge_type.value,
+        status=EvalStatus.RUNNING.value,
+        started_at=datetime.now(UTC),
+    )
+    session.add(run)
+    await session.flush()
+
+    # 4. 基线 + judge
+    baseline = await _fetch_baseline_score(session, run.name, run.id)
+    run.baseline_score = baseline
+    llm_client = _build_llm_client_if_needed(payload.judge_type.value)
+
+    results: list[CaseResult] = []
+    pass_count = 0
+    try:
+        for sample in samples:
+            # 匹配 golden 回填 expected
+            matched = _match_golden(sample.input, golden_cases)
+            expected = (
+                str(matched.get("expected", "")) if matched else (sample.expected_output or "")
+            )
+            if matched and not sample.expected_output:
+                sample.expected_output = expected or None
+
+            case_dict = {
+                "name": matched.get("name") if matched else None,
+                "input": sample.input,
+                "expected": expected,
+            }
+            cr = await _judge_case(
+                payload.judge_type.value,
+                case_dict,
+                sample.actual_output,
+                llm_client,
+            )
+            results.append(cr)
+            if cr.passed:
+                pass_count += 1
+            # 回填样本
+            sample.judged = True
+            sample.judge_score = cr.score
+            sample.judge_reason = cr.reason
+            sample.eval_run_id = run.id
+    except Exception:
+        run.status = EvalStatus.ERROR.value
+        run.finished_at = datetime.now(UTC)
+        await session.flush()
+        raise
+    finally:
+        if llm_client is not None:
+            await llm_client.close()
+
+    # 5. 写 run 结果
+    run.results = [r.model_dump(mode="json") for r in results]
+    run.pass_count = pass_count
+    run.fail_count = len(results) - pass_count
+    run.score = pass_count / len(results) if results else 0.0
+    run.status = (
+        EvalStatus.PASSED.value if run.score >= _ONLINE_PASS_THRESHOLD else EvalStatus.FAILED.value
+    )
+    run.is_regression = _detect_regression(run.score, baseline)
+    run.finished_at = datetime.now(UTC)
+    await session.commit()
+    await session.refresh(run)
+    return run
+
+
+__all__ = [
+    "create_eval",
+    "get_eval",
+    "list_evals",
+    "list_samples",
+    "record_sample",
+    "run_eval",
+    "run_online_eval",
+]

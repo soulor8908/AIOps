@@ -128,6 +128,44 @@ class EvalRun(Base):
     )
 
 
+class EvalSample(Base):
+    """生产采样样本（P0-3 online eval 闭环）。
+
+    记录真实请求/响应文本对，供后续 LLM judge 评估。与 ``EvalCase``（手工
+    golden 用例）的区别：``EvalSample`` 来自生产路径自动采样，``expected`` 可空
+    （匹配离线 golden 时填充）。``judged`` 标记是否已被某次 online eval 消费。
+    """
+
+    __tablename__ = "eval_samples"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # agent_id / workflow_id 可空：scheduled autonomous run 无 agent_id 上下文，
+    # 或未来从 chat 域采样时无 agent 归属。
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    workflow_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    # 触发来源：http / scheduled / delegate / workflow，便于按来源过滤采样。
+    trigger_source: Mapped[str] = mapped_column(String(32), nullable=False, default="http")
+    input: Mapped[str] = mapped_column(Text, nullable=False)
+    actual_output: Mapped[str] = mapped_column(Text, nullable=False)
+    # expected 由 run_online_eval 匹配离线 golden 时回填（按 input 或 metadata.tag）。
+    expected_output: Mapped[str | None] = mapped_column(Text)
+    metadata_: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, nullable=False, default=dict
+    )
+    sampled_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    # judge 结果回写字段：评估完成后填充，避免重复评估。
+    judged: Mapped[bool] = mapped_column(default=False)
+    judge_score: Mapped[float | None] = mapped_column(Float)
+    judge_reason: Mapped[str | None] = mapped_column(Text)
+    eval_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+
+    __table_args__ = (
+        Index("idx_eval_samples_judged", "judged"),
+        Index("idx_eval_samples_sampled_at", "sampled_at"),
+        Index("idx_eval_samples_agent", "agent_id"),
+    )
+
+
 # ===================== Schemas =====================
 
 class EvalCaseInput(BaseModel):
@@ -192,3 +230,58 @@ class EvalRunOut(BaseModel):
     finished_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class EvalSampleCreate(BaseModel):
+    """录入生产采样样本（P0-3）。
+
+    供 ``execute_agent`` 自动采样钩子或 ``POST /evals/samples`` 手动录入使用。
+    """
+
+    agent_id: uuid.UUID | None = None
+    workflow_id: uuid.UUID | None = None
+    trigger_source: str = "http"
+    input: str = Field(min_length=1)
+    actual_output: str = Field(min_length=1)
+    expected_output: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EvalSampleOut(BaseModel):
+    """采样样本出参。"""
+
+    model_config = {"from_attributes": True}
+
+    id: uuid.UUID
+    agent_id: uuid.UUID | None = None
+    workflow_id: uuid.UUID | None = None
+    trigger_source: str
+    input: str
+    actual_output: str
+    expected_output: str | None = None
+    # validation_alias 从 ORM 的 metadata_ 属性读取（避免与 SQLAlchemy 的
+    # metadata 属性冲突——后者是 MetaData 对象，非业务字典）。
+    metadata: dict[str, Any] = Field(validation_alias="metadata_")
+    sampled_at: datetime
+    judged: bool
+    judge_score: float | None = None
+    judge_reason: str | None = None
+    eval_run_id: uuid.UUID | None = None
+
+
+class OnlineEvalRequest(BaseModel):
+    """触发 online eval 闭环请求。
+
+    - ``sample_ids``：待评估的样本 ID 列表（空则评估所有未 judged 样本）。
+    - ``golden_run_name``：离线 golden EvalRun 的 name，用于匹配 expected 并
+      复用基线回归检测（``_fetch_baseline_score`` 按 name 取基线）。
+    - ``judge_type``：判官类型，默认 LLM（生产场景多为开放式输出，exact/contains
+      不适用）。
+    - ``run_name``：本次 online eval 产出的 EvalRun 的 name，默认与
+      ``golden_run_name`` 相同以复用基线机制。
+    """
+
+    sample_ids: list[uuid.UUID] = Field(default_factory=list)
+    golden_run_name: str = Field(min_length=1, max_length=128)
+    judge_type: JudgeType = JudgeType.LLM
+    run_name: str | None = None
