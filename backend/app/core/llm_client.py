@@ -243,8 +243,14 @@ class LLMClient:
             raise LLMError(f"不支持的 provider: {self.config.provider}")
 
         start = time.monotonic()
+        first_token_recorded = False
         try:
             async for token in streamer(messages, tools):
+                # P2-9：首个 token 产出时记录 TTFT（Time To First Token）
+                if not first_token_recorded:
+                    ttft_ms = (time.monotonic() - start) * 1000
+                    metrics.record_ttft(self.config.model, ttft_ms)
+                    first_token_recorded = True
                 yield token
         except _RetryableLLMError as exc:
             metrics.record_llm_error(self.config.model, "retryable_exhausted")

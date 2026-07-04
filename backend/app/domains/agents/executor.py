@@ -22,6 +22,7 @@ from typing import Any, Protocol, cast
 
 from app.core.exceptions import ValidationError
 from app.core.llm_client import LLMClient, LLMResponse, Message, ToolCall, ToolDef
+from app.core.metrics import metrics
 from app.domains.agents.models import (
     Agent,
     ExecutionResult,
@@ -418,6 +419,9 @@ class AgentExecutor:
         """执行一批工具调用（P2-8 并发），拼接观察结果。
 
         串行 → asyncio.gather 并发，多工具调用延迟从 N×T 降到 max(T)。
+
+        P2-9：每个工具调用记录到 metrics（tool_calls + tool_errors），
+        用于工具成功率和失败模式聚类。
         """
         if self.tools is None:
             return "[tool executor 未配置，跳过工具调用]"
@@ -428,7 +432,11 @@ class AgentExecutor:
         )
         lines: list[str] = []
         for tc, res in zip(tool_calls, results, strict=True):
+            # P2-9：记录工具调用指标（无论成功失败均计 tool_calls）
+            metrics.record_tool_call(tc.name)
             if isinstance(res, Exception):
+                # P2-9：记录失败，error_type 为异常类名用于失败模式聚类
+                metrics.record_tool_error(tc.name, type(res).__name__)
                 logger.warning("tool %s execution failed", tc.name, exc_info=res)
                 lines.append(f"[{tc.name} 错误] {res}")
             else:

@@ -135,18 +135,24 @@ class AIHealthMetrics(BaseModel):
 
     - ``llm_error_rate``: LLM 调用错误率 = ``llm_errors`` /
       (``llm_errors`` + ``llm_calls``)；无调用时为 0.0。
-    - ``tool_call_success_rate``: 工具调用成功率（当前 metrics 未记录，
-      保留字段，默认 1.0 表示无失败证据）。
-    - ``avg_latency_ms``: LLM 平均延迟（ms）；当前从 dashboard 的 messages
-      avg(latency_ms) 推算（含 user/assistant），未来可独立采集 TTFT。
+    - ``tool_call_success_rate``: 工具调用成功率 = 1 - ``tool_errors`` /
+      ``tool_calls``；无工具调用时为 1.0（无失败证据即视为健康）。
+    - ``avg_ttft_ms``: 平均首 token 延迟（ms），从 ``llm_ttft`` histogram 读取；
+      流式场景的关键体验指标，无样本时为 0.0。
+    - ``avg_latency_ms``: LLM 平均延迟（ms）；从 messages.avg(latency_ms) 估算
+      （含 user/assistant），与 TTFT 互补反映总延迟。
     - ``active_model_count``: 活跃模型数（有 ``llm_calls`` 记录的模型数）。
     - ``total_llm_calls`` / ``total_llm_errors``: 累计调用与错误计数，
       便于运维直观看量级。
+    - ``failure_mode_clusters``: 失败模式聚类 top 5，按 (tool_name, error_type)
+      → count 降序，帮助运维定位高频失败工具与错误类型。
     """
 
     llm_error_rate: float = 0.0
     tool_call_success_rate: float = 1.0
+    avg_ttft_ms: float = 0.0
     avg_latency_ms: float = 0.0
     active_model_count: int = 0
     total_llm_calls: int = 0
     total_llm_errors: int = 0
+    failure_mode_clusters: list[dict[str, Any]] = Field(default_factory=list)

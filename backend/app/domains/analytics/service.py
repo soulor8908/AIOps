@@ -213,13 +213,16 @@ async def get_ai_health_metrics(session: AsyncSession) -> AIHealthMetrics:
 
     - ``llm_error_rate``: ``llm_errors`` / (``llm_errors`` + ``llm_calls``)；
       无调用记录时为 0.0（避免除零）。
-    - ``tool_call_success_rate``: 当前 metrics 未记录工具调用，保留字段默认 1.0
-      （无失败证据即视为健康；未来在 executor 采集后再接入）。
+    - ``tool_call_success_rate``: 1 - ``tool_errors`` / ``tool_calls``；
+      无工具调用时为 1.0（无失败证据即视为健康）。
+    - ``avg_ttft_ms``: 从 ``llm_ttft`` histogram 读取平均首 token 延迟。
     - ``avg_latency_ms``: 从 ``messages.latency_ms`` 全量平均估算（含 user/assistant
-      消息），未来可独立采集 LLM TTFT。
+      消息），与 TTFT 互补反映总延迟。
     - ``active_model_count``: 有 ``llm_calls`` 或 ``llm_errors`` 记录的 distinct
       模型数（一个模型只要被尝试调用即视为活跃）。
     - ``total_llm_calls`` / ``total_llm_errors``: 跨所有 model 的累计计数。
+    - ``failure_mode_clusters``: ``tool_errors`` 按 (tool_name, error_type) → count
+      降序 top 5，失败模式聚类帮助定位高频失败工具与错误类型。
 
     注：``metrics`` 为进程内注册表，多 worker 部署时每个 worker 独立计数，
     本函数返回当前 worker 视角的健康度；Prometheus scraper 会汇总。
@@ -242,6 +245,28 @@ async def get_ai_health_metrics(session: AsyncSession) -> AIHealthMetrics:
         if labels:
             active_models.add(labels[0])
 
+    # P2-9：工具成功率 = 1 - tool_errors / tool_calls
+    total_tool_calls = int(metrics.get_counter_sum("tool_calls"))
+    total_tool_errors = int(metrics.get_counter_sum("tool_errors"))
+    if total_tool_calls > 0:
+        tool_call_success_rate = 1.0 - (total_tool_errors / total_tool_calls)
+    else:
+        tool_call_success_rate = 1.0
+
+    # P2-9：TTFT 平均值，从 llm_ttft histogram 读取
+    avg_ttft = metrics.get_histogram_avg("llm_ttft")
+
+    # P2-9：失败模式聚类 — tool_errors top 5 (tool_name, error_type) → count
+    failure_clusters_raw = metrics.get_counter_top_labels("tool_errors", top_n=5)
+    failure_mode_clusters = [
+        {
+            "tool_name": labels[0] if len(labels) > 0 else "",
+            "error_type": labels[1] if len(labels) > 1 else "",
+            "count": int(count),
+        }
+        for labels, count in failure_clusters_raw
+    ]
+
     # LLM 平均延迟：从 messages.latency_ms 全量平均估算。
     # 不加时间窗口（健康度关注当前累计态；窗口由 dashboard 负责）。
     latency_stmt = select(func.avg(Message.latency_ms))
@@ -250,11 +275,13 @@ async def get_ai_health_metrics(session: AsyncSession) -> AIHealthMetrics:
 
     return AIHealthMetrics(
         llm_error_rate=round(llm_error_rate, 4),
-        tool_call_success_rate=1.0,
+        tool_call_success_rate=round(tool_call_success_rate, 4),
+        avg_ttft_ms=round(avg_ttft, 2),
         avg_latency_ms=round(avg_latency, 2),
         active_model_count=len(active_models),
         total_llm_calls=total_calls,
         total_llm_errors=total_errors,
+        failure_mode_clusters=failure_mode_clusters,
     )
 
 

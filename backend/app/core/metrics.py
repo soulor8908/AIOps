@@ -12,6 +12,9 @@ P1 阶段。多 worker 部署时可通过外挂 Prometheus pushgateway 或替换
 - ``llm_cost`` (counter): labels=[model]
 - ``llm_errors`` (counter): labels=[model, error_type]
 - ``llm_calls`` (counter): labels=[model]，成功调用计数（P2-9 AI 健康度用）
+- ``llm_ttft`` (histogram): labels=[model]，首 token 延迟（P2-9 TTFT 采集）
+- ``tool_calls`` (counter): labels=[tool_name]，工具调用计数（P2-9 工具成功率）
+- ``tool_errors`` (counter): labels=[tool_name, error_type]，工具失败计数（P2-9 失败模式聚类）
 
 采集不阻塞请求路径（``record_*`` 仅内存写入 + lock，微秒级开销）。
 """
@@ -66,9 +69,12 @@ class MetricRegistry:
             "llm_cost": ("model",),
             "llm_errors": ("model", "error_type"),
             "llm_calls": ("model",),
+            "tool_calls": ("tool_name",),
+            "tool_errors": ("tool_name", "error_type"),
         }
         self._histogram_label_names: dict[str, tuple[str, ...]] = {
             "request_latency": ("endpoint",),
+            "llm_ttft": ("model",),
         }
 
     # ===================== 记录接口 =====================
@@ -150,6 +156,46 @@ class MetricRegistry:
         with self._lock:
             self._counters[key] += 1.0
 
+    def record_ttft(self, model: str, ttft_ms: float) -> None:
+        """P2-9：记录 LLM 首 token 延迟（Time To First Token）。
+
+        - ``llm_ttft{model}`` 观察 ttft_ms
+
+        TTFT 是流式场景的关键体验指标（用户感知"开始响应"的速度），区别于
+        总延迟（含完整生成时间）。仅流式调用首个 token 产出时记录。
+        """
+        hist_key = ("llm_ttft", (model,))
+        with self._lock:
+            hist = self._histograms[hist_key]
+            hist.count += 1
+            hist.sum += ttft_ms
+            for i, threshold in enumerate(_LATENCY_BUCKETS_WITH_INF):
+                if ttft_ms <= threshold:
+                    hist.buckets[i] += 1
+
+    def record_tool_call(self, tool_name: str) -> None:
+        """P2-9：记录一次工具调用（无论成功失败均计数）。
+
+        - ``tool_calls{tool_name}`` += 1
+
+        与 ``tool_errors`` 配对：工具成功率 = 1 - ``tool_errors`` / ``tool_calls``。
+        """
+        key = ("tool_calls", (tool_name,))
+        with self._lock:
+            self._counters[key] += 1.0
+
+    def record_tool_error(self, tool_name: str, error_type: str) -> None:
+        """P2-9：记录一次工具调用失败。
+
+        - ``tool_errors{tool_name,error_type}`` += 1
+
+        ``error_type`` 为异常类名（如 ``TimeoutError`` / ``ValueError``），
+        用于失败模式聚类——识别哪些工具/哪些错误类型最频繁失败。
+        """
+        key = ("tool_errors", (tool_name, error_type))
+        with self._lock:
+            self._counters[key] += 1.0
+
     def get_counter_sum(self, name: str) -> float:
         """读取某 counter 跨所有 label 组合的累计总和（P2-9 健康度聚合用）。
 
@@ -171,6 +217,38 @@ class MetricRegistry:
         """
         with self._lock:
             return [labels for (n, labels) in self._counters if n == name]
+
+    def get_counter_top_labels(
+        self, name: str, top_n: int = 5
+    ) -> list[tuple[tuple[str, ...], float]]:
+        """P2-9：读取某 counter 按 value 降序的 top N label 组合。
+
+        用于失败模式聚类：传入 ``tool_errors`` 返回最频繁失败的
+        (tool_name, error_type) → count 排行，帮助运维定位高频失败工具与错误类型。
+        """
+        with self._lock:
+            items = [
+                (labels, value)
+                for (n, labels), value in self._counters.items()
+                if n == name
+            ]
+        items.sort(key=lambda kv: kv[1], reverse=True)
+        return items[:top_n]
+
+    def get_histogram_avg(self, name: str) -> float:
+        """P2-9：读取某 histogram 跨所有 label 的平均值（sum/count）。
+
+        用于 TTFT 健康度：传入 ``llm_ttft`` 返回平均首 token 延迟。
+        无样本时返回 0.0。
+        """
+        with self._lock:
+            total_count = 0
+            total_sum = 0.0
+            for (n, _labels), state in self._histograms.items():
+                if n == name:
+                    total_count += state.count
+                    total_sum += state.sum
+        return total_sum / total_count if total_count > 0 else 0.0
 
     # ===================== 读取接口（便于测试） =====================
 
