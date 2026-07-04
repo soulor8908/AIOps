@@ -25,6 +25,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -75,9 +76,22 @@ async def _seed_kb(session: AsyncSession, name: str = "kb") -> KnowledgeBase:
 # ===================== 1. 上传 status processing → ready + chunk_count 一致 =====================
 
 
-def test_upload_status_ready_and_chunk_count_matches(client: TestClient) -> None:
-    """上传后 status=ready，chunk_count 与 chunk_text 实际分块数一致（SPEC 1）。"""
+def test_upload_status_ready_and_chunk_count_matches(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """上传后 status=ready，chunk_count 与 chunk_text 实际分块数一致（SPEC 1）。
+
+    A4：embed_batch 现在用 strict=True，未配置 API key 时会抛 EmbeddingError
+    导致 status=failed。此处 monkeypatch embed_batch 返回非零向量，验证
+    成功路径下 status=ready 且 chunk_count 与分块数一致。
+    """
     content = "A" * 250  # chunk_size=100, overlap=10 → 多个分块
+
+    async def _fake_embed_batch(texts, model=None, *, strict=False):
+        # 返回与 chunks 数量一致的非零向量（A4：成功路径不依赖 strict）
+        return [[0.1] * EMBEDDING_DIM for _ in texts]
+
+    monkeypatch.setattr(kb_service, "embed_batch", _fake_embed_batch)
 
     async def _scenario(session: AsyncSession) -> None:
         kb = await _seed_kb(session, name="upload-kb")
@@ -256,20 +270,37 @@ async def test_embed_batch_returns_zero_vectors_on_failure(
         assert v == [0.0] * EMBEDDING_DIM
 
 
-def test_upload_succeeds_with_zero_vector_embeddings(client: TestClient) -> None:
-    """embedding 回退零向量时文档仍可入库（SPEC 3 端到端）。
+def test_upload_marks_failed_on_embedding_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A4：embedding 失败时 Document.status=failed，不写零向量 chunk。
 
-    settings.openai_api_key="" 使 embed_batch 返回零向量，upload_document 不中断。
+    monkeypatch embed_batch 抛 EmbeddingError（模拟 OpenAI API 不可用），
+    upload_document 据此标记 status=failed 并跳过 chunk 写入。
+    旧实现回退零向量 + status=ready 污染索引——A4 修复此问题。
     """
+    from app.core.exceptions import EmbeddingError
+
+    async def _raise_embedding_error(texts, model=None, *, strict=False):
+        raise EmbeddingError("simulated embedding failure")
+
+    monkeypatch.setattr(kb_service, "embed_batch", _raise_embedding_error)
 
     async def _scenario(session: AsyncSession) -> None:
-        kb = await _seed_kb(session, name="zero-vec-kb")
+        kb = await _seed_kb(session, name="failed-emb-kb")
         doc = await kb_service.upload_document(
             session, kb.id, title="doc", content="some content here"
         )
         await session.flush()
-        assert doc.status == "ready"
-        assert doc.chunk_count >= 1
+        assert doc.status == "failed"
+        assert doc.chunk_count == 0
+        # 不应写入任何 chunk
+        chunk_count = (
+            await session.execute(
+                select(func.count()).select_from(Chunk).where(Chunk.document_id == doc.id)
+            )
+        ).scalar_one()
+        assert chunk_count == 0
 
     _run(client, _scenario)
 

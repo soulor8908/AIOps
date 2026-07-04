@@ -134,6 +134,19 @@ class Settings(BaseSettings):
     agent_cost_budget_window_seconds: int = Field(
         default=3600, alias="AGENT_COST_BUDGET_WINDOW_SECONDS", ge=1
     )
+    # A1：多副本共享预算。启用后 BudgetTracker 走 Redis ZSET 实现，所有 pod
+    # 共享同一预算视图，熔断判定基于全局真实消耗。默认关闭（与历史行为一致，
+    # 单测/CI 走内存版）。生产部署必须显式启用——K8s HPA 多副本下内存版预算
+    # 共享失效，熔断永远不触发，成本失控。
+    agent_cost_budget_redis_enabled: bool = Field(
+        default=False, alias="AGENT_COST_BUDGET_REDIS_ENABLED"
+    )
+    # A2：code 工具执行开关。ToolType.code 暴露给 LLM 生成任意代码并通过 tool_call
+    # 触发执行——是脚枪。默认 False（executor 拒绝 code 工具并跳过 schema 注入），
+    # 仅当显式启用且 tool_executor 注入了沙箱化执行器时才允许。
+    agent_code_tool_enabled: bool = Field(
+        default=False, alias="AGENT_CODE_TOOL_ENABLED"
+    )
     # P2-8：失败模式聚类。默认关闭。启用后 executor 把工具/LLM 失败的 error
     # message 向量化存入 FailureClusterer，可通过 /agents/failure-clusters 查看。
     agent_failure_clustering_enabled: bool = Field(
@@ -150,6 +163,25 @@ class Settings(BaseSettings):
     )
     agent_reflection_enabled: bool = Field(
         default=False, alias="AGENT_REFLECTION_ENABLED"
+    )
+    # B1：单次执行最大轮次上限。默认 10（保守，避免失控循环），可配到 50
+    # （长任务 Agent 如 deep research 需要更多轮）。AgentCreate.max_turns 与
+    # ExecuteRequest.max_turns 的 le 上限用此值动态校验（service 层 validator），
+    # Pydantic schema 用绝对上限 50 兜底防滥用。
+    agent_max_turns: int = Field(
+        default=10, alias="AGENT_MAX_TURNS", ge=1, le=50
+    )
+    # B4：context 压缩阈值（token 数）。ReAct 循环累积消息超此阈值时用 LLM
+    # 摘要历史，避免超 context window。默认 4000（约 16K 字符），可按模型调优。
+    # 压缩触发时记入 traces（thought 标注 context_compressed）。
+    agent_context_compress_tokens: int = Field(
+        default=4000, alias="AGENT_CONTEXT_COMPRESS_TOKENS", ge=500, le=100000
+    )
+    # B3：self-eval 采样次数。LLM judge 有 ±0.1 噪声，单次采样 0.85 阈值无统计
+    # 意义。默认 3 次采样取均值（成本×3 但阈值判定可靠）。1 = 退化为单次
+    # （向后兼容，成本敏感场景可配 1）。
+    agent_self_eval_samples: int = Field(
+        default=3, alias="AGENT_SELF_EVAL_SAMPLES", ge=1, le=10
     )
 
     @property

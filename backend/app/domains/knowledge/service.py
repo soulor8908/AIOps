@@ -12,7 +12,7 @@ from sqlalchemy import func, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import EmbeddingError, NotFoundError, ValidationError
 from app.core.llm_client import LLMClient, LLMConfig, Message
 from app.domains.knowledge.chunker import chunk_text
 from app.domains.knowledge.embedder import EMBEDDING_MODEL_REGISTRY, embed_batch
@@ -400,15 +400,30 @@ async def upload_document(
     session.add(doc)
     await session.flush()
     chunks = chunk_text(content, chunk_size=kb.chunk_size, overlap=kb.chunk_overlap)
-    embeddings = await embed_batch([c.content for c in chunks], kb.embedding_model)
+    # A4：strict=True —— embedding 失败抛 EmbeddingError，避免零向量 chunk 污染索引。
+    # 失败时 Document.status 置为 "failed"，不写任何 chunk，调用方可重试或删除文档。
+    try:
+        embeddings = await embed_batch(
+            [c.content for c in chunks], kb.embedding_model, strict=True
+        )
+    except EmbeddingError as exc:
+        doc.status = "failed"
+        doc.chunk_count = 0
+        await session.flush()
+        logger.error("A4 文档 %s 向量化失败，标记 status=failed: %s", doc.id, exc)
+        return doc
     # P1-7：防御性校验返回向量维度与列维度一致（API 异常或模型配置漂移时兜底）
     for emb in embeddings:
         if len(emb) != EMBEDDING_DIM:
-            raise ValidationError(
-                f"embedding 返回维度 {len(emb)} 与 chunks.embedding 列维度 "
-                f"{EMBEDDING_DIM} 不匹配（model={kb.embedding_model}），"
-                f"已中止上传避免脏数据"
+            # 维度不匹配也是 embedding 失败，同样标记 failed 而非抛错中断
+            doc.status = "failed"
+            doc.chunk_count = 0
+            await session.flush()
+            logger.error(
+                "A4 文档 %s embedding 维度不匹配（got=%d, want=%d），标记 status=failed",
+                doc.id, len(emb), EMBEDDING_DIM,
             )
+            return doc
     for chunk, emb in zip(chunks, embeddings, strict=True):
         session.add(
             Chunk(

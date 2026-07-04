@@ -415,6 +415,9 @@ data:
   # 限流阈值（security.spec.md§5）
   RATE_LIMIT_DEFAULT_PER_MIN: "100"
   RATE_LIMIT_LLM_PER_MIN: "20"
+  # A1：多副本共享预算。HPA 2-6 replicas 下内存版预算失效（每 pod 独立计数），
+  # 启用 Redis ZSET 实现保证熔断判定基于全局真实 token 消耗。
+  AGENT_COST_BUDGET_REDIS_ENABLED: "true"
   # 前端
   VITE_API_BASE_URL: "/api/v1"
 ---

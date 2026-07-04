@@ -152,7 +152,7 @@ class AgentCreate(BaseModel):
     system_prompt: str | None = None
     model_alias: str = "default"
     tools: list[ToolDef] = Field(default_factory=list)
-    max_turns: int = Field(default=10, ge=1, le=10)
+    max_turns: int = Field(default=10, ge=1, le=50)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     # P3-11：自主运维开关（默认关闭，需显式启用）
     self_eval: bool = False
@@ -293,5 +293,5 @@ class ExecuteRequest(BaseModel):
     """执行 Agent 请求体。"""
 
     input: str = Field(min_length=1)
-    max_turns: int | None = Field(default=None, ge=1, le=10)
+    max_turns: int | None = Field(default=None, ge=1, le=50)
     context: dict[str, Any] = Field(default_factory=dict)

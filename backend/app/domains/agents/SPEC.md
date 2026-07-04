@@ -11,18 +11,24 @@
 
 ## Constraints
 - DAG 最大 50 节点（`service.MAX_NODES = 50`，创建与执行均校验，超限抛 `LLMError`）
-- 单次执行最大 10 轮（`MAX_TURNS = 10`，`max_turns` 取值 1-10）
+- 单次执行最大轮次 `MAX_TURNS = settings.agent_max_turns`（默认 10，可配到 50，B1）。`max_turns` 取值 1-`agent_max_turns`，Pydantic schema 用绝对上限 50 兜底
 - `temperature` 0.0-2.0（默认 0.7）；`name` ≤ 128 字符
 - LLM 调用 HTTP 超时默认 60s（`LLMClient(timeout=60.0)`）
 - 工具类型枚举 `ToolType`：search / calculator / http / code / rag / custom
 - 列表分页 `limit` 1-200
-- 执行请求 `ExecuteRequest.input` 非空，`max_turns` 可选覆盖（仍受 ≤10 上限）
+- 执行请求 `ExecuteRequest.input` 非空，`max_turns` 可选覆盖（仍受 ≤`agent_max_turns` 上限）
 
 ## Non-Goals
 - 通用工作流引擎（BPMN / 复杂条件分支路由）
 - 持久化状态机与断点续跑
 - 多 Agent 实时协作
 - 工具沙箱化安全执行
+
+> **A2 Code Tool 安全策略**：`ToolType.code` 默认被 executor 拒绝（schema 不注入
+> LLM）。`code` 工具暴露给 LLM 生成任意代码并通过 tool_call 触发执行——是脚枪。
+> 仅当 `settings.agent_code_tool_enabled=True`（环境变量 `AGENT_CODE_TOOL_ENABLED`）
+> 且调用方注入了沙箱化 `tool_executor` 时才允许。生产部署如需启用，必须配合
+> 容器级沙箱（gVisor / Firecracker / nsjail）+ 资源限制（cgroups）+ 网络隔离。
 
 ## Success Criteria (Eval)
 - [x] ReAct 循环在无工具调用时正确终止并返回最终答案
@@ -52,7 +58,8 @@
 - `executor.py`：
   - `AgentExecutor.run()` 实现 ReAct 循环，`turns = min(max_turns or agent.max_turns, agent.max_turns)`
   - `_run_turn`：调 LLM → `parse_tool_calls_json` 解析 → 无调用则结束返回答案；有调用则 `_execute_tools` 后追加 assistant/tool 消息继续
-  - `execute_workflow_dag`：按节点序执行，`context[node_id]` 与 `__input__` 传递，节点无 `agent_id` 时直传输入
+  - `_compress_context`（B4）：每轮开始前用 `_estimate_tokens` 估算消息总 token，超 `settings.agent_context_compress_tokens`（默认 4000）时用 LLM 摘要历史中段（head + summary + tail），压缩事件记入 traces（`thought="[context_compressed]"`，`observation` 记前后 token/消息数）。摘要失败降级为截断（仍记 trace）。tail_size 自适应（消息少时 < 6）确保 ≥4 条消息即可压缩。
+  - `execute_workflow_dag`：按拓扑分层并发执行，`context[node_id]` 与 `__input__` 传递，节点无 `agent_id` 时直传输入。A3：`condition_evaluator` 注入后求值 `WorkflowEdge.condition`（LLM judge），求值失败保守放行。B2：同层独立节点 `asyncio.gather` 并发执行。
 
 ## API Endpoints
 前缀 `/api/v1`
