@@ -20,6 +20,7 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.core.llm_client import LLMClient, LLMConfig, Provider
 from app.domains.agents.executor import AgentDelegateExecutor, AgentExecutor, execute_workflow_dag
 from app.domains.agents.memory import PgMemoryBackend
+from app.domains.agents.model_router import BudgetTracker, ModelRouter
 from app.domains.agents.models import (
     Agent,
     AgentCreate,
@@ -62,6 +63,32 @@ def _build_memory_backend(client: LLMClient) -> PgMemoryBackend | MultiQueryMemo
         enable_hyde=settings.agent_query_rewrite_hyde,
     )
     return MultiQueryMemoryBackend(backend, rewriter)
+
+
+# P1-6：进程级 budget 跟踪器单例。生产多实例应换 Redis（ZSET + 时间戳）。
+# budget=0 时 is_exhausted 永远返回 False，等价于不限制。
+_budget_tracker: BudgetTracker | None = None
+
+
+def _get_budget_tracker() -> BudgetTracker:
+    """惰性构造进程级 budget 跟踪器单例。"""
+    global _budget_tracker
+    if _budget_tracker is None:
+        _budget_tracker = BudgetTracker(
+            settings.agent_cost_token_budget,
+            settings.agent_cost_budget_window_seconds,
+        )
+    return _budget_tracker
+
+
+def _build_model_router() -> ModelRouter:
+    """构造模型路由器（复用 budget 单例）。budget=0 时不限制（永不熔断）。"""
+    return ModelRouter(
+        cheap_alias=settings.agent_cost_cheap_model_alias,
+        default_alias=settings.default_llm_model,
+        premium_alias=settings.agent_cost_premium_model_alias,
+        budget=_get_budget_tracker(),
+    )
 
 # ModelConfig.provider 值 → LLMClient 支持的 Provider（Literal["openai","anthropic","local"]）。
 # Azure OpenAI 与 custom 兼容 OpenAI 协议，映射到 "openai"。
@@ -135,7 +162,18 @@ async def execute_agent(
     委托递归深度受限（``_MAX_DELEGATE_DEPTH``）防止 A→B→A 循环。
     """
     agent = await get_agent(session, agent_id)
-    config = await _build_llm_config(session, agent.model_alias, agent.temperature)
+    # P1-6：成本感知模型路由。启用后按复杂度覆盖 model_alias，熔断降级 cheapest。
+    routed_alias = agent.model_alias
+    router: ModelRouter | None = None
+    if settings.agent_cost_routing_enabled:
+        router = _build_model_router()
+        routed_alias, complexity, broken = router.route(request.input, agent.tools)
+        if routed_alias != agent.model_alias:
+            logger.info(
+                "P1-6 路由 agent=%s complexity=%s %s→%s (circuit_broken=%s)",
+                agent_id, complexity.value, agent.model_alias, routed_alias, broken,
+            )
+    config = await _build_llm_config(session, routed_alias, agent.temperature)
     has_delegate = any(
         isinstance(t, dict) and t.get("type") == "agent_delegate"
         for t in (agent.tools or [])
@@ -189,6 +227,9 @@ async def execute_agent(
         )
     finally:
         await client.close()
+    # P1-6：记录 token 用量到 budget 跟踪器（熔断判定依据）。
+    if router is not None and result.total_tokens > 0:
+        router.record_usage(result.total_tokens)
     # P0-3：成功执行后按采样率异步记录样本（fire-and-forget，不阻塞响应）。
     # scheduled 触发的 input 是固定字符串，无评估价值，跳过采样。
     if (
