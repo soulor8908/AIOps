@@ -46,7 +46,9 @@ dev = [
     # 数据库迁移（specs/migration.spec.md §3）：ORM 单一真源，autogenerate 派生迁移
     "alembic>=1.13",
     # 限流测试用 fakeredis（security.spec.md§5）：无需真实 Redis 即可验证滑动窗口逻辑
-    "fakeredis>=2.20",
+    # A1：fakeredis[lua] 提供 Lua 脚本支持，RedisBudgetTracker 测试用 fakeredis
+    # 验证 ZSET+HASH 原子操作（生产 Redis 内置 Lua，无需额外依赖）。
+    "fakeredis[lua]>=2.20",
 ]
 # P1-4：cross-encoder 本地 reranker。重依赖（torch + transformers，约 2GB+），
 # 作为可选 extras 单独安装，未安装时 rerank 自动回退到 LLM rerank。

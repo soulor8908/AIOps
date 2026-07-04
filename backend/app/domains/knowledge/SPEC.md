@@ -40,7 +40,7 @@
 |----|------|------|
 | 1 | `test_upload_status_ready_and_chunk_count_matches` | 经 `client` fixture 的 session_factory 调 `service.upload_document`，`settings.openai_api_key=""` 使 embedder 返回零向量（无网络），断言 `status=="ready"` 且 `chunk_count` 与 `chunk_text` 实际分块数一致 |
 | 2 | `test_search_filters_by_score_threshold` / `test_search_threshold_zero_returns_all` | `cosine_distance` 在 SQLite 不可用，用 `_MockSession` 返回预打分行（score 0.9/0.5/0.2），验证 `score_threshold=0.4` 过滤掉 0.2，`threshold=0` 全保留 |
-| 3 | `test_embed_text_returns_zero_vector_on_http_failure` / `test_embed_batch_returns_zero_vectors_on_failure` / `test_upload_succeeds_with_zero_vector_embeddings` | monkeypatch `httpx.AsyncClient.post` 抛 `ConnectError`/`HTTPError`，断言单条与批量 embedder 均回退 1536 维零向量；端到端验证零向量文档仍以 `status=ready` 入库 |
+| 3 | `test_embed_text_returns_zero_vector_on_http_failure` / `test_embed_batch_returns_zero_vectors_on_failure` / `test_upload_marks_failed_on_embedding_failure` | monkeypatch `httpx.AsyncClient.post` 抛 `ConnectError`/`HTTPError`，断言单条与批量 embedder 默认模式回退 1536 维零向量；A4：`strict=True` 模式抛 `EmbeddingError`，`upload_document` 据此标记 `status=failed` 并跳过 chunk 写入（不再污染索引） |
 | 4 | `test_rag_sources_match_search_and_includes_usage` | mock `kb_service.search_kb` 返回固定 sources + `LLMClient.chat` 返回固定 usage，断言 RAG 返回的 sources 数量/内容与检索一致且 `usage.total_tokens` 透传 |
 | 5 | `test_upload_rejects_oversized_document` / `test_upload_empty_content_produces_zero_chunks` | 构造 50MB+1 字符内容断言 `ValidationError`；`chunk_text` 对空白返回 `[]`（router 层 422 拒绝空内容） |
 | 6 | `test_chunk_text_rejects_overlap_ge_chunk_size` / `test_chunk_text_rejects_invalid_chunk_size` / `test_chunk_text_normal_case` | 直接测 `chunker.chunk_text` 边界：`overlap ≥ chunk_size` / `chunk_size ≤ 0` 抛 `ValueError`；正常路径验证 index 递增 + chunk_size 长度 |
@@ -51,7 +51,7 @@
 - ORM `Chunk`（`chunks` 表）：`id`(UUID)、`document_id`(FK, CASCADE)、`knowledge_base_id`(FK, CASCADE)、`chunk_index`、`content`、`embedding`(Vector(1536))、`token_count`、`metadata`(JSONB)、`created_at`
 - Schemas：`KnowledgeBaseCreate` / `KnowledgeBaseOut` / `DocumentOut` / `SearchQuery`(query/top_k/score_threshold) / `SearchResult`(chunk_id/document_id/content/score/metadata) / `RAGQuery`(question/top_k) / `RAGResponse`(answer/sources/usage)
 - `chunker.py`：`chunk_text` 固定长度按字符切分（中文友好），`step = chunk_size - overlap`；`ChunkResult`(index/content/token_count)；`_estimate_tokens` 粗估（CJK 按字 + ASCII 按词）
-- `embedder.py`：`embed_text` / `embed_batch` 调 OpenAI Embeddings API，失败回退 `_zero_vector`；`OPENAI_API_KEY` 未配置时直接返回零向量
+- `embedder.py`：`embed_text` / `embed_batch` 调 OpenAI Embeddings API，默认失败回退 `_zero_vector`（检索路径友好）；A4：`strict=True` 模式失败抛 `EmbeddingError`，用于 `upload_document`——失败时 `Document.status=failed` 并跳过 chunk 写入，避免零向量污染索引。`OPENAI_API_KEY` 未配置时默认返回零向量，strict 模式抛错。
 
 ## API Endpoints
 前缀 `/api/v1/knowledge-bases`

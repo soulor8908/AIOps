@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
 from app.core.exceptions import ValidationError
+from app.core.config import settings
 from app.core.llm_client import (
     LLMClient,
     LLMResponse,
@@ -43,10 +44,20 @@ from app.domains.agents.self_diagnose import SelfDiagnoser
 
 logger = logging.getLogger("app.agents.executor")
 
-# context 压缩阈值（P2-8）：超过则用 LLM 摘要历史，避免超 context window
-# P1-4：记忆检索优先于此阈值——有 memory 时每轮注入 top-k 相关历史，
-# 此阈值仍作为单次 run 内消息过长的兜底（如长 observation 累积）。
-_CONTEXT_COMPRESS_THRESHOLD = 20
+
+def _estimate_tokens(messages: list[Message]) -> int:
+    """B4：粗略估算 messages 的 token 总数。
+
+    不引入 tiktoken 依赖（多 provider 模型各异），用 ``len(text) / 4`` 近似
+    （OpenAI 英文经验值，中文偏保守——实际 1 汉字约 1-2 token，此处高估
+    更早触发压缩，对长任务更安全）。每条消息加 4 token overhead 模拟
+    chat 格式开销（role 标记 + 分隔符）。
+    """
+    total = 0
+    for m in messages:
+        content = m.content or ""
+        total += len(content) // 4 + 4
+    return total
 
 
 def _record_failure_safely(message: str, metadata: dict[str, Any]) -> None:
@@ -83,7 +94,14 @@ def _agent_tools_to_llm_tools(tools: list[Any]) -> list[ToolDef]:
     LLM 原生 function calling 需要显式 parameters JSON Schema。这里按 ToolType
     生成最小 schema：search/rag 一个 query 参数，calculator 一个 expr 参数，
     http/code/custom 透传 config 作为 properties。
+
+    A2：``code`` 类型工具默认被拒绝（schema 不注入），仅当
+    ``settings.agent_code_tool_enabled=True`` 时透传。``code`` 工具暴露给 LLM
+    生成任意代码并通过 tool_call 触发执行——是脚枪，必须显式 opt-in 且
+    由调用方注入沙箱化 ``tool_executor``。
     """
+    from app.core.config import settings
+
     llm_tools: list[ToolDef] = []
     for t in tools:
         if isinstance(t, dict):
@@ -97,6 +115,14 @@ def _agent_tools_to_llm_tools(tools: list[Any]) -> list[ToolDef]:
             desc = t.description or ""
             config = t.config
         if not name:
+            continue
+        # A2：默认拒绝 code 工具，避免 LLM 生成任意代码触发执行
+        if ttype == "code" and not settings.agent_code_tool_enabled:
+            logger.warning(
+                "A2 code 工具 %s 被拒绝（AGENT_CODE_TOOL_ENABLED=False），"
+                "如需启用请显式配置并注入沙箱化 tool_executor",
+                name,
+            )
             continue
         params = _tool_parameters(name, ttype, config)
         llm_tools.append(ToolDef(name=name, description=desc or name, parameters=params))
@@ -204,9 +230,12 @@ class AgentExecutor:
         # P2-8：截断不再硬判失败，标记 success=False 但 final_answer 保留最后输出。
         success = False
         for turn in range(1, turns + 1):
-            # P2-8：context 压缩，避免长任务超 context window
-            if len(messages) > _CONTEXT_COMPRESS_THRESHOLD:
-                messages = await self._compress_context(messages)
+            # B4：context 压缩（按 token 数）。超 ``agent_context_compress_tokens``
+            # 时用 LLM 摘要历史，避免长任务超 context window。压缩事件记入 traces。
+            if _estimate_tokens(messages) > settings.agent_context_compress_tokens:
+                messages = await self._compress_context(
+                    messages, turn=turn, traces=traces
+                )
             done, answer = await self._run_turn(
                 turn, messages, llm_tools, traces
             )
@@ -305,8 +334,11 @@ class AgentExecutor:
         success = False
 
         for turn in range(1, turns + 1):
-            if len(messages) > _CONTEXT_COMPRESS_THRESHOLD:
-                messages = await self._compress_context(messages)
+            # B4：context 压缩（按 token 数）。流式模式同样记入 traces。
+            if _estimate_tokens(messages) > settings.agent_context_compress_tokens:
+                messages = await self._compress_context(
+                    messages, turn=turn, traces=traces
+                )
             prev_tokens = traces[-1].tokens if traces else 0
 
             # P6e：单流消费 stream_chat_events，实时分流 text / tool_call / finish
@@ -410,8 +442,12 @@ class AgentExecutor:
         - healed_answer 为 None 表示未愈合（自评已达标或自愈合关闭/耗尽）
         - 自评调用失败时降级：返回 (None, None, None, 0, 0)，不阻塞主流程
         """
-        from app.domains.evals.judge import judge_llm
+        from app.core.config import settings
+        from app.domains.evals.judge import judge_llm_with_sampling
 
+        # B3：用采样版 judge 抑制 ±0.1 噪声，使阈值判定可靠。n_samples 从
+        # settings 读取（默认 3），1 时退化为单次（向后兼容）。
+        n_samples = settings.agent_self_eval_samples
         threshold = float(getattr(agent, "self_eval_threshold", 0.7))
         max_retries = (
             int(getattr(agent, "self_heal_max_retries", 0))
@@ -421,11 +457,12 @@ class AgentExecutor:
         current_answer = initial_answer
         heal_attempts = 0
         try:
-            judge_result = await judge_llm(
+            judge_result = await judge_llm_with_sampling(
                 actual=current_answer,
                 expected=user_input,
                 client=self.llm,
                 criteria="回答是否准确、相关且完整地回应了用户问题",
+                samples=n_samples,
             )
         except Exception:  # noqa: BLE001
             logger.warning("self-eval judge 调用失败，跳过自愈合")
@@ -453,11 +490,12 @@ class AgentExecutor:
                 break
             current_answer = answer
             try:
-                judge_result = await judge_llm(
+                judge_result = await judge_llm_with_sampling(
                     actual=current_answer,
                     expected=user_input,
                     client=self.llm,
                     criteria="回答是否准确、相关且完整地回应了用户问题",
+                    samples=n_samples,
                 )
             except Exception:  # noqa: BLE001
                 logger.warning("self-heal judge 调用失败，保留当前答案")
@@ -617,30 +655,66 @@ class AgentExecutor:
         tool_def = _SimpleToolDef(name=tc.name)
         return await self.tools.execute(tool_def, tc.args)  # type: ignore[union-attr]
 
-    async def _compress_context(self, messages: list[Message]) -> list[Message]:
-        """P2-8：context 压缩。保留 system + 最近若干轮，中间用 LLM 摘要替代。
+    async def _compress_context(
+        self,
+        messages: list[Message],
+        *,
+        turn: int,
+        traces: list[ExecutionTrace],
+    ) -> list[Message]:
+        """B4：context 压缩（按 token 数）。保留 system + 最近若干轮，中间用 LLM 摘要替代。
 
-        避免 Agent 长任务到 max_turns 因超 context window 失败。
-        摘要失败时降级为简单截断（保留首尾），不阻塞主流程。
+        阈值取自 ``settings.agent_context_compress_tokens``（默认 4000）。
+        压缩触发时记入 traces（``thought="[context_compressed]"``，
+        ``observation`` 记摘要前后 token 数 + 消息数，``tokens`` 记本次摘要调用 token），
+        便于 Trace Timeline 还原压缩事件。
+
+        摘要失败时降级为简单截断（保留首尾），仍记 trace 标注降级。
         """
-        if len(messages) <= _CONTEXT_COMPRESS_THRESHOLD:
+        threshold = settings.agent_context_compress_tokens
+        before_tokens = _estimate_tokens(messages)
+        before_count = len(messages)
+        # 保留首条 system + 最近若干轮，中间摘要素。
+        # tail_size 自适应：消息多时保留最近 6 条，消息少时保留更少以确保
+        # 至少有 1 条 middle 可压缩（B4 之前固定 tail=6 导致 ≤7 条消息无法压缩）。
+        n = len(messages)
+        if n < 4:
+            # 消息太少（system + ≤2 条），压缩无意义，直接返回
             return messages
-        # 保留首条 system + 最后 6 条，中间摘要素
+        tail_size = min(6, n - 2)
         head = messages[:1]
-        middle = messages[1:-6]
-        tail = messages[-6:]
+        middle = messages[1:-tail_size]
+        tail = messages[-tail_size:]
+        if not middle:
+            return messages
         summary_text = "\n".join(f"[{m.role}] {m.content[:200]}" for m in middle)
+        summary_tokens = 0
         try:
             resp = await self.llm.chat([
                 Message(role="system", content="Summarize the conversation so far concisely."),
                 Message(role="user", content=summary_text),
             ])
+            summary_tokens = int(resp.usage.get("total_tokens", 0))
             summary_msg = Message(role="system", content=f"previous_summary: {resp.content}")
+            new_messages = head + [summary_msg] + tail
         except Exception:  # noqa: BLE001
             # 摘要失败降级：直接丢弃中间，不阻塞主流程
             logger.warning("context compression failed, falling back to truncation")
-            return head + tail
-        return head + [summary_msg] + tail
+            new_messages = head + tail
+        after_tokens = _estimate_tokens(new_messages)
+        after_count = len(new_messages)
+        # B4：压缩事件记入 traces，便于 Trace Timeline 还原
+        traces.append(ExecutionTrace(
+            turn=turn,
+            thought="[context_compressed]",
+            action=None,
+            observation=(
+                f"messages {before_count}->{after_count}; "
+                f"tokens {before_tokens}->{after_tokens} (threshold={threshold})"
+            ),
+            tokens=summary_tokens,
+        ))
+        return new_messages
 
 
 @dataclass(slots=True)
@@ -719,55 +793,188 @@ async def execute_workflow_dag(
     edges: list[dict[str, Any]],
     agent_runner: Any,
     entry_input: str,
+    *,
+    condition_evaluator: Any | None = None,
 ) -> ExecutionResult:
-    """DAG 执行：从 entry 节点沿 edges BFS 遍历，逐节点执行并传递上下文。"""
+    """DAG 执行：按拓扑分层并发执行节点，edge.condition 决定后继是否激活。
+
+    A3：``WorkflowEdge.condition`` 现在被实际求值。``condition`` 为 None/空时
+    无条件激活；非空时调用 ``condition_evaluator(condition, prev_output) -> bool``
+    判定是否激活后继。``condition_evaluator`` 由调用方注入（典型为 LLM judge
+    实现），为 None 时退化为"非空 condition 一律放行"（保持向后兼容，等价于
+    旧实现的"忽略 condition"）。
+
+    B2：按拓扑分层 ``asyncio.gather`` 并发执行同层独立节点。原串行实现下
+    ``A→B, A→C, B+C→D`` 三层 DAG 中 B、C 串行（延迟 = T(B)+T(C)），现在并发
+    （延迟 = max(T(B), T(C))）。50 节点上限下并发开销可控。
+
+    条件分支语义：``condition`` 求值失败时默认放行（保守策略：宁可执行不可
+    漏执行）。``condition_evaluator`` 失败不应阻塞主流程。
+
+    ``condition_evaluator`` 签名：``async (condition: str, prev_output: str) -> bool``。
+    为 None 时退化为"非空 condition 一律放行"（保持向后兼容，等价于旧实现的
+    "忽略 condition"）。典型实现见 ``service._build_condition_evaluator``——
+    包装 LLM judge 判定前驱输出是否满足 condition 表达式。
+    """
     if not nodes:
         raise ValidationError("工作流无节点")
     if len(nodes) > 50:
         raise ValidationError("DAG 节点数超 50 上限")
     node_map = {node["id"]: node for node in nodes}
-    if edges:
-        adjacency: dict[str, list[str]] = {nid: [] for nid in node_map}
-        for edge in edges:
-            src = edge.get("source")
-            tgt = edge.get("target")
-            if src in adjacency and tgt in node_map:
-                adjacency[src].append(cast(str, tgt))
-        entry_id = next(
-            (n["id"] for n in nodes if n.get("is_entry")), nodes[0]["id"]
-        )
-        order: list[str] = []
-        visited: set[str] = set()
-        queue: deque[str] = deque([entry_id])
-        while queue:
-            node_id = queue.popleft()
-            if node_id in visited:
-                continue
-            visited.add(node_id)
-            order.append(node_id)
-            for tgt in adjacency.get(node_id, []):
-                if tgt not in visited:
-                    queue.append(tgt)
-        if not order:
-            order = [nodes[0]["id"]]
-    else:
-        order = [node["id"] for node in nodes]
+    # 构造邻接表 + 反向入度（用于拓扑分层）
+    adjacency: dict[str, list[tuple[str, str | None]]] = {nid: [] for nid in node_map}
+    in_degree: dict[str, int] = {nid: 0 for nid in node_map}
+    for edge in edges:
+        src = edge.get("source")
+        tgt = edge.get("target")
+        cond = edge.get("condition")
+        if src in node_map and tgt in node_map:
+            adjacency[src].append((tgt, cond))
+            in_degree[tgt] += 1
+    # 入口节点：is_entry 标记优先，否则取入度为 0 的首个节点（无 edges 时全入度为 0）
+    entry_id = next(
+        (n["id"] for n in nodes if n.get("is_entry")),
+        next((nid for nid, d in in_degree.items() if d == 0), nodes[0]["id"]),
+    )
+    # 拓扑分层：BFS 按层组织，每层节点无依赖可并发执行
+    layers = _topological_layers(entry_id, node_map, adjacency)
     context: dict[str, str] = {"__input__": entry_input}
+    activated: set[str] = set()
     traces: list[ExecutionTrace] = []
-    for idx, node_id in enumerate(order):
-        node = node_map[node_id]
-        node_input = context.get("__input__", "")
-        result = await agent_runner(node, node_input)
-        context[node_id] = result.final_answer
-        context["__input__"] = result.final_answer
-        traces.extend(result.traces)
-        traces.append(ExecutionTrace(
-            turn=idx + 1, thought=f"node={node['name']}", observation=result.final_answer,
-            tokens=result.total_tokens,
-        ))
+    turn_counter = 0
+    for layer in layers:
+        # 同层节点过滤：已被前驱 condition 拒绝的节点跳过。
+        # A3：_is_node_reachable 为 async（condition_evaluator 可能为 LLM 调用），
+        # 用顺序 await 逐节点判定（同层节点数通常很少，无需并发判定）。
+        runnable: list[str] = []
+        for nid in layer:
+            if nid in activated:
+                continue
+            if await _is_node_reachable(
+                nid, adjacency, activated, context, condition_evaluator
+            ):
+                runnable.append(nid)
+        if not runnable:
+            continue
+        # B2：同层独立节点并发执行（asyncio.gather），保留 traces 顺序按 node_id
+        # 入参：每个节点接收上游 final_answer（多入度时取首个激活前驱的输出，
+        # __input__ 兜底为 entry_input 或上一层的最终输出）
+        async def _safe_run(nid: str) -> tuple[str, ExecutionResult]:
+            node = node_map[nid]
+            node_input = context.get("__input__", "")
+            try:
+                res = await agent_runner(node, node_input)
+            except Exception as exc:  # noqa: BLE001
+                res = ExecutionResult(
+                    workflow_id=workflow_id,
+                    final_answer=f"[节点 {node.get('name', nid)} 执行失败] {exc}",
+                    success=False,
+                    error=str(exc),
+                )
+            return nid, res
+
+        results = await asyncio.gather(*(_safe_run(nid) for nid in runnable))
+        # 按节点入参顺序回写 context（后写入覆盖先写入，等价于"最后激活前驱的输出"）
+        for nid, res in results:
+            context[nid] = res.final_answer
+            context["__input__"] = res.final_answer
+            activated.add(nid)
+            turn_counter += 1
+            traces.extend(res.traces)
+            traces.append(ExecutionTrace(
+                turn=turn_counter,
+                thought=f"node={node_map[nid]['name']}",
+                observation=res.final_answer,
+                tokens=res.total_tokens,
+            ))
     return ExecutionResult(
         workflow_id=workflow_id,
         final_answer=context["__input__"],
         traces=traces,
         total_tokens=sum(t.tokens for t in traces),
     )
+
+
+def _topological_layers(
+    entry_id: str,
+    node_map: dict[str, dict[str, Any]],
+    adjacency: dict[str, list[tuple[str, str | None]]],
+) -> list[list[str]]:
+    """按拓扑序分层，每层节点间无依赖可并发执行。
+
+    算法：BFS 从 entry 出发，节点入度归零时入下一层。无 edges 时所有节点同层
+    （保持原行为：顺序执行）。
+    """
+    # 重建入度（基于 adjacency）
+    in_degree: dict[str, int] = {nid: 0 for nid in node_map}
+    for src, targets in adjacency.items():
+        for tgt, _cond in targets:
+            in_degree[tgt] += 1
+    # entry 节点入度强制为 0（防止有外部边指向 entry 导致死锁）
+    in_degree[entry_id] = 0
+    layers: list[list[str]] = []
+    current: list[str] = [entry_id]
+    visited: set[str] = set()
+    while current:
+        layers.append(current)
+        next_layer: list[str] = []
+        for nid in current:
+            visited.add(nid)
+            for tgt, _cond in adjacency.get(nid, []):
+                in_degree[tgt] -= 1
+                if in_degree[tgt] <= 0 and tgt not in visited and tgt not in next_layer:
+                    next_layer.append(tgt)
+        # 防御：避免重复节点
+        current = [n for n in next_layer if n not in visited]
+    # 兜底：未访问的孤立节点（无路径从 entry 可达）补到最后作为独立层
+    orphans = [nid for nid in node_map if nid not in visited]
+    if orphans:
+        layers.append(orphans)
+    return layers
+
+
+async def _is_node_reachable(
+    nid: str,
+    adjacency: dict[str, list[tuple[str, str | None]]],
+    activated: set[str],
+    context: dict[str, str],
+    condition_evaluator: Any | None,
+) -> bool:
+    """检查节点是否可达：至少一个激活前驱的 edge.condition 求值为真。
+
+    无前驱（entry 或孤立节点）：可达。``condition_evaluator`` 为 None 时
+    非空 condition 一律放行（等价于旧实现的"忽略 condition"）。
+
+    A3：``condition_evaluator`` 是 async callable（LLM judge 调用）。
+    求值失败时保守放行（不漏执行）。
+    """
+    has_pred = False
+    for src, targets in adjacency.items():
+        if src not in activated:
+            continue
+        for tgt, cond in targets:
+            if tgt != nid:
+                continue
+            has_pred = True
+            if not cond:
+                # 无 condition：无条件激活
+                return True
+            if condition_evaluator is None:
+                # 旧模式：有 condition 但无 evaluator，放行（向后兼容）
+                return True
+            try:
+                prev_output = context.get(src, "")
+                # A3：condition_evaluator 可能是 async（LLM judge）或 sync（测试 stub）
+                result = condition_evaluator(cond, prev_output)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                if result:
+                    return True
+            except Exception:  # noqa: BLE001
+                # 求值失败：保守放行（不漏执行）
+                logger.warning(
+                    "A3 condition 求值失败，放行后继（cond=%s）", cond, exc_info=True
+                )
+                return True
+    # entry 节点 / 孤立节点（无前驱）：可达
+    return not has_pred

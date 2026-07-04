@@ -18,9 +18,10 @@ from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.llm_client import LLMClient, LLMConfig, Provider
+from app.domains.agents.budget_redis import BudgetTrackerProtocol
 from app.domains.agents.executor import AgentDelegateExecutor, AgentExecutor, execute_workflow_dag
 from app.domains.agents.memory import PgMemoryBackend
-from app.domains.agents.model_router import BudgetTracker, ModelRouter
+from app.domains.agents.model_router import ModelRouter
 from app.domains.agents.models import (
     Agent,
     AgentCreate,
@@ -37,7 +38,9 @@ from app.domains.models.models import ModelConfig
 logger = logging.getLogger("app.agents.service")
 
 MAX_NODES = 50
-MAX_TURNS = 10
+# B1：MAX_TURNS 从 settings 读取，默认 10 可配到 50（长任务 Agent 如 deep research）。
+# AgentCreate/ExecuteRequest 的 Pydantic le=50 是绝对上限兜底，此处是运行时可配上限。
+MAX_TURNS = settings.agent_max_turns
 # P3-12：A2A 委托最大递归深度，防止 Agent A → B → A 循环调用耗尽栈/预算
 _MAX_DELEGATE_DEPTH = 3
 # P0-2：autonomous loop 触发输入。scheduled 触发无用户输入，用固定 trigger prompt
@@ -45,6 +48,31 @@ _MAX_DELEGATE_DEPTH = 3
 _SCHEDULED_TRIGGER_INPUT = "scheduled autonomous run"
 # P0-3：采样率检查用的模块级 random 实例（避免每次新建 + 便于测试 monkeypatch）。
 _sample_rng = random.Random()
+
+
+def _compute_sample_priority(
+    input_text: str, result: ExecutionResult
+) -> int:
+    """C5：按启发式计算样本优先级（≥0）。
+
+    高优先级样本在采集时获得 boost 采样率，在评估时优先被 ``run_online_eval``
+    选取。启发式维度（每个 +1，可叠加）：
+    - 输入长度超过 ``online_eval_priority_input_len_threshold``（长查询更可能
+      触发上下文压缩 / 多轮工具调用，回归价值高）
+    - ``heal_attempts > 0``（self-heal 被触发 = 原始输出未通过自评，是强回归信号）
+    - ``eval_score`` 不为 None 且 < 0.7（自评低分 = 输出质量可疑）
+
+    纯函数，无副作用，便于单测。
+    """
+    priority = 0
+    threshold = settings.online_eval_priority_input_len_threshold
+    if len(input_text) > threshold:
+        priority += 1
+    if result.heal_attempts > 0:
+        priority += 1
+    if result.eval_score is not None and result.eval_score < 0.7:
+        priority += 1
+    return priority
 
 
 def _build_memory_backend(client: LLMClient) -> PgMemoryBackend | MultiQueryMemoryBackend | None:
@@ -66,19 +94,25 @@ def _build_memory_backend(client: LLMClient) -> PgMemoryBackend | MultiQueryMemo
     return MultiQueryMemoryBackend(backend, rewriter)
 
 
-# P1-6：进程级 budget 跟踪器单例。生产多实例应换 Redis（ZSET + 时间戳）。
-# budget=0 时 is_exhausted 永远返回 False，等价于不限制。
-_budget_tracker: BudgetTracker | None = None
+# P1-6 / A1：进程级 budget 跟踪器单例。生产多实例（HPA 2-6 replicas）启用
+# ``agent_cost_budget_redis_enabled`` 后走 Redis ZSET 实现，所有 pod 共享预算视图。
+# 否则走内存版（与历史行为一致，单测/CI 默认路径）。budget=0 时 is_exhausted
+# 永远返回 False，等价于不限制。
+_budget_tracker: BudgetTrackerProtocol | None = None
 
 
-def _get_budget_tracker() -> BudgetTracker:
-    """惰性构造进程级 budget 跟踪器单例。"""
+def _get_budget_tracker() -> BudgetTrackerProtocol:
+    """惰性构造进程级 budget 跟踪器单例。
+
+    实现选择由 ``settings.agent_cost_budget_redis_enabled`` 决定：
+    - True：Redis ZSET（多 pod 共享），Redis 不可达时回退内存版（带 warning）
+    - False：内存版（默认）
+    """
     global _budget_tracker
     if _budget_tracker is None:
-        _budget_tracker = BudgetTracker(
-            settings.agent_cost_token_budget,
-            settings.agent_cost_budget_window_seconds,
-        )
+        from app.domains.agents.budget_redis import build_budget_tracker_from_settings
+
+        _budget_tracker = build_budget_tracker_from_settings()
     return _budget_tracker
 
 
@@ -104,6 +138,44 @@ def _build_reflector(client: LLMClient) -> Reflector | None:
     if not settings.agent_reflection_enabled:
         return None
     return Reflector(client)
+
+
+def _build_condition_evaluator() -> Any:
+    """A3：构造工作流 edge.condition 求值器（LLM judge）。
+
+    返回 async callable ``(condition: str, prev_output: str) -> bool``。
+    用 LLM judge 判定 ``prev_output`` 是否满足 ``condition`` 表达式（自然语言
+    描述的分支条件，如 "包含错误信息" / "得分 ≥ 0.8"）。
+
+    设计取舍：复用 ``judge_llm`` 而非新写 prompt——judge 已有 structured output
+    强约束 + JSON 容错解析，condition 求值是其自然扩展（expected=condition，
+    actual=prev_output，criteria="前驱输出是否满足分支条件"）。
+
+    降级：judge 调用失败时返回 True（保守放行，与 executor 兜底一致）。
+    用的 LLMClient 复用 settings 默认配置（condition 求值是低频调用，无需
+    每节点单独的 model_alias 配置）。
+    """
+    from app.domains.evals.judge import judge_llm
+
+    config = _fallback_llm_config(settings.default_llm_model, 0.0)
+    client = LLMClient(config)
+
+    async def _evaluate(condition: str, prev_output: str) -> bool:
+        try:
+            result = await judge_llm(
+                actual=prev_output,
+                expected=condition,
+                client=client,
+                criteria="前驱节点输出是否满足给定的分支条件",
+            )
+            return result.passed
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "A3 condition 求值失败，保守放行（cond=%s）", condition, exc_info=True
+            )
+            return True
+
+    return _evaluate
 
 # ModelConfig.provider 值 → LLMClient 支持的 Provider（Literal["openai","anthropic","local"]）。
 # Azure OpenAI 与 custom 兼容 OpenAI 协议，映射到 "openai"。
@@ -255,20 +327,31 @@ async def execute_agent(
         router.record_usage(result.total_tokens)
     # P0-3：成功执行后按采样率异步记录样本（fire-and-forget，不阻塞响应）。
     # scheduled 触发的 input 是固定字符串，无评估价值，跳过采样。
+    # C5：分层采样——按启发式计算 priority，priority>0 的请求采样率 boost 倍，
+    # 确保长输入 / self-heal 触发 / 低 eval_score 的稀有流量不被均匀采样稀释。
     if (
         result.success
         and request.input != _SCHEDULED_TRIGGER_INPUT
         and settings.online_eval_sample_rate > 0.0
-        and _sample_rng.random() < settings.online_eval_sample_rate
     ):
-        asyncio.create_task(
-            _record_execution_sample(
-                agent_id=agent_id,
-                trigger_source="http",
-                input=request.input,
-                actual_output=result.final_answer,
+        priority = _compute_sample_priority(request.input, result)
+        effective_rate = settings.online_eval_sample_rate
+        if priority > 0:
+            effective_rate = min(
+                settings.online_eval_sample_rate
+                * settings.online_eval_sample_rate_boost,
+                1.0,
             )
-        )
+        if _sample_rng.random() < effective_rate:
+            asyncio.create_task(
+                _record_execution_sample(
+                    agent_id=agent_id,
+                    trigger_source="http",
+                    input=request.input,
+                    actual_output=result.final_answer,
+                    priority=priority,
+                )
+            )
     return result
 
 
@@ -278,11 +361,15 @@ async def _record_execution_sample(
     trigger_source: str,
     input: str,
     actual_output: str,
+    priority: int = 0,
 ) -> None:
     """P0-3：用独立 session 记录执行样本（fire-and-forget task）。
 
     不抛异常出函数——采样失败仅记日志，绝不影响主请求路径
     （observability.spec.md§5：指标/采样不阻塞请求路径）。
+
+    C5：``priority`` 由 ``_compute_sample_priority`` 计算，透传到 EvalSample.priority，
+    供 ``list_samples`` / ``run_online_eval`` 优先选取。
     """
     from app.domains.evals.service import record_sample
 
@@ -295,6 +382,7 @@ async def _record_execution_sample(
                     trigger_source=trigger_source,
                     input=input,
                     actual_output=actual_output,
+                    priority=priority,
                 ),
             )
     except Exception:
@@ -495,7 +583,8 @@ async def execute_workflow(
             await client.close()
 
     return await execute_workflow_dag(
-        workflow_id, wf.nodes, wf.edges, _run_node, request.input
+        workflow_id, wf.nodes, wf.edges, _run_node, request.input,
+        condition_evaluator=_build_condition_evaluator(),
     )
 
 

@@ -496,6 +496,38 @@ def test_agent_tools_to_llm_tools_skips_empty_name() -> None:
     assert _agent_tools_to_llm_tools(tools) == []
 
 
+def test_agent_tools_to_llm_tools_code_rejected_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A2：code 工具默认被拒绝（schema 不注入 LLM）。
+
+    code 工具暴露给 LLM 生成任意代码触发执行——是脚枪。默认
+    AGENT_CODE_TOOL_ENABLED=False 时跳过 schema 注入。
+    """
+    monkeypatch.setattr(
+        "app.core.config.settings.agent_code_tool_enabled", False
+    )
+    tools = [{"name": "exec", "type": "code", "description": "执行任意代码"}]
+    assert _agent_tools_to_llm_tools(tools) == []
+
+
+def test_agent_tools_to_llm_tools_code_allowed_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A2：AGENT_CODE_TOOL_ENABLED=True 时 code 工具透传 schema。
+
+    调用方需自行注入沙箱化 tool_executor，executor 仅放行 schema 注入。
+    """
+    monkeypatch.setattr(
+        "app.core.config.settings.agent_code_tool_enabled", True
+    )
+    tools = [{"name": "exec", "type": "code"}]
+    llm_tools = _agent_tools_to_llm_tools(tools)
+    assert len(llm_tools) == 1
+    assert llm_tools[0].name == "exec"
+    assert "code" in llm_tools[0].parameters["properties"]
+
+
 # ===================== execute_workflow_dag =====================
 
 
@@ -534,6 +566,198 @@ async def test_execute_workflow_dag_too_many_nodes_raises() -> None:
     nodes = [{"id": f"n{i}", "name": f"s{i}", "agent_id": None} for i in range(51)]
     with pytest.raises(ValidationError, match="超 50"):
         await execute_workflow_dag(uuid.uuid4(), nodes, [], lambda *_: None, "input")
+
+
+# ===================== A3+B2：condition 求值 + 拓扑分层并发 =====================
+
+
+async def test_execute_workflow_dag_condition_blocks_branch() -> None:
+    """A3：condition 求值为 False 时后继节点不执行。
+
+    DAG: n1 --(cond="包含错误")--> n2
+    condition_evaluator 返回 False → n2 被跳过，final_answer 仍为 n1 输出。
+    """
+    wf_id = uuid.uuid4()
+    nodes = [
+        {"id": "n1", "name": "step1", "agent_id": None, "is_entry": True},
+        {"id": "n2", "name": "step2", "agent_id": None},
+    ]
+    edges = [{"source": "n1", "target": "n2", "condition": "包含错误"}]
+
+    async def runner(node: dict[str, Any], node_input: str) -> ExecutionResult:
+        return ExecutionResult(
+            agent_id=None,
+            final_answer=f"{node['name']}:{node_input}",
+            total_tokens=5,
+        )
+
+    async def evaluator(cond: str, prev_output: str) -> bool:
+        # 模拟 LLM judge 判定：n1 输出不含"错误"，cond 不满足
+        return "错误" in prev_output
+
+    result = await execute_workflow_dag(
+        wf_id, nodes, edges, runner, "start", condition_evaluator=evaluator
+    )
+
+    # n2 不应被执行
+    assert "step2" not in result.final_answer
+    assert "step1" in result.final_answer
+
+
+async def test_execute_workflow_dag_condition_passes_branch() -> None:
+    """A3：condition 求值为 True 时后继节点正常执行。"""
+    wf_id = uuid.uuid4()
+    nodes = [
+        {"id": "n1", "name": "step1", "agent_id": None, "is_entry": True},
+        {"id": "n2", "name": "step2", "agent_id": None},
+    ]
+    edges = [{"source": "n1", "target": "n2", "condition": "包含错误"}]
+
+    async def runner(node: dict[str, Any], node_input: str) -> ExecutionResult:
+        # n1 输出含"错误"，n2 接收后透传
+        out = "错误发生" if node["id"] == "n1" else f"{node['name']}:{node_input}"
+        return ExecutionResult(
+            agent_id=None,
+            final_answer=out,
+            total_tokens=5,
+        )
+
+    async def evaluator(cond: str, prev_output: str) -> bool:
+        return "错误" in prev_output
+
+    result = await execute_workflow_dag(
+        wf_id, nodes, edges, runner, "start", condition_evaluator=evaluator
+    )
+
+    # n2 应被执行
+    assert "step2" in result.final_answer
+
+
+async def test_execute_workflow_dag_condition_evaluator_none_passthrough() -> None:
+    """A3：condition_evaluator=None 时非空 condition 一律放行（向后兼容）。"""
+    wf_id = uuid.uuid4()
+    nodes = [
+        {"id": "n1", "name": "step1", "agent_id": None, "is_entry": True},
+        {"id": "n2", "name": "step2", "agent_id": None},
+    ]
+    edges = [{"source": "n1", "target": "n2", "condition": "任意条件"}]
+
+    async def runner(node: dict[str, Any], node_input: str) -> ExecutionResult:
+        return ExecutionResult(
+            agent_id=None,
+            final_answer=f"{node['name']}:{node_input}",
+            total_tokens=5,
+        )
+
+    # 不传 condition_evaluator
+    result = await execute_workflow_dag(wf_id, nodes, edges, runner, "start")
+
+    # 旧模式：condition 被忽略，n2 正常执行
+    assert "step2" in result.final_answer
+
+
+async def test_execute_workflow_dag_condition_evaluator_failure_passthrough() -> None:
+    """A3：condition_evaluator 抛异常时保守放行（不漏执行）。"""
+    wf_id = uuid.uuid4()
+    nodes = [
+        {"id": "n1", "name": "step1", "agent_id": None, "is_entry": True},
+        {"id": "n2", "name": "step2", "agent_id": None},
+    ]
+    edges = [{"source": "n1", "target": "n2", "condition": "任意条件"}]
+
+    async def runner(node: dict[str, Any], node_input: str) -> ExecutionResult:
+        return ExecutionResult(
+            agent_id=None,
+            final_answer=f"{node['name']}:{node_input}",
+            total_tokens=5,
+        )
+
+    async def evaluator(cond: str, prev_output: str) -> bool:
+        raise RuntimeError("LLM judge 不可用")
+
+    result = await execute_workflow_dag(
+        wf_id, nodes, edges, runner, "start", condition_evaluator=evaluator
+    )
+
+    # 求值失败 → 保守放行 → n2 执行
+    assert "step2" in result.final_answer
+
+
+async def test_execute_workflow_dag_topological_parallel_layers() -> None:
+    """B2：同层独立节点按拓扑分层并发执行。
+
+    DAG:
+        n1 (entry) → n2
+        n1 → n3
+        n2 → n4
+        n3 → n4
+
+    拓扑分层：[n1], [n2, n3], [n4]
+    n2、n3 在同层应被并发执行（asyncio.gather）。
+    """
+    wf_id = uuid.uuid4()
+    nodes = [
+        {"id": "n1", "name": "step1", "agent_id": None, "is_entry": True},
+        {"id": "n2", "name": "step2", "agent_id": None},
+        {"id": "n3", "name": "step3", "agent_id": None},
+        {"id": "n4", "name": "step4", "agent_id": None},
+    ]
+    edges = [
+        {"source": "n1", "target": "n2"},
+        {"source": "n1", "target": "n3"},
+        {"source": "n2", "target": "n4"},
+        {"source": "n3", "target": "n4"},
+    ]
+
+    executed: list[str] = []
+
+    async def runner(node: dict[str, Any], node_input: str) -> ExecutionResult:
+        executed.append(node["id"])
+        return ExecutionResult(
+            agent_id=None,
+            final_answer=f"{node['name']}:{node_input}",
+            total_tokens=5,
+        )
+
+    result = await execute_workflow_dag(wf_id, nodes, edges, runner, "start")
+
+    # 所有节点都应被执行
+    assert set(executed) == {"n1", "n2", "n3", "n4"}
+    # n1 最先，n4 最后
+    assert executed[0] == "n1"
+    assert executed[-1] == "n4"
+    # n4 输入应包含 n2 或 n3 的输出
+    assert "step4" in result.final_answer
+
+
+async def test_execute_workflow_dag_sync_condition_evaluator_supported() -> None:
+    """A3：condition_evaluator 也支持 sync callable（测试 stub 友好）。
+
+    executor 用 asyncio.iscoroutine 判断结果，sync 函数返回 bool 直接使用。
+    """
+    wf_id = uuid.uuid4()
+    nodes = [
+        {"id": "n1", "name": "step1", "agent_id": None, "is_entry": True},
+        {"id": "n2", "name": "step2", "agent_id": None},
+    ]
+    edges = [{"source": "n1", "target": "n2", "condition": "sync cond"}]
+
+    async def runner(node: dict[str, Any], node_input: str) -> ExecutionResult:
+        return ExecutionResult(
+            agent_id=None,
+            final_answer=f"{node['name']}:{node_input}",
+            total_tokens=5,
+        )
+
+    # sync evaluator
+    def sync_evaluator(cond: str, prev_output: str) -> bool:
+        return True
+
+    result = await execute_workflow_dag(
+        wf_id, nodes, edges, runner, "start", condition_evaluator=sync_evaluator
+    )
+
+    assert "step2" in result.final_answer
 
 
 # ===================== P3-11：自主运维（自评 + 自愈合） =====================
@@ -1066,3 +1290,163 @@ async def test_run_stream_max_turns_yields_done_with_success_false() -> None:
     assert len(done_events) == 1
     result = done_events[0]["result"]
     assert result.success is False
+
+
+# ===================== B4：context 压缩（按 token 数 + 记入 traces） =====================
+
+
+def test_estimate_tokens_sums_content_and_overhead() -> None:
+    """B4：_estimate_tokens 按 len/4 + 每条 4 overhead 估算。"""
+    from app.domains.agents.executor import _estimate_tokens
+
+    # 空消息列表 → 0
+    assert _estimate_tokens([]) == 0
+    # 单条 8 字符 → 8//4 + 4 = 6
+    msgs = [Message(role="user", content="12345678")]
+    assert _estimate_tokens(msgs) == 6
+    # 多条累加
+    msgs = [
+        Message(role="system", content="abcd"),  # 4//4 + 4 = 5
+        Message(role="user", content="abcdefgh"),  # 8//4 + 4 = 6
+    ]
+    assert _estimate_tokens(msgs) == 11
+
+
+async def test_compress_context_triggers_on_token_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B4：messages 累积 token 超阈值时触发压缩，并在 traces 记录压缩事件。"""
+    from app.core.config import settings as _settings
+
+    # 阈值设为极低，确保 7+ 条消息必然触发
+    monkeypatch.setattr(_settings, "agent_context_compress_tokens", 50)
+
+    # 构造 10 条消息（每条 ~20 token），总 token ~200 远超阈值 50
+    msgs = [Message(role="system", content="你是助手")]
+    for i in range(9):
+        msgs.append(Message(role="user", content=f"这是第 {i} 条足够长的消息内容用于触发压缩"))
+
+    # mock LLM 返回摘要
+    call_idx = {"n": 0}
+
+    async def fake_chat(messages, tools=None, response_format=None):
+        call_idx["n"] += 1
+        return LLMResponse(content="这是历史摘要", usage={"total_tokens": 30})
+
+    stub = MagicMock(spec=LLMClient)
+    stub.chat = fake_chat
+    stub.close = AsyncMock()
+
+    executor = AgentExecutor(stub)
+    traces: list = []
+    new_msgs = await executor._compress_context(msgs, turn=1, traces=traces)
+
+    # 压缩被触发：LLM 调用 1 次
+    assert call_idx["n"] == 1
+    # 消息数减少（10 → head 1 + summary 1 + tail 6 = 8）
+    assert len(new_msgs) < len(msgs)
+    # traces 记录了压缩事件
+    assert len(traces) == 1
+    assert traces[0].turn == 1
+    assert traces[0].thought == "[context_compressed]"
+    assert "tokens" in traces[0].observation
+    assert "messages" in traces[0].observation
+    assert traces[0].tokens == 30  # 摘要调用 token
+
+
+async def test_compress_context_skips_when_below_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B4：messages token 未超阈值时不压缩（run 循环的判断逻辑）。"""
+    from app.core.config import settings as _settings
+    from app.domains.agents.executor import _estimate_tokens
+
+    # 阈值很高，正常消息不触发
+    monkeypatch.setattr(_settings, "agent_context_compress_tokens", 100000)
+    agent = _make_agent(system_prompt="助手", max_turns=3)
+    mock_llm = _make_mock_llm([
+        LLMResponse(content="ok", usage={"total_tokens": 5}),
+    ])
+    executor = AgentExecutor(mock_llm)
+    result = await executor.run(agent, "hi")
+
+    # 没有压缩事件 trace（只有 1 条最终答案 trace）
+    assert len(result.traces) == 1
+    assert result.traces[0].thought != "[context_compressed]"
+    assert _estimate_tokens([]) == 0  # sanity
+
+
+async def test_compress_context_fallback_on_llm_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B4：摘要 LLM 调用失败时降级为截断（head + tail），仍记 trace。"""
+    from app.core.config import settings as _settings
+
+    monkeypatch.setattr(_settings, "agent_context_compress_tokens", 50)
+
+    msgs = [Message(role="system", content="sys")]
+    for i in range(9):
+        msgs.append(Message(role="user", content=f"消息 {i} " * 20))
+
+    async def fake_chat(messages, tools=None, response_format=None):
+        raise RuntimeError("LLM 不可用")
+
+    stub = MagicMock(spec=LLMClient)
+    stub.chat = fake_chat
+    stub.close = AsyncMock()
+
+    executor = AgentExecutor(stub)
+    traces: list = []
+    new_msgs = await executor._compress_context(msgs, turn=2, traces=traces)
+
+    # 降级为截断：head 1 + tail 6 = 7 条
+    assert len(new_msgs) == 7
+    # 仍记 trace（标注降级，tokens=0）
+    assert len(traces) == 1
+    assert traces[0].thought == "[context_compressed]"
+    assert traces[0].turn == 2
+    assert traces[0].tokens == 0
+    # observation 仍记 before/after 统计
+    assert "messages" in traces[0].observation
+
+
+async def test_run_records_compression_trace_in_traces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B4：run() 在压缩触发时把压缩事件混入 result.traces。
+
+    流程：第 1 轮工具调用累积消息（system+user+assistant+tool=4 条），
+    第 2 轮开始时 4 条消息 token 超阈值 → 触发压缩 → 记 trace → 最终答案。
+    """
+    from app.core.config import settings as _settings
+
+    # 低阈值确保第 2 轮 4 条消息必然超阈值（4 条 × 4 overhead = 16 token 起步）
+    monkeypatch.setattr(_settings, "agent_context_compress_tokens", 10)
+
+    agent = _make_agent(
+        tools=[{"name": "calc", "type": "calculator"}],
+        max_turns=3,
+    )
+    # 第 1 次 chat = ReAct 第 1 轮返回工具调用
+    # 第 2 次 chat = 第 2 轮开始时的压缩摘要调用
+    # 第 3 次 chat = ReAct 第 2 轮返回最终答案
+    mock_llm = _make_mock_llm([
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="t1", name="calc", args={"expr": "1+1"})],
+            usage={"total_tokens": 5},
+        ),
+        LLMResponse(content="压缩摘要", usage={"total_tokens": 8}),
+        LLMResponse(content="最终答案", usage={"total_tokens": 5}),
+    ])
+
+    executor = AgentExecutor(mock_llm, tool_executor=_StubToolExecutor({"calc": "2"}))
+    result = await executor.run(agent, "算 1+1")
+
+    # traces 包含：工具调用轮 + 压缩事件 + 最终答案轮
+    thoughts = [t.thought for t in result.traces]
+    assert "[context_compressed]" in thoughts
+    # 压缩事件应在工具调用之后、最终答案之前
+    compress_idx = thoughts.index("[context_compressed]")
+    assert compress_idx == 1  # [0]=工具调用, [1]=压缩, [2]=最终答案
+    assert result.final_answer == "最终答案"

@@ -60,6 +60,15 @@
 - `judge.py`：`JudgeResult`(passed/score/reason)、`judge_exact`、`judge_contains`、`judge_llm`(async, 解析 JSON)、`judge_semantic`(async, 复用 `embed_text` + 余弦)、`_normalize`（去多余空白 + lower）、`_cosine`
 - service 关键行为：`create_eval` 写入 pending run；`run_eval` 置 running → 遍历 cases 调 `_predict` + `_judge_case` → 写 results/pass_count/fail_count/score → 置 passed/failed；`_predict` 默认回退 `case.actual` 或 `case.expected`；任一 case 判定抛异常时 `run.status=error`、`finished_at=now()` 并重新抛出
 
+> **C5 分层采样**：`EvalSample` ORM 新增 `priority` 列（默认 0，索引
+> `idx_eval_samples_priority`）。`execute_agent` 采样钩子按启发式计算 priority：
+> 长输入（>`online_eval_priority_input_len_threshold`）/ self-heal 触发 /
+> eval_score<0.7 各 +1。priority>0 的样本采样率放大
+> `online_eval_sample_rate_boost` 倍（`effective_rate = min(base * boost, 1.0)`），
+> 确保稀有但易暴露回归的流量不被均匀采样稀释。`list_samples` 支持 `priority_min`
+> 过滤 + `priority DESC, sampled_at DESC` 排序；`run_online_eval` 按 priority DESC
+> 选取，先评高价值样本。迁移 `0007_add_eval_sample_priority`。
+
 ## API Endpoints
 前缀 `/api/v1/evals`
 

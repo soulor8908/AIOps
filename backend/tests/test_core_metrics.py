@@ -106,6 +106,36 @@ def test_record_llm_usage_negative_skipped() -> None:
     assert metrics.get_counter("llm_cost", ("gpt-4o",)) == 0.0
 
 
+def test_record_llm_usage_cached_tokens() -> None:
+    """C4：cached_tokens 累加到 llm_cached_tokens{model}，且与 input 独立记录。"""
+    metrics.record_llm_usage(
+        "gpt-4o", input_tokens=100, output_tokens=50, cached_tokens=60
+    )
+    metrics.record_llm_usage(
+        "gpt-4o", input_tokens=200, output_tokens=80, cached_tokens=40
+    )
+
+    # cached_tokens 单独累加
+    assert metrics.get_counter("llm_cached_tokens", ("gpt-4o",)) == 100
+    # input_tokens 仍是完整 prompt_tokens（不从 input 中扣除 cached）
+    assert metrics.get_counter("llm_tokens", ("gpt-4o", "in")) == 300
+    assert metrics.get_counter("llm_tokens", ("gpt-4o", "out")) == 130
+
+
+def test_record_llm_usage_zero_cached_tokens_skipped() -> None:
+    """C4：cached_tokens=0 不创建 counter（保持向后兼容）。"""
+    metrics.record_llm_usage("gpt-4o", input_tokens=100)  # cached_tokens 默认 0
+    assert metrics.get_counter("llm_cached_tokens", ("gpt-4o",)) == 0.0
+
+
+def test_record_llm_usage_cached_tokens_in_prometheus() -> None:
+    """C4：llm_cached_tokens 出现在 Prometheus 导出。"""
+    metrics.record_llm_usage("gpt-4o", input_tokens=100, cached_tokens=50)
+    out = metrics.render_prometheus()
+    assert "# TYPE llm_cached_tokens counter" in out
+    assert 'llm_cached_tokens{model="gpt-4o"} 50' in out
+
+
 # ===================== record_llm_error =====================
 
 def test_record_llm_error_increments_counter() -> None:

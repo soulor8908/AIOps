@@ -52,6 +52,9 @@ from app.main import app
 # 强制无 LLM API key，避免 embedder / LLMClient 发起真实网络请求。
 settings.openai_api_key = ""
 settings.anthropic_api_key = ""
+# B3：测试默认单次采样（与旧行为一致），避免 mock LLM 序列因 3x 采样错位。
+# 测试采样逻辑的用例自行 monkeypatch 覆盖。
+settings.agent_self_eval_samples = 1
 # debug=False 使 Starlette ServerErrorMiddleware 走自定义 Exception handler
 # 而非明文 traceback（errors.spec.md§5.4）。建表由 lifespan 无条件执行。
 settings.debug = False

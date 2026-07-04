@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from app.core.failure_cluster import (
     FailureCluster,
     FailureClusterer,
+    FailureDLQ,
     FailureRecord,
     cosine_distance,
 )
@@ -260,3 +261,168 @@ async def test_record_failure_safely_enabled_creates_task(
     _record_failure_safely("tool error", {"tool": "t"})
     # 等待 task 完成
     await asyncio.wait_for(add_called.wait(), timeout=1.0)
+
+
+# ===================== 6. C6 SQLite DLQ =====================
+
+
+async def test_dlq_enqueue_and_count() -> None:
+    """C6：DLQ enqueue 后 count 增长，未 embed 计数同步。"""
+    dlq = FailureDLQ(":memory:")
+    try:
+        assert await dlq.count() == 0
+        rid = uuid.uuid4()
+        await dlq.enqueue(rid, "error msg", {"tool": "t"}, 1000.0)
+        assert await dlq.count() == 1
+        assert await dlq.count_unembedded() == 1
+    finally:
+        await dlq.close()
+
+
+async def test_dlq_mark_embedded_reduces_unembedded() -> None:
+    """C6：mark_embedded 后未 embed 计数减少。"""
+    dlq = FailureDLQ(":memory:")
+    try:
+        rid = uuid.uuid4()
+        await dlq.enqueue(rid, "error", {}, 1000.0)
+        assert await dlq.count_unembedded() == 1
+
+        await dlq.mark_embedded(rid, [0.1, 0.2, 0.3])
+        assert await dlq.count_unembedded() == 0
+        assert await dlq.count() == 1  # 总数不变
+    finally:
+        await dlq.close()
+
+
+async def test_dlq_get_unembedded_returns_oldest_first() -> None:
+    """C6：get_unembedded 按时间升序返回。"""
+    dlq = FailureDLQ(":memory:")
+    try:
+        await dlq.enqueue(uuid.uuid4(), "newer", {}, 2000.0)
+        await dlq.enqueue(uuid.uuid4(), "older", {}, 1000.0)
+        pending = await dlq.get_unembedded()
+        assert len(pending) == 2
+        assert pending[0]["message"] == "older"
+        assert pending[1]["message"] == "newer"
+    finally:
+        await dlq.close()
+
+
+async def test_clusterer_with_dlq_persists_records() -> None:
+    """C6：add 写入 DLQ，embed 成功后标记 embedded。"""
+    dlq = FailureDLQ(":memory:")
+    clusterer = FailureClusterer(dlq=dlq)
+    try:
+        await clusterer.add("tool timeout", {"tool": "search"})
+        # DLQ 有 1 条记录，已 embed
+        assert await dlq.count() == 1
+        assert await dlq.count_unembedded() == 0
+        # 内存缓冲也有 1 条
+        assert clusterer.record_count == 1
+    finally:
+        await dlq.close()
+
+
+async def test_clusterer_without_dlq_backward_compatible() -> None:
+    """C6：dlq=None 时退化为纯内存，行为与历史一致。"""
+    clusterer = FailureClusterer()  # dlq 默认 None
+    record = await clusterer.add("error msg", {"k": "v"})
+    assert record.message == "error msg"
+    assert clusterer.record_count == 1
+    # replay_dlq 在无 DLQ 时返回 0
+    assert await clusterer.replay_dlq() == 0
+
+
+async def test_replay_dlq_retries_unembedded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C6：DLQ 中有 unembedded 记录 → replay embed 成功 → 加入缓冲 + 标记。
+
+    模拟场景：进程崩溃前 embed 未完成，DLQ 留下 embedded=0 的记录。
+    重启后 replay_dlq 重新 embed，成功后加入内存缓冲。
+    """
+    import app.core.failure_cluster as fc_mod
+
+    dlq = FailureDLQ(":memory:")
+    clusterer = FailureClusterer(dlq=dlq)
+    try:
+        # 直接入队一条 unembedded 记录（模拟 add 崩溃后遗留）
+        rid = uuid.uuid4()
+        await dlq.enqueue(rid, "crash leftover error", {"tool": "x"}, 1000.0)
+        assert await dlq.count_unembedded() == 1
+
+        # mock embed_text 返回有效向量
+        async def _ok_embed(text: str) -> list[float]:
+            return [0.5, 0.5]
+
+        monkeypatch.setattr(fc_mod, "embed_text", _ok_embed)
+
+        replayed = await clusterer.replay_dlq()
+        assert replayed == 1
+        assert await dlq.count_unembedded() == 0
+        assert clusterer.record_count == 1
+    finally:
+        await dlq.close()
+
+
+async def test_replay_dlq_skips_still_failing_embeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C6：replay 时 embed 仍失败 → 跳过，记录留在 DLQ 待下次重试。"""
+    import app.core.failure_cluster as fc_mod
+
+    dlq = FailureDLQ(":memory:")
+    clusterer = FailureClusterer(dlq=dlq)
+    try:
+        await dlq.enqueue(uuid.uuid4(), "persistently failing", {}, 1000.0)
+
+        async def _always_fail(text: str) -> list[float]:
+            raise RuntimeError("embed still down")
+
+        monkeypatch.setattr(fc_mod, "embed_text", _always_fail)
+
+        replayed = await clusterer.replay_dlq()
+        assert replayed == 0
+        # 记录仍在 DLQ，embedded=0
+        assert await dlq.count_unembedded() == 1
+        assert clusterer.record_count == 0
+    finally:
+        await dlq.close()
+
+
+async def test_get_failure_clusterer_with_dlq_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C6：settings 配置 dlq_path 时单例注入 DLQ。"""
+    import app.core.failure_cluster as fc_mod
+    from app.core.config import settings
+
+    # 重置单例
+    monkeypatch.setattr(fc_mod, "_singleton", None)
+    monkeypatch.setattr(settings, "agent_failure_cluster_dlq_path", ":memory:")
+
+    clusterer = fc_mod.get_failure_clusterer()
+    assert clusterer._dlq is not None
+    assert isinstance(clusterer._dlq, FailureDLQ)
+
+    # 清理：关闭 DLQ 连接 + 重置单例
+    if clusterer._dlq is not None:
+        await clusterer._dlq.close()
+    monkeypatch.setattr(fc_mod, "_singleton", None)
+    monkeypatch.setattr(settings, "agent_failure_cluster_dlq_path", "")
+
+
+async def test_get_failure_clusterer_without_dlq_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C6：settings dlq_path 为空时单例无 DLQ（纯内存）。"""
+    import app.core.failure_cluster as fc_mod
+    from app.core.config import settings
+
+    monkeypatch.setattr(fc_mod, "_singleton", None)
+    monkeypatch.setattr(settings, "agent_failure_cluster_dlq_path", "")
+
+    clusterer = fc_mod.get_failure_clusterer()
+    assert clusterer._dlq is None
+
+    monkeypatch.setattr(fc_mod, "_singleton", None)

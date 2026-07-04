@@ -761,3 +761,270 @@ def test_execute_agent_no_sampling_when_rate_zero(
     _run(client, _scenario)
 
     assert call_count == 0
+
+
+# ===================== 8. C5 分层采样 + 优先策略 =====================
+
+
+def test_compute_sample_priority_heuristics() -> None:
+    """C5：_compute_sample_priority 按启发式累加优先级。
+
+    - 短输入 + 无 heal + 无 eval_score → 0
+    - 长输入 → +1
+    - heal_attempts > 0 → +1
+    - eval_score < 0.7 → +1
+    - 三者叠加 → 3
+    """
+    from app.domains.agents.models import ExecutionResult
+    from app.domains.agents.service import _compute_sample_priority
+
+    # 0：短输入 + 无 heal + 无 eval_score
+    r0 = ExecutionResult(final_answer="ok", success=True)
+    assert _compute_sample_priority("短", r0) == 0
+
+    # +1：长输入（超过默认阈值 200）
+    long_input = "x" * 250
+    r1 = ExecutionResult(final_answer="ok", success=True)
+    assert _compute_sample_priority(long_input, r1) == 1
+
+    # +1：heal_attempts > 0
+    r2 = ExecutionResult(final_answer="ok", success=True, heal_attempts=2)
+    assert _compute_sample_priority("短", r2) == 1
+
+    # +1：eval_score < 0.7
+    r3 = ExecutionResult(final_answer="ok", success=True, eval_score=0.3)
+    assert _compute_sample_priority("短", r3) == 1
+
+    # eval_score == 0.7 不加分（边界：< 0.7 才加）
+    r3b = ExecutionResult(final_answer="ok", success=True, eval_score=0.7)
+    assert _compute_sample_priority("短", r3b) == 0
+
+    # +3：三者叠加
+    r4 = ExecutionResult(
+        final_answer="ok", success=True, heal_attempts=1, eval_score=0.1
+    )
+    assert _compute_sample_priority(long_input, r4) == 3
+
+
+def test_record_sample_persists_priority(client: TestClient) -> None:
+    """C5：record_sample 持久化 priority 字段。"""
+
+    async def _scenario(session: AsyncSession) -> None:
+        sample = await eval_service.record_sample(
+            session,
+            EvalSampleCreate(
+                input="q", actual_output="a", priority=3,
+            ),
+        )
+        assert sample.priority == 3
+
+        # 默认 priority=0
+        s2 = await eval_service.record_sample(
+            session, EvalSampleCreate(input="q2", actual_output="a2")
+        )
+        assert s2.priority == 0
+
+    _run(client, _scenario)
+
+
+def test_list_samples_priority_ordering(client: TestClient) -> None:
+    """C5：list_samples 按 priority DESC, sampled_at DESC 排序。"""
+
+    async def _scenario(session: AsyncSession) -> None:
+        # 先插低优先级，再插高优先级（sampled_at 自然递增）
+        await eval_service.record_sample(
+            session, EvalSampleCreate(input="low1", actual_output="a", priority=0)
+        )
+        await eval_service.record_sample(
+            session, EvalSampleCreate(input="high1", actual_output="a", priority=2)
+        )
+        await eval_service.record_sample(
+            session, EvalSampleCreate(input="low2", actual_output="a", priority=0)
+        )
+        await eval_service.record_sample(
+            session, EvalSampleCreate(input="high2", actual_output="a", priority=1)
+        )
+
+        samples = await eval_service.list_samples(session)
+        # priority DESC：high1(2) > high2(1) > low2(0) ≈ low1(0)
+        # 同 priority 内 sampled_at DESC：low2 在 low1 前
+        assert samples[0].input == "high1"
+        assert samples[1].input == "high2"
+        assert samples[2].input == "low2"
+        assert samples[3].input == "low1"
+
+    _run(client, _scenario)
+
+
+def test_list_samples_priority_min_filter(client: TestClient) -> None:
+    """C5：list_samples priority_min 过滤。"""
+
+    async def _scenario(session: AsyncSession) -> None:
+        await eval_service.record_sample(
+            session, EvalSampleCreate(input="p0", actual_output="a", priority=0)
+        )
+        await eval_service.record_sample(
+            session, EvalSampleCreate(input="p1", actual_output="a", priority=1)
+        )
+        await eval_service.record_sample(
+            session, EvalSampleCreate(input="p2", actual_output="a", priority=2)
+        )
+
+        high = await eval_service.list_samples(session, priority_min=1)
+        assert {s.input for s in high} == {"p1", "p2"}
+
+    _run(client, _scenario)
+
+
+def test_execute_agent_stratified_sampling_boosts_high_priority(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C5：base_rate=0.1 + 长输入(priority>0) → effective_rate=0.5，采样被 boost。
+
+    mock rng 返回 0.3：base_rate=0.1 时不采样（0.3 > 0.1），但 boost 后
+    effective_rate=0.5（0.3 < 0.5）采样命中。验证高优先级请求被分层 boost。
+    """
+    import uuid as _uuid
+
+    from app.domains.agents import service as agent_service
+    from app.domains.agents.models import Agent, ExecuteRequest, ExecutionResult
+
+    # base_rate=0.1, boost=5.0 → effective_rate=0.5 for priority>0
+    monkeypatch.setattr(agent_service.settings, "online_eval_sample_rate", 0.1)
+    monkeypatch.setattr(agent_service.settings, "online_eval_sample_rate_boost", 5.0)
+    # rng=0.3：0.3 > 0.1（base 不命中），0.3 < 0.5（boost 命中）
+    monkeypatch.setattr(agent_service, "_sample_rng", MagicMock(random=lambda: 0.3))
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_record(*args: Any, **kwargs: Any) -> Any:
+        # record_sample(session, EvalSampleCreate) — priority 在 payload 内
+        payload = args[1] if len(args) > 1 else kwargs.get("payload")
+        if payload is not None:
+            captured["priority"] = getattr(payload, "priority", None)
+            captured["input"] = getattr(payload, "input", None)
+        return MagicMock()
+
+    monkeypatch.setattr(
+        "app.domains.evals.service.record_sample", _fake_record
+    )
+
+    class _FakeAsyncCtx:
+        async def __aenter__(self) -> AsyncSession:
+            self.session = AsyncMock(spec=AsyncSession)
+            return self.session
+
+        async def __aexit__(self, *args: Any) -> None:
+            pass
+
+    def _fake_session_local() -> _FakeAsyncCtx:
+        return _FakeAsyncCtx()
+
+    monkeypatch.setattr(agent_service, "AsyncSessionLocal", _fake_session_local)
+
+    agent = Agent(
+        id=_uuid.uuid4(), name="stratified", system_prompt="x",
+        model_alias="default", tools=[], max_turns=1, temperature=0.7,
+        is_active=True,
+    )
+
+    async def _scenario(session: AsyncSession) -> None:
+        monkeypatch.setattr(
+            agent_service, "get_agent", AsyncMock(return_value=agent)
+        )
+        from app.core.llm_client import LLMConfig
+
+        monkeypatch.setattr(
+            agent_service, "_build_llm_config",
+            AsyncMock(return_value=LLMConfig(provider="openai", model="m", api_key="k")),
+        )
+        mock_llm = MagicMock()
+        mock_llm.close = AsyncMock()
+        monkeypatch.setattr(agent_service, "LLMClient", lambda cfg: mock_llm)
+        mock_executor = MagicMock()
+        mock_executor.run = AsyncMock(
+            return_value=ExecutionResult(
+                agent_id=agent.id, final_answer="ans", success=True, total_tokens=1,
+            )
+        )
+        monkeypatch.setattr(
+            agent_service, "AgentExecutor", lambda *a, **kw: mock_executor
+        )
+
+        # 长输入（>200 字符）→ priority=1 → boost 采样
+        long_input = "请详细分析" + "x" * 250
+        await agent_service.execute_agent(
+            session, agent.id, ExecuteRequest(input=long_input)
+        )
+        import asyncio
+
+        await asyncio.sleep(0.05)
+
+    _run(client, _scenario)
+
+    # 高优先级请求被 boost 采样命中
+    assert captured.get("priority") == 1
+    assert captured.get("input") is not None
+
+
+def test_run_online_eval_selects_high_priority_first(
+    client: TestClient
+) -> None:
+    """C5：run_online_eval 无 sample_ids 时按 priority DESC 选取，高优先级先 judge。
+
+    插入 3 条未 judged 样本（priority 0/1/2），golden 匹配全部命中，
+    limit=500 全选。拦截 _judge_case 提取 case["input"]，映射回 priority，
+    验证 judge 顺序为 priority 2 → 1 → 0。
+    """
+    judged_inputs: list[str] = []
+
+    async def _scenario(session: AsyncSession) -> None:
+        # 三条样本，input 与 golden cases 匹配（exact judge）
+        prio_map = {"q0": 0, "q1": 1, "q2": 2}
+        for inp, prio in prio_map.items():
+            await eval_service.record_sample(
+                session,
+                EvalSampleCreate(
+                    input=inp, actual_output=f"a{inp[1]}", priority=prio,
+                ),
+            )
+
+        await _seed_golden_run(
+            session,
+            name="golden-c5",
+            cases=[
+                {"name": "c0", "input": "q0", "expected": "a0"},
+                {"name": "c1", "input": "q1", "expected": "a1"},
+                {"name": "c2", "input": "q2", "expected": "a2"},
+            ],
+        )
+
+        # 拦截 _judge_case 提取 case["input"] 记录评估顺序
+        original_judge = eval_service._judge_case
+
+        async def _tracking_judge(*args: Any, **kwargs: Any) -> Any:
+            # _judge_case(judge_type, case_dict, actual, llm_client)
+            case = args[1] if len(args) > 1 else kwargs.get("case")
+            if isinstance(case, dict) and "input" in case:
+                judged_inputs.append(case["input"])
+            return await original_judge(*args, **kwargs)
+
+        import pytest as _pytest
+
+        mp = _pytest.MonkeyPatch()
+        mp.setattr(eval_service, "_judge_case", _tracking_judge)
+        try:
+            await eval_service.run_online_eval(
+                session,
+                OnlineEvalRequest(
+                    golden_run_name="golden-c5",
+                    judge_type=JudgeType.EXACT,
+                ),
+            )
+        finally:
+            mp.undo()
+
+    _run(client, _scenario)
+
+    # priority DESC 顺序：q2(2) → q1(1) → q0(0)
+    assert judged_inputs == ["q2", "q1", "q0"]

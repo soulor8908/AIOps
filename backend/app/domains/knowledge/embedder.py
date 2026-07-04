@@ -1,6 +1,9 @@
 """向量化封装 — 调用 OpenAI Embeddings API。
 
-失败回退零向量（保证文档上传不中断，向量检索时零向量自然排末位）。
+默认失败回退零向量（保证检索路径不中断，零向量自然排末位）。
+A4：``strict=True`` 模式下失败抛 ``EmbeddingError``，用于文档上传路径——
+失败时 ``upload_document`` 据此将 ``Document.status`` 置为 ``failed`` 并跳过
+chunk 写入，避免零向量污染向量索引。
 
 P3：共享 ``httpx.AsyncClient`` 单例（原每次调用新建客户端，大文档批量向量化时
 多次 TCP 握手 + TLS 协商）。应用关闭时由 ``close_embedder_client`` 释放。
@@ -18,6 +21,7 @@ import logging
 import httpx
 
 from app.core.config import settings
+from app.core.exceptions import EmbeddingError
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +66,19 @@ async def close_embedder_client() -> None:
         _client = None
 
 
-async def embed_text(text: str, model: str = DEFAULT_EMBEDDING_MODEL) -> list[float]:
-    """对单段文本向量化。失败返回零向量（维度按模型注册表推断）。"""
+async def embed_text(
+    text: str, model: str = DEFAULT_EMBEDDING_MODEL, *, strict: bool = False
+) -> list[float]:
+    """对单段文本向量化。
+
+    默认失败回退零向量（检索路径友好，零向量自然排末位）。
+    A4：``strict=True`` 时失败抛 ``EmbeddingError``，用于文档上传路径——
+    调用方据此将 ``Document.status`` 置为 ``failed`` 并跳过 chunk 写入。
+    """
     dim = get_embedding_dim(model)
     if not settings.openai_api_key:
+        if strict:
+            raise EmbeddingError("OPENAI_API_KEY 未配置，无法向量化")
         logger.warning("OPENAI_API_KEY 未配置，返回零向量")
         return _zero_vector(dim)
     try:
@@ -79,21 +92,28 @@ async def embed_text(text: str, model: str = DEFAULT_EMBEDDING_MODEL) -> list[fl
         data = resp.json()
         return list(map(float, data["data"][0]["embedding"]))
     except (httpx.HTTPError, KeyError, IndexError) as exc:
-        logger.error("向量化失败，回退零向量: %s", exc)
+        logger.error("向量化失败: %s", exc)
+        if strict:
+            raise EmbeddingError(f"向量化失败: {exc}") from exc
         return _zero_vector(dim)
 
 
 async def embed_batch(
-    texts: list[str], model: str = DEFAULT_EMBEDDING_MODEL
+    texts: list[str], model: str = DEFAULT_EMBEDDING_MODEL, *, strict: bool = False
 ) -> list[list[float]]:
     """批量向量化。单次 API 调用批量传入（OpenAI 单次限 2048 输入）。
 
-    失败的批次回退零向量，保证文档上传不中断。
+    默认失败的批次回退零向量，保证检索路径不中断。
+    A4：``strict=True`` 时任一批次失败即抛 ``EmbeddingError``，用于文档上传
+    路径——调用方据此将 ``Document.status`` 置为 ``failed`` 并跳过 chunk 写入，
+    避免部分零向量 chunk 污染索引。
     """
     if not texts:
         return []
     dim = get_embedding_dim(model)
     if not settings.openai_api_key:
+        if strict:
+            raise EmbeddingError("OPENAI_API_KEY 未配置，无法向量化")
         logger.warning("OPENAI_API_KEY 未配置，返回零向量")
         return [_zero_vector(dim) for _ in texts]
     out: list[list[float] | None] = [None] * len(texts)
@@ -112,7 +132,9 @@ async def embed_batch(
             for i, item in enumerate(data["data"]):
                 out[start + i] = list(map(float, item["embedding"]))
         except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
-            logger.error("批量向量化失败，回退零向量: %s", exc)
+            logger.error("批量向量化失败: %s", exc)
+            if strict:
+                raise EmbeddingError(f"批量向量化失败: {exc}") from exc
     return [vec if vec is not None else _zero_vector(dim) for vec in out]
 
 

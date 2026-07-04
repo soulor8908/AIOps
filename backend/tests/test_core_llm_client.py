@@ -1250,3 +1250,136 @@ def test_assemble_tool_calls_malformed_args_yields_empty_dict() -> None:
 def test_assemble_tool_calls_empty_acc() -> None:
     """空 acc 返回空列表。"""
     assert _assemble_tool_calls({}) == []
+
+
+# ===================== C4 prompt cache cached_tokens 指标 =====================
+
+
+async def test_llm_client_records_openai_cached_tokens() -> None:
+    """C4：OpenAI prompt_tokens_details.cached_tokens 被记入 llm_cached_tokens。"""
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    try:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "total_tokens": 150,
+                    "prompt_tokens_details": {"cached_tokens": 60},
+                },
+            })
+
+        config = LLMConfig(provider="openai", model="gpt-4o-cache", api_key="k")
+        client = _make_client(config, handler, max_retries=0)
+        try:
+            await client.chat([Message(role="user", content="hi")])
+        finally:
+            await client.close()
+
+        # cached_tokens 单独记入 llm_cached_tokens{model}
+        assert metrics.get_counter(
+            "llm_cached_tokens", ("gpt-4o-cache",)
+        ) == 60
+        # input_tokens 仍是完整 prompt_tokens（不从 input 中扣除 cached）
+        assert metrics.get_counter(
+            "llm_tokens", ("gpt-4o-cache", "in")
+        ) == 100
+    finally:
+        metrics.reset()
+
+
+async def test_llm_client_records_anthropic_cached_tokens() -> None:
+    """C4：Anthropic cache_read_input_tokens 被记入 llm_cached_tokens。"""
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    try:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "content": [{"type": "text", "text": "hi"}],
+                "usage": {
+                    "input_tokens": 200,
+                    "output_tokens": 30,
+                    "cache_read_input_tokens": 120,
+                },
+            })
+
+        config = LLMConfig(
+            provider="anthropic", model="claude-cache", api_key="k"
+        )
+        client = _make_client(config, handler, max_retries=0)
+        try:
+            await client.chat([Message(role="user", content="hi")])
+        finally:
+            await client.close()
+
+        assert metrics.get_counter(
+            "llm_cached_tokens", ("claude-cache",)
+        ) == 120
+        assert metrics.get_counter(
+            "llm_tokens", ("claude-cache", "in")
+        ) == 200
+    finally:
+        metrics.reset()
+
+
+async def test_llm_client_no_cache_field_records_zero_cached_tokens() -> None:
+    """C4：usage 无 cache 字段时 llm_cached_tokens 不增长（保持向后兼容）。"""
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    try:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            })
+
+        config = LLMConfig(provider="openai", model="gpt-4o-nocache", api_key="k")
+        client = _make_client(config, handler, max_retries=0)
+        try:
+            await client.chat([Message(role="user", content="hi")])
+        finally:
+            await client.close()
+
+        # 无 cache 字段 → counter 未被创建，get_counter 返回默认 0.0
+        assert metrics.get_counter(
+            "llm_cached_tokens", ("gpt-4o-nocache",)
+        ) == 0.0
+    finally:
+        metrics.reset()
+
+
+async def test_llm_client_null_prompt_tokens_details_handled() -> None:
+    """C4：prompt_tokens_details 为 null 不抛异常，cached_tokens 记 0。"""
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    try:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "prompt_tokens_details": None,
+                },
+            })
+
+        config = LLMConfig(provider="openai", model="gpt-4o-null", api_key="k")
+        client = _make_client(config, handler, max_retries=0)
+        try:
+            await client.chat([Message(role="user", content="hi")])
+        finally:
+            await client.close()
+
+        # None 不应抛异常，cached_tokens 记 0
+        assert metrics.get_counter(
+            "llm_cached_tokens", ("gpt-4o-null",)
+        ) == 0.0
+    finally:
+        metrics.reset()
+

@@ -100,6 +100,17 @@ class Settings(BaseSettings):
     online_eval_sample_rate: float = Field(
         default=0.0, alias="ONLINE_EVAL_SAMPLE_RATE", ge=0.0, le=1.0
     )
+    # C5：分层采样——高优先级样本（长输入 / self-heal 触发 / 低 eval_score）的
+    # 采样率倍数。effective_rate = min(base_rate * boost, 1.0)。默认 5.0 意味着
+    # priority>0 的请求采样率放大 5 倍，确保稀有但易暴露回归的流量不被均匀采样稀释。
+    online_eval_sample_rate_boost: float = Field(
+        default=5.0, alias="ONLINE_EVAL_SAMPLE_RATE_BOOST", ge=1.0, le=100.0
+    )
+    # C5：priority 启发式阈值——输入字符数超过此值则 priority +1（长查询更可能
+    # 触发上下文压缩 / 多轮工具调用，回归价值高）。
+    online_eval_priority_input_len_threshold: int = Field(
+        default=200, alias="ONLINE_EVAL_PRIORITY_INPUT_LEN_THRESHOLD", ge=1
+    )
     # P1-4：Agent 记忆层。默认关闭，单测/CI 不启用（避免 pgvector 依赖）。
     # 启用后 execute_agent 构造 PgMemoryBackend 传入 executor，执行前检索
     # top-k 相关历史注入 context，每轮结束后持久化 observation/final_answer。
@@ -134,6 +145,19 @@ class Settings(BaseSettings):
     agent_cost_budget_window_seconds: int = Field(
         default=3600, alias="AGENT_COST_BUDGET_WINDOW_SECONDS", ge=1
     )
+    # A1：多副本共享预算。启用后 BudgetTracker 走 Redis ZSET 实现，所有 pod
+    # 共享同一预算视图，熔断判定基于全局真实消耗。默认关闭（与历史行为一致，
+    # 单测/CI 走内存版）。生产部署必须显式启用——K8s HPA 多副本下内存版预算
+    # 共享失效，熔断永远不触发，成本失控。
+    agent_cost_budget_redis_enabled: bool = Field(
+        default=False, alias="AGENT_COST_BUDGET_REDIS_ENABLED"
+    )
+    # A2：code 工具执行开关。ToolType.code 暴露给 LLM 生成任意代码并通过 tool_call
+    # 触发执行——是脚枪。默认 False（executor 拒绝 code 工具并跳过 schema 注入），
+    # 仅当显式启用且 tool_executor 注入了沙箱化执行器时才允许。
+    agent_code_tool_enabled: bool = Field(
+        default=False, alias="AGENT_CODE_TOOL_ENABLED"
+    )
     # P2-8：失败模式聚类。默认关闭。启用后 executor 把工具/LLM 失败的 error
     # message 向量化存入 FailureClusterer，可通过 /agents/failure-clusters 查看。
     agent_failure_clustering_enabled: bool = Field(
@@ -141,6 +165,12 @@ class Settings(BaseSettings):
     )
     agent_failure_cluster_distance_threshold: float = Field(
         default=0.3, alias="AGENT_FAILURE_CLUSTER_DISTANCE_THRESHOLD", ge=0.0, le=2.0
+    )
+    # C6：FailureClusterer SQLite DLQ 路径。空字符串 = 不启用 DLQ（纯内存，
+    # 与历史行为一致）。``:memory:`` = 进程内临时库（单测用）。文件路径 = 持久化
+    # 到磁盘，进程重启后可 replay 未 embed 的记录。生产建议配置文件路径。
+    agent_failure_cluster_dlq_path: str = Field(
+        default="", alias="AGENT_FAILURE_CLUSTER_DLQ_PATH"
     )
     # P2-10：Planning + Reflection。默认关闭。启用后 execute_agent 在 ReAct
     # 循环前用 LLM 生成执行计划注入 system 消息，循环后用 LLM 对照 plan + traces
@@ -150,6 +180,25 @@ class Settings(BaseSettings):
     )
     agent_reflection_enabled: bool = Field(
         default=False, alias="AGENT_REFLECTION_ENABLED"
+    )
+    # B1：单次执行最大轮次上限。默认 10（保守，避免失控循环），可配到 50
+    # （长任务 Agent 如 deep research 需要更多轮）。AgentCreate.max_turns 与
+    # ExecuteRequest.max_turns 的 le 上限用此值动态校验（service 层 validator），
+    # Pydantic schema 用绝对上限 50 兜底防滥用。
+    agent_max_turns: int = Field(
+        default=10, alias="AGENT_MAX_TURNS", ge=1, le=50
+    )
+    # B4：context 压缩阈值（token 数）。ReAct 循环累积消息超此阈值时用 LLM
+    # 摘要历史，避免超 context window。默认 4000（约 16K 字符），可按模型调优。
+    # 压缩触发时记入 traces（thought 标注 context_compressed）。
+    agent_context_compress_tokens: int = Field(
+        default=4000, alias="AGENT_CONTEXT_COMPRESS_TOKENS", ge=500, le=100000
+    )
+    # B3：self-eval 采样次数。LLM judge 有 ±0.1 噪声，单次采样 0.85 阈值无统计
+    # 意义。默认 3 次采样取均值（成本×3 但阈值判定可靠）。1 = 退化为单次
+    # （向后兼容，成本敏感场景可配 1）。
+    agent_self_eval_samples: int = Field(
+        default=3, alias="AGENT_SELF_EVAL_SAMPLES", ge=1, le=10
     )
 
     @property

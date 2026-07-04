@@ -68,6 +68,7 @@
 | 错误率（error_rate） | gauge/rate | endpoint | 健康度 |
 | LLM token 消耗（llm_tokens） | counter | model, direction(in/out) | 成本核算 |
 | LLM 成本（llm_cost） | counter | model | 成本告警 |
+| LLM prompt cache 命中（llm_cached_tokens） | counter | model | cache 命中率监控（C4） |
 
 - 指标采集不阻塞请求路径（异步上报）。
 - 指标命名沿用 `module_metric_unit` 风格，全小写下划线。
