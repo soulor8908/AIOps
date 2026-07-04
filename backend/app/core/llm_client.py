@@ -10,6 +10,8 @@ Understanding-First：所有逻辑可读，无黑盒。
 - 结构化日志：每次调用记录 provider/model/latency_ms/tokens，供排障与可观测性消费。
 - 异步上下文管理器：支持 ``async with LLMClient(config) as client:``，杜绝连接泄漏。
 - Streaming（P0-1）：``stream_chat`` 异步生成器逐 token 产出，覆盖 OpenAI/Anthropic SSE。
+- 真 streaming（P6e）：``stream_chat_events`` 单流承载 text + tool_call 增量，
+  调用方实时分流，消除"阻塞 chat + 重跑 stream"的双倍 LLM 成本。
 - 原生 function calling（P0-2）：OpenAI tools / Anthropic tool_use，替代文本块解析。
 - Structured outputs（P2-10）：``response_format`` json_schema 强约束。
 - Prompt caching（P2-10）：``cache_control`` 标记 system/长上下文。
@@ -108,6 +110,31 @@ class LLMResponse:
     usage: dict[str, int] = field(default_factory=dict)
     raw: dict[str, object] = field(default_factory=dict)
     latency_ms: float = 0.0
+
+
+@dataclass(slots=True)
+class StreamEvent:
+    """LLM 流式事件（P0-1 真 streaming）。
+
+    type 取值：
+    - ``"text"``: ``content`` 为文本 delta（逐 token），调用方应即时渲染。
+    - ``"tool_call"``: 工具调用增量。该 tool_call 首帧含 ``tool_call_id`` +
+      ``tool_call_name``，后续帧仅含 ``args_delta``（JSON 字符串片段）。
+      调用方按 ``tool_call_id`` 累积，``finish`` 事件给出完整 ``tool_calls``。
+    - ``"finish"``: 流结束。``content`` 为完整文本，``tool_calls`` 为完整调用
+      列表（已解析 args），``usage`` 为 token 统计。
+
+    设计：单流承载 text + tool_call，调用方在流里实时分流，避免"阻塞 chat 判断
+    工具 + 重跑 stream 输出文本"的双倍 LLM 成本。
+    """
+
+    type: str
+    content: str = ""
+    tool_call_id: str = ""
+    tool_call_name: str = ""
+    args_delta: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: dict[str, int] = field(default_factory=dict)
 
 
 class LLMClient:
@@ -216,26 +243,33 @@ class LLMClient:
         assert last_exc is not None
         raise last_exc
 
-    # ===================== Streaming（P0-1） =====================
+    # ===================== Streaming（P0-1 / P6e 真 streaming） =====================
 
-    async def stream_chat(
+    async def stream_chat_events(
         self,
         messages: list[Message],
         tools: list[ToolDef] | None = None,
-    ) -> AsyncIterator[str]:
-        """流式逐 token 产出（P0-1）。
+    ) -> AsyncIterator[StreamEvent]:
+        """真 streaming（P6e）：单流 yield 结构化事件，承载 text + tool_call 增量。
 
-        yield 文本 token；工具调用与 usage 在流结束后由调用方通过
-        ``stream_chat_with_meta`` 获取。本方法仅产出文本，保持简洁。
+        相比旧 ``stream_chat``（仅 text）+ executor 双调 LLM 的方案，本方法在
+        单条流里实时分流 text delta 与 tool_call delta，调用方一次消费即可同时
+        渲染打字机效果并解析工具调用，**消除"阻塞 chat 判断工具 + 重跑 stream
+        输出文本"的双倍 LLM 成本**。
 
-        实现：OpenAI/Anthropic 均用 SSE（``text/event-stream``），
-        每 ``data: {...}\\n\\n`` 一行事件。OpenAI ``delta.content``、
-        Anthropic ``content_block_delta``。
+        yield 事件（``StreamEvent``）：
+        - ``type="text"``: ``content`` 为文本 delta
+        - ``type="tool_call"``: 工具调用增量（首帧含 id+name，后续帧含 args_delta）
+        - ``type="finish"``: 流结束，含完整 ``content`` / ``tool_calls`` / ``usage``
+
+        TTFT 在首个 text/tool_call 事件时记录；finish 事件到达即记 ``llm_call``
+        （在 yield 前记录，避免 caller break 后漏记），失败记 ``llm_error``。
+        ``stream_chat``（文本-only）为本方法的薄包装，向后兼容。
         """
         dispatch = {
-            "openai": self._stream_openai_compatible,
-            "local": self._stream_openai_compatible,
-            "anthropic": self._stream_anthropic,
+            "openai": self._stream_openai_events,
+            "local": self._stream_openai_events,
+            "anthropic": self._stream_anthropic_events,
         }
         streamer = dispatch.get(self.config.provider)
         if streamer is None:
@@ -243,36 +277,64 @@ class LLMClient:
             raise LLMError(f"不支持的 provider: {self.config.provider}")
 
         start = time.monotonic()
-        first_token_recorded = False
+        first_event_recorded = False
         try:
-            async for token in streamer(messages, tools):
-                # P2-9：首个 token 产出时记录 TTFT（Time To First Token）
-                if not first_token_recorded:
+            async for event in streamer(messages, tools):
+                # P2-9：首个 text/tool_call 事件产出时记录 TTFT（finish 不算首 token）
+                if not first_event_recorded and event.type in ("text", "tool_call"):
                     ttft_ms = (time.monotonic() - start) * 1000
                     metrics.record_ttft(self.config.model, ttft_ms)
-                    first_token_recorded = True
-                yield token
+                    first_event_recorded = True
+                # P6e：finish 事件到达即记 llm_call（yield 前记录，caller break 不漏记）
+                if event.type == "finish":
+                    metrics.record_llm_call(self.config.model)
+                yield event
         except _RetryableLLMError as exc:
             metrics.record_llm_error(self.config.model, "retryable_exhausted")
             raise LLMError(f"流式调用可重试故障耗尽: {exc}") from exc
         except LLMError:
             metrics.record_llm_error(self.config.model, "non_retryable")
             raise
-        latency_ms = (time.monotonic() - start) * 1000
-        logger.info(
-            "llm_stream provider=%s model=%s latency_ms=%.0f",
-            self.config.provider,
-            self.config.model,
-            latency_ms,
-        )
+        finally:
+            latency_ms = (time.monotonic() - start) * 1000
+            logger.info(
+                "llm_stream provider=%s model=%s latency_ms=%.0f",
+                self.config.provider,
+                self.config.model,
+                latency_ms,
+            )
 
-    async def _stream_openai_compatible(
-        self, messages: list[Message], tools: list[ToolDef] | None
+    async def stream_chat(
+        self,
+        messages: list[Message],
+        tools: list[ToolDef] | None = None,
     ) -> AsyncIterator[str]:
-        """OpenAI 兼容协议 SSE 流（OpenAI / local / vLLM / Ollama）。"""
+        """流式逐 token 产出文本（向后兼容，P0-1）。
+
+        本方法为 ``stream_chat_events`` 的薄包装：仅 yield text 事件的 content，
+        丢弃 tool_call / finish 事件。需要工具调用流式解析的应用应直接使用
+        ``stream_chat_events``。
+        """
+        async for event in self.stream_chat_events(messages, tools):
+            if event.type == "text":
+                yield event.content
+
+    async def _stream_openai_events(
+        self, messages: list[Message], tools: list[ToolDef] | None
+    ) -> AsyncIterator[StreamEvent]:
+        """OpenAI 兼容协议 SSE 流，yield 结构化事件（text / tool_call / finish）。
+
+        OpenAI 流式 tool_calls：``delta.tool_calls`` 按 ``index`` 标识调用顺序，
+        首帧含 ``id`` + ``function.name``，后续帧仅含 ``function.arguments``
+        片段（JSON 字符串增量）。本方法按 index 累积，finish 时组装完整 ToolCall。
+        """
         url = self._openai_base_url()
         payload = self._openai_payload(messages, tools, stream=True)
         headers = self._openai_headers()
+        # 按 index 累积 tool_call：{index: {"id":..., "name":..., "args": str}}
+        tool_acc: dict[int, dict[str, Any]] = {}
+        text_parts: list[str] = []
+        usage: dict[str, int] = {}
         try:
             async with self.http.stream(
                 "POST", f"{url}/chat/completions", headers=headers, json=payload
@@ -285,22 +347,75 @@ class LLMClient:
                         )
                     raise LLMError(f"LLM 流式 HTTP {resp.status_code}: {body[:200]!r}")
                 async for line in resp.aiter_lines():
-                    token = _parse_openai_sse_line(line)
-                    if token:
-                        yield token
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[len("data:"):].strip()
+                    if data == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    if event.get("usage"):
+                        usage = event["usage"]
+                    choices = event.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    # text delta
+                    if delta.get("content"):
+                        text_parts.append(delta["content"])
+                        yield StreamEvent(type="text", content=delta["content"])
+                    # tool_call delta（按 index 累积）
+                    for tc_delta in delta.get("tool_calls") or []:
+                        idx = tc_delta.get("index", 0)
+                        func = tc_delta.get("function") or {}
+                        slot = tool_acc.setdefault(
+                            idx, {"id": "", "name": "", "args": ""}
+                        )
+                        if tc_delta.get("id"):
+                            slot["id"] = tc_delta["id"]
+                        if func.get("name"):
+                            slot["name"] = func["name"]
+                        args_chunk = func.get("arguments") or ""
+                        if args_chunk:
+                            slot["args"] += args_chunk
+                            yield StreamEvent(
+                                type="tool_call",
+                                tool_call_id=slot["id"],
+                                tool_call_name=slot["name"],
+                                args_delta=args_chunk,
+                            )
         except httpx.HTTPError as exc:
             raise _RetryableLLMError(f"LLM 流式网络错误: {exc}") from exc
+        yield StreamEvent(
+            type="finish",
+            content="".join(text_parts),
+            tool_calls=_assemble_tool_calls(tool_acc),
+            usage=usage,
+        )
 
-    async def _stream_anthropic(
+    async def _stream_anthropic_events(
         self, messages: list[Message], tools: list[ToolDef] | None
-    ) -> AsyncIterator[str]:
-        """Anthropic SSE 流。content_block_delta 事件产出 text。"""
+    ) -> AsyncIterator[StreamEvent]:
+        """Anthropic SSE 流，yield 结构化事件。
+
+        Anthropic 流式 tool_use：
+        - ``content_block_start`` (type=tool_use) 给出 id + name
+        - ``content_block_delta`` (type=input_json_delta) 给出 partial_json 片段
+        - ``content_block_delta`` (type=text_delta) 给出文本
+        - ``message_start`` / ``message_delta`` 给出 input/output tokens
+        """
         url = self.config.base_url or "https://api.anthropic.com/v1"
         payload = self._anthropic_payload(messages, tools, stream=True)
         headers = {
             "x-api-key": self.config.api_key,
             "anthropic-version": "2023-06-01",
         }
+        # 按 block index 累积 tool_use：{index: {"id":..., "name":..., "args": str}}
+        tool_acc: dict[int, dict[str, Any]] = {}
+        text_parts: list[str] = []
+        usage: dict[str, int] = {}
         try:
             async with self.http.stream(
                 "POST", f"{url}/messages", headers=headers, json=payload
@@ -311,13 +426,68 @@ class LLMClient:
                         raise _RetryableLLMError(
                             f"Anthropic 流式可重试状态 {resp.status_code}: {body[:200]!r}"
                         )
-                    raise LLMError(f"Anthropic 流式 HTTP {resp.status_code}: {body[:200]!r}")
+                    raise LLMError(
+                        f"Anthropic 流式 HTTP {resp.status_code}: {body[:200]!r}"
+                    )
                 async for line in resp.aiter_lines():
-                    token = _parse_anthropic_sse_line(line)
-                    if token:
-                        yield token
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[len("data:"):].strip()
+                    try:
+                        event = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    etype = event.get("type")
+                    if etype == "content_block_start":
+                        block = event.get("content_block") or {}
+                        if block.get("type") == "tool_use":
+                            idx = event.get("index", 0)
+                            slot = tool_acc.setdefault(
+                                idx, {"id": "", "name": "", "args": ""}
+                            )
+                            slot["id"] = block.get("id", "")
+                            slot["name"] = block.get("name", "")
+                            yield StreamEvent(
+                                type="tool_call",
+                                tool_call_id=slot["id"],
+                                tool_call_name=slot["name"],
+                            )
+                    elif etype == "content_block_delta":
+                        delta = event.get("delta") or {}
+                        dtype = delta.get("type")
+                        if dtype == "text_delta":
+                            txt = delta.get("text") or ""
+                            if txt:
+                                text_parts.append(txt)
+                                yield StreamEvent(type="text", content=txt)
+                        elif dtype == "input_json_delta":
+                            idx = event.get("index", 0)
+                            slot = tool_acc.setdefault(
+                                idx, {"id": "", "name": "", "args": ""}
+                            )
+                            chunk = delta.get("partial_json") or ""
+                            slot["args"] += chunk
+                            yield StreamEvent(
+                                type="tool_call",
+                                tool_call_id=slot["id"],
+                                args_delta=chunk,
+                            )
+                    elif etype == "message_start":
+                        u = (event.get("message") or {}).get("usage") or {}
+                        if u.get("input_tokens"):
+                            usage["input_tokens"] = u["input_tokens"]
+                    elif etype == "message_delta":
+                        u = event.get("usage") or {}
+                        if u.get("output_tokens"):
+                            usage["output_tokens"] = u["output_tokens"]
         except httpx.HTTPError as exc:
             raise _RetryableLLMError(f"Anthropic 流式网络错误: {exc}") from exc
+        yield StreamEvent(
+            type="finish",
+            content="".join(text_parts),
+            tool_calls=_assemble_tool_calls(tool_acc),
+            usage=usage,
+        )
 
     # ===================== OpenAI 兼容协议 =====================
 
@@ -601,50 +771,32 @@ class ToolCallParser(Protocol):
     def __call__(self, content: str) -> list[dict[str, object]]: ...
 
 
-# ===================== SSE 解析（streaming） =====================
+# ===================== streaming tool_call 组装 =====================
 
 
-def _parse_openai_sse_line(line: str) -> str:
-    """解析 OpenAI SSE 单行，返回文本 delta（无则空串）。
+def _assemble_tool_calls(acc: dict[int, dict[str, Any]]) -> list[ToolCall]:
+    """把按 index 累积的 tool_call 字典组装为 ToolCall 列表（P6e 真 streaming）。
 
-    OpenAI SSE：``data: {"choices":[{"delta":{"content":"hi"}}]}\\n``
-    ``data: [DONE]`` 标记流结束。
+    ``acc`` 形如 ``{0: {"id": "call_x", "name": "calc", "args": '{"expr":"1+1"}'}}``，
+    ``args`` 为流式累积的 JSON 字符串，此处二次解析为 dict。index 升序保证
+    多工具调用顺序与 LLM 输出一致。args 解析失败时降级为空 dict（不阻塞流）。
     """
-    if not line or not line.startswith("data:"):
-        return ""
-    data = line[len("data:"):].strip()
-    if data == "[DONE]":
-        return ""
-    try:
-        event = json.loads(data)
-    except json.JSONDecodeError:
-        return ""
-    choices = event.get("choices") or []
-    if not choices:
-        return ""
-    delta = choices[0].get("delta") or {}
-    return delta.get("content") or ""
-
-
-def _parse_anthropic_sse_line(line: str) -> str:
-    """解析 Anthropic SSE 单行，返回 text delta。
-
-    Anthropic SSE：``data: {"type":"content_block_delta",
-    "delta":{"type":"text_delta","text":"hi"}}``
-    """
-    if not line or not line.startswith("data:"):
-        return ""
-    data = line[len("data:"):].strip()
-    try:
-        event = json.loads(data)
-    except json.JSONDecodeError:
-        return ""
-    if event.get("type") != "content_block_delta":
-        return ""
-    delta = event.get("delta") or {}
-    if delta.get("type") != "text_delta":
-        return ""
-    return delta.get("text") or ""
+    calls: list[ToolCall] = []
+    for idx in sorted(acc):
+        slot = acc[idx]
+        args_raw = slot.get("args", "")
+        try:
+            args = json.loads(args_raw) if args_raw else {}
+        except json.JSONDecodeError:
+            args = {}
+        calls.append(
+            ToolCall(
+                id=slot.get("id", ""),
+                name=slot.get("name", ""),
+                args=args,
+            )
+        )
+    return calls
 
 
 # ===================== 原生 tool call 解析 =====================
@@ -699,6 +851,7 @@ __all__ = [
     "LLMConfig",
     "LLMResponse",
     "Message",
+    "StreamEvent",
     "ToolCall",
     "ToolCallParser",
     "ToolDef",
