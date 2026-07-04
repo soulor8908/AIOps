@@ -105,6 +105,17 @@ class Settings(BaseSettings):
     # top-k 相关历史注入 context，每轮结束后持久化 observation/final_answer。
     agent_memory_enabled: bool = Field(default=False, alias="AGENT_MEMORY_ENABLED")
     agent_memory_top_k: int = Field(default=3, alias="AGENT_MEMORY_TOP_K", ge=1, le=20)
+    # P1-5：查询改写 / HyDE。默认关闭。启用后 execute_agent 用 LLM 改写 query
+    # 生成变体 + HyDE 假设文档，多 query 并发检索记忆去重。
+    agent_query_rewrite_enabled: bool = Field(
+        default=False, alias="AGENT_QUERY_REWRITE_ENABLED"
+    )
+    agent_query_rewrite_n_variants: int = Field(
+        default=2, alias="AGENT_QUERY_REWRITE_N_VARIANTS", ge=0, le=5
+    )
+    agent_query_rewrite_hyde: bool = Field(
+        default=True, alias="AGENT_QUERY_REWRITE_HYDE"
+    )
 
     @property
     def access_token_expire_seconds(self) -> int:
