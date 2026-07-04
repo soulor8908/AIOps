@@ -179,8 +179,10 @@ AIOps/
   - **达成**：CI 独立 `contract-test` job 运行 `tests/test_api_contract.py`。
 - [x] **L3 E2E 测试**：关键路径 100% 通过，针对 `vite build` 产物运行。
   - **达成**：CI `frontend-test` job `npm run e2e` 对 `dist/` 运行 Playwright。
-- [x] **L4 LLM-as-Judge**：得分 > 0.85。
-  - **达成**：CI `llm-judge` job 运行 `eval_llm_as_judge.py`；阈值 > 0.85（`continue-on-error` 非阻断，无 `OPENAI_API_KEY` 时 skipif 跳过）。
+- [x] **L4 LLM-as-Judge**：得分 > 0.85（监控指标，非合并门禁）。
+  - **达成**：CI `llm-judge` job 运行 `eval_llm_as_judge.py`；阈值 > 0.85。
+  - **语义对齐（P0-3）**：`continue-on-error` 非阻断 = 监控指标而非门禁。L1–L3 是合并门禁（必须 100% 通过），L4 是质量监控（回归告警，不阻断）。名实一致：不把非阻断指标称为"门禁"。
+  - **可靠性（P1-6）**：LLM judge 多采样取均值（默认 3 次）+ 基线 score 回归检测（当前 score 低于基线 > 0.05 标 `is_regression`）。structured output（`response_format` json_schema）强约束 LLM 输出，替代 `strip("`")` 字符串解析 hack。
 - [x] **错误一致性**：所有非 2xx 响应符合 `errors.spec.md` 统一格式，无 `{detail:[...]}` 残留。
   - **达成**：`app/core/errors/` 全局异常处理器改写 `RequestValidationError` 为 `{error, message, detail}`；L2 契约校验状态码 + schema。
 

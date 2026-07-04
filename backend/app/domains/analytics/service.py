@@ -14,8 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.exceptions import NotFoundError
+from app.core.metrics import metrics
 from app.core.redis import get_redis
 from app.domains.analytics.models import (
+    AIHealthMetrics,
     Conversation,
     DashboardMetrics,
     Message,
@@ -203,4 +205,62 @@ async def _conversations_by_day(
     ]
 
 
-__all__ = ["get_conversation", "get_dashboard_metrics", "list_conversations"]
+async def get_ai_health_metrics(session: AsyncSession) -> AIHealthMetrics:
+    """返回 AI 系统健康度（P2-9）。
+
+    区别于 ``get_dashboard_metrics``（业务指标：token/成本/对话数），本函数返回
+    AI 系统本身的运维健康度，从进程内 ``metrics`` 注册表读取累计值：
+
+    - ``llm_error_rate``: ``llm_errors`` / (``llm_errors`` + ``llm_calls``)；
+      无调用记录时为 0.0（避免除零）。
+    - ``tool_call_success_rate``: 当前 metrics 未记录工具调用，保留字段默认 1.0
+      （无失败证据即视为健康；未来在 executor 采集后再接入）。
+    - ``avg_latency_ms``: 从 ``messages.latency_ms`` 全量平均估算（含 user/assistant
+      消息），未来可独立采集 LLM TTFT。
+    - ``active_model_count``: 有 ``llm_calls`` 或 ``llm_errors`` 记录的 distinct
+      模型数（一个模型只要被尝试调用即视为活跃）。
+    - ``total_llm_calls`` / ``total_llm_errors``: 跨所有 model 的累计计数。
+
+    注：``metrics`` 为进程内注册表，多 worker 部署时每个 worker 独立计数，
+    本函数返回当前 worker 视角的健康度；Prometheus scraper 会汇总。
+    """
+    total_calls = int(metrics.get_counter_sum("llm_calls"))
+    total_errors = int(metrics.get_counter_sum("llm_errors"))
+
+    if total_calls + total_errors > 0:
+        llm_error_rate = total_errors / (total_calls + total_errors)
+    else:
+        llm_error_rate = 0.0
+
+    # 活跃模型数：合并 llm_calls 与 llm_errors 的 distinct model label。
+    # llm_calls 标签为 (model,)，llm_errors 标签为 (model, error_type)，取首元素。
+    active_models: set[str] = set()
+    for labels in metrics.get_counter_label_values("llm_calls"):
+        if labels:
+            active_models.add(labels[0])
+    for labels in metrics.get_counter_label_values("llm_errors"):
+        if labels:
+            active_models.add(labels[0])
+
+    # LLM 平均延迟：从 messages.latency_ms 全量平均估算。
+    # 不加时间窗口（健康度关注当前累计态；窗口由 dashboard 负责）。
+    latency_stmt = select(func.avg(Message.latency_ms))
+    avg_latency_val = (await session.execute(latency_stmt)).scalar()
+    avg_latency = float(avg_latency_val) if avg_latency_val is not None else 0.0
+
+    return AIHealthMetrics(
+        llm_error_rate=round(llm_error_rate, 4),
+        tool_call_success_rate=1.0,
+        avg_latency_ms=round(avg_latency, 2),
+        active_model_count=len(active_models),
+        total_llm_calls=total_calls,
+        total_llm_errors=total_errors,
+    )
+
+
+__all__ = [
+    "get_ai_health_metrics",
+    "get_conversation",
+    "get_dashboard_metrics",
+    "list_conversations",
+]

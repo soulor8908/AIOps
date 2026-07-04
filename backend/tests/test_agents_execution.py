@@ -1,15 +1,16 @@
 """Agent Orchestrator 执行追踪与工作流 DAG eval（agents/SPEC.md Success Criteria）。
 
-覆盖 6 项验收：
+P0-2 重构后覆盖：
 1. ReAct 循环在无工具调用时正确终止并返回最终答案
-2. 达到 max_turns 仍无最终答案时返回截断提示且 success=False（截断视为失败）
-3. 单工具执行异常被隔离捕获，不中断整体循环
+2. 达到 max_turns 仍无最终答案时 success=False（P2-8：保留最后输出）
+3. 单工具执行异常被隔离捕获，不中断整体循环（P2-8 并发 + return_exceptions）
 4. DAG 节点 > 50 时创建与执行均报错
 5. 每轮 ExecutionTrace 完整记录 thought/action/observation/tokens
-6. 工具说明通过 _build_tool_prompt 正确注入 system prompt
+6. Agent.tools 转为 LLMClient 原生 ToolDef（P0-2 _agent_tools_to_llm_tools）
 
-直接测 executor 层（AgentExecutor.run / execute_workflow_dag / _build_tool_prompt），
-通过注入 mock llm_client.chat 控制每轮 LLM 输出，避免真实网络调用。
+直接测 executor 层（AgentExecutor.run / execute_workflow_dag /
+_agent_tools_to_llm_tools），通过注入 mock llm_client.chat 控制每轮 LLM
+输出，避免真实网络调用。
 """
 
 from __future__ import annotations
@@ -21,11 +22,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.core.exceptions import ValidationError
-from app.core.llm_client import LLMResponse
+from app.core.llm_client import LLMResponse, ToolCall
 from app.domains.agents import service as agent_service
 from app.domains.agents.executor import (
     AgentExecutor,
-    _build_tool_prompt,
+    _agent_tools_to_llm_tools,
     execute_workflow_dag,
 )
 from app.domains.agents.models import (
@@ -62,28 +63,46 @@ def _tool(name: str = "search", type_: ToolType = ToolType.SEARCH) -> ToolDef:
 
 
 def _llm_response(
-    content: str, total_tokens: int = 100
+    content: str = "",
+    total_tokens: int = 100,
+    tool_calls: list[ToolCall] | None = None,
 ) -> LLMResponse:
     return LLMResponse(
-        content=content, usage={"total_tokens": total_tokens}
+        content=content, tool_calls=tool_calls or [], usage={"total_tokens": total_tokens}
     )
 
 
 def _executor_with_chat(
     chat_side_effect: Any, tool_executor: Any = None
 ) -> AgentExecutor:
-    """构造 AgentExecutor，注入 mock chat（AsyncMock side_effect 控制每轮返回）。"""
+    """构造 AgentExecutor，注入 mock chat。
+
+    P0-2：chat 签名改为 (messages, tools=None, response_format=None)，
+    AsyncMock side_effect 需接受可选参数。用包装函数兼容。
+    """
     llm = AsyncMock()
-    llm.chat = AsyncMock(side_effect=chat_side_effect)
+
+    async def _chat(
+        messages: list[Any],
+        tools: list[Any] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        if isinstance(chat_side_effect, list):
+            idx = _chat._idx  # type: ignore[attr-defined]
+            _chat._idx = min(idx + 1, len(chat_side_effect) - 1)  # type: ignore[attr-defined]
+            return chat_side_effect[idx]
+        return await chat_side_effect(messages, tools=tools, response_format=response_format)
+
+    _chat._idx = 0  # type: ignore[attr-defined]
+    _chat.await_count = 0  # type: ignore[attr-defined]
+
+    async def _counting_chat(*args: Any, **kwargs: Any) -> LLMResponse:
+        _counting_chat.await_count += 1  # type: ignore[attr-defined]
+        return await _chat(*args, **kwargs)
+
+    _counting_chat.await_count = 0  # type: ignore[attr-defined]
+    llm.chat = _counting_chat
     return AgentExecutor(llm, tool_executor=tool_executor)
-
-
-def _tool_calls_block(name: str, args: dict[str, Any] | None = None) -> str:
-    """构造 LLM 输出中的 ```tool_calls``` JSON 块。"""
-    import json
-
-    payload = [{"name": name, "args": args or {}}]
-    return f"思考一下\n```tool_calls\n{json.dumps(payload, ensure_ascii=False)}\n```"
 
 
 # ===================== 1. ReAct 无工具调用 → 终止 =====================
@@ -110,18 +129,18 @@ async def test_react_terminates_when_no_tool_calls() -> None:
 
 @pytest.mark.asyncio
 async def test_max_turns_truncation_returns_failure() -> None:
-    """达到 max_turns 仍无最终答案 → 截断提示且 success=False（SPEC 2，截断视为失败）。"""
+    """达到 max_turns 仍无最终答案 → success=False（SPEC 2 + P2-8：保留最后输出）。"""
     agent = _agent(max_turns=2)
-    # 每轮都返回工具调用，永远不给出最终答案
+    # 每轮都返回原生 tool_calls，永远不给出最终答案
+    tool_call = ToolCall(id="t1", name="search", args={"query": "weather"})
     executor = _executor_with_chat(
-        [_llm_response(_tool_calls_block("search"), 50)] * 3
+        [_llm_response("", 50, tool_calls=[tool_call])] * 3
     )
 
     result = await executor.run(agent, "查询天气")
 
-    assert result.success is False  # 截断视为失败（success 语义修正）
-    assert "最大轮次" in result.final_answer
-    # 应尝试了 max_turns 轮（2 轮）
+    assert result.success is False  # 截断视为失败
+    # P2-8：保留最后输出（assistant content），而非固定失败消息
     assert executor.llm.chat.await_count == 2  # type: ignore[attr-defined]
     assert len(result.traces) == 2
 
@@ -131,21 +150,22 @@ async def test_max_turns_truncation_returns_failure() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_exception_isolated() -> None:
-    """单工具执行异常被隔离捕获，记录到 observation 但不中断循环（SPEC 3）。"""
+    """单工具执行异常被隔离捕获，记录到 observation 但不中断循环（SPEC 3 + P2-8 并发）。"""
     tool = _tool("search")
 
     class _FlakyToolExecutor:
         def can_handle(self, tool_type: ToolType) -> bool:
             return True
 
-        async def execute(self, t: ToolDef, args: dict[str, Any]) -> str:
+        async def execute(self, t: Any, args: dict[str, Any]) -> str:
             raise RuntimeError("工具爆炸了")
 
     agent = _agent(tools=[tool], max_turns=3)
     # 第 1 轮：调用工具 → 异常被隔离；第 2 轮：给出最终答案
+    tool_call = ToolCall(id="t1", name="search", args={"query": "weather"})
     executor = _executor_with_chat(
         [
-            _llm_response(_tool_calls_block("search"), 50),
+            _llm_response("", 50, tool_calls=[tool_call]),
             _llm_response("最终答案：无法查询", 30),
         ],
         tool_executor=_FlakyToolExecutor(),
@@ -177,8 +197,6 @@ async def test_dag_create_workflow_rejects_over_50_nodes() -> None:
     ]
     payload = WorkflowDef(name="too-big", nodes=nodes)
 
-    # create_workflow 需要 session 仅在超限时抛错（在 flush 前校验）
-    # 这里用最小 mock 验证校验逻辑
     class _NoopSession:
         async def add(self, *args: Any, **kwargs: Any) -> None:
             pass
@@ -223,13 +241,14 @@ async def test_execution_trace_records_all_fields() -> None:
         def can_handle(self, tool_type: ToolType) -> bool:
             return True
 
-        async def execute(self, t: ToolDef, args: dict[str, Any]) -> str:
+        async def execute(self, t: Any, args: dict[str, Any]) -> str:
             return "结果=42"
 
     agent = _agent(tools=[tool], max_turns=3)
+    tool_call = ToolCall(id="t1", name="calc", args={"expr": "6*7"})
     executor = _executor_with_chat(
         [
-            _llm_response(_tool_calls_block("calc", {"expr": "6*7"}), 50),
+            _llm_response("", 50, tool_calls=[tool_call]),
             _llm_response("答案是 42", 30),
         ],
         tool_executor=_RecordingToolExecutor(),
@@ -242,7 +261,6 @@ async def test_execution_trace_records_all_fields() -> None:
     # 第 1 轮：有工具调用，应记录 action / observation / thought / tokens
     t1 = result.traces[0]
     assert t1.turn == 1
-    assert "calc" in t1.thought  # LLM 原始输出
     assert t1.action is not None and "calc" in t1.action  # tool_calls JSON
     assert t1.observation is not None and "结果=42" in t1.observation
     assert t1.tokens == 50  # 累计 tokens
@@ -258,47 +276,47 @@ async def test_execution_trace_records_all_fields() -> None:
     assert result.total_tokens == 80
 
 
-# ===================== 6. _build_tool_prompt 注入 system prompt =====================
+# ===================== 6. _agent_tools_to_llm_tools（P0-2） =====================
 
 
-def test_build_tool_prompt_injects_tool_descriptions() -> None:
-    """_build_tool_prompt 把工具说明格式化注入 system prompt（SPEC 6）。"""
+def test_agent_tools_to_llm_tools_injects_tool_descriptions() -> None:
+    """Agent.tools 转为 LLMClient 原生 ToolDef（P0-2 替代 _build_tool_prompt）。"""
     tools = [
-        ToolDef(name="search", type=ToolType.SEARCH, description="web 搜索"),
-        ToolDef(name="calc", type=ToolType.CALCULATOR, description="计算器"),
+        {"name": "search", "type": "search", "description": "web 搜索"},
+        {"name": "calc", "type": "calculator", "description": "计算器"},
     ]
-    prompt = _build_tool_prompt(tools)
+    llm_tools = _agent_tools_to_llm_tools(tools)
 
-    assert "可用工具" in prompt
-    assert "```tool_calls" in prompt  # 提示 LLM 输出格式
-    # 每个工具都列出（name + type + description）
-    assert "search" in prompt and "search" in prompt
-    assert "web 搜索" in prompt
-    assert "calc" in prompt and "calculator" in prompt
-    assert "计算器" in prompt
+    assert len(llm_tools) == 2
+    assert llm_tools[0].name == "search"
+    assert llm_tools[0].description == "web 搜索"
+    assert "query" in llm_tools[0].parameters["properties"]
+    assert llm_tools[1].name == "calc"
+    assert llm_tools[1].description == "计算器"
+    assert "expr" in llm_tools[1].parameters["properties"]
 
 
-def test_build_tool_prompt_empty_tools_returns_empty() -> None:
-    """无工具时 _build_tool_prompt 返回空串（不污染 system prompt）。"""
-    assert _build_tool_prompt([]) == ""
+def test_agent_tools_to_llm_tools_empty_tools_returns_empty() -> None:
+    """无工具时返回空列表。"""
+    assert _agent_tools_to_llm_tools([]) == []
 
 
 @pytest.mark.asyncio
-async def test_tool_prompt_injected_into_system_message() -> None:
-    """工具说明被拼接到 system 消息中，Agent 执行时可见（SPEC 6 端到端验证）。"""
+async def test_tools_passed_to_llm_chat() -> None:
+    """Agent.tools 转为 ToolDef 后通过 chat(tools=...) 传入 LLM（P0-2 端到端验证）。"""
     tools = [_tool("search")]
     agent = _agent(tools=tools, max_turns=1)
-    captured_messages: list[Any] = []
+    captured_tools: list[Any] = []
 
-    async def _capture_chat(messages: list[Any]) -> LLMResponse:
-        captured_messages.extend(messages)
+    async def _capture_chat(
+        messages: list[Any], tools: list[Any] | None = None, **kw: Any
+    ) -> LLMResponse:
+        captured_tools.extend(tools or [])
         return _llm_response("done", 10)
 
     executor = _executor_with_chat(_capture_chat)
     await executor.run(agent, "hi")
 
-    # system 消息（第 1 条）应包含工具说明
-    system_msg = captured_messages[0]
-    assert system_msg.role == "system"
-    assert "可用工具" in system_msg.content
-    assert "search" in system_msg.content
+    # P0-2：tools 应作为原生 ToolDef 传入 chat
+    assert len(captured_tools) == 1
+    assert captured_tools[0].name == "search"

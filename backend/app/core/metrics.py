@@ -10,6 +10,8 @@ P1 阶段。多 worker 部署时可通过外挂 Prometheus pushgateway 或替换
 - ``request_latency`` (histogram): labels=[endpoint], buckets ms
 - ``llm_tokens`` (counter): labels=[model, direction]
 - ``llm_cost`` (counter): labels=[model]
+- ``llm_errors`` (counter): labels=[model, error_type]
+- ``llm_calls`` (counter): labels=[model]，成功调用计数（P2-9 AI 健康度用）
 
 采集不阻塞请求路径（``record_*`` 仅内存写入 + lock，微秒级开销）。
 """
@@ -63,6 +65,7 @@ class MetricRegistry:
             "llm_tokens": ("model", "direction"),
             "llm_cost": ("model",),
             "llm_errors": ("model", "error_type"),
+            "llm_calls": ("model",),
         }
         self._histogram_label_names: dict[str, tuple[str, ...]] = {
             "request_latency": ("endpoint",),
@@ -133,6 +136,41 @@ class MetricRegistry:
         key = ("llm_errors", (model, error_type))
         with self._lock:
             self._counters[key] += 1.0
+
+    def record_llm_call(self, model: str) -> None:
+        """记录一次成功的 LLM 调用（P2-9 AI 健康度用）。
+
+        - ``llm_calls{model}`` += 1
+
+        与 ``llm_errors`` 配对：错误率 = ``llm_errors`` /
+        (``llm_errors`` + ``llm_calls``)。仅记 ``chat`` 成功 return 路径，
+        流式成功不在此记（避免与 ``chat`` 双计），保持健康度统计口径一致。
+        """
+        key = ("llm_calls", (model,))
+        with self._lock:
+            self._counters[key] += 1.0
+
+    def get_counter_sum(self, name: str) -> float:
+        """读取某 counter 跨所有 label 组合的累计总和（P2-9 健康度聚合用）。
+
+        用于 ``llm_calls`` / ``llm_errors`` 这类需要全量汇总的场景；
+        分标签的明细仍由 ``get_counter`` 读取。
+        """
+        total = 0.0
+        with self._lock:
+            for (n, _labels), value in self._counters.items():
+                if n == name:
+                    total += value
+        return total
+
+    def get_counter_label_values(self, name: str) -> list[tuple[str, ...]]:
+        """读取某 counter 当前所有 label 组合（P2-9 健康度聚合用）。
+
+        返回 label 元组列表，便于调用方聚合（如求 ``llm_calls`` 跨 model 的
+        distinct 模型数）。返回副本，避免外部修改内部状态。
+        """
+        with self._lock:
+            return [labels for (n, labels) in self._counters if n == name]
 
     # ===================== 读取接口（便于测试） =====================
 

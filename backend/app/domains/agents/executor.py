@@ -1,28 +1,37 @@
-"""Agent 执行器 — ReAct 循环实现。
+"""Agent 执行器 — ReAct 循环实现（P0-2 原生 function calling）。
 
-约 120 行。观察 → 思考 → 行动 循环，max_turns 截断。
-工具调用从 LLM 输出解析（```tool_calls``` JSON 块）。
+约 130 行。观察 → 思考 → 行动 循环，max_turns 截断。
+
+P0-2 之前靠解析 ```tool_calls``` 文本块（脆弱，LLM 多一个空格就崩）。
+P0-2 起用原生 function calling：OpenAI tools / Anthropic tool_use API，
+工具调用由 provider 结构化返回，executor 直接拿到 ToolCall 列表。
+
+P2-8：多工具并发执行（asyncio.gather）+ context 压缩（达阈值摘要）。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
 from collections import deque
+from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
 from app.core.exceptions import ValidationError
-from app.core.llm_client import LLMClient, LLMResponse, Message
+from app.core.llm_client import LLMClient, LLMResponse, Message, ToolCall, ToolDef
 from app.domains.agents.models import (
     Agent,
     ExecutionResult,
     ExecutionTrace,
-    ToolDef,
     ToolType,
 )
 
 logger = logging.getLogger("app.agents.executor")
+
+# context 压缩阈值（P2-8）：超过则用 LLM 摘要历史，避免超 context window
+_CONTEXT_COMPRESS_THRESHOLD = 20
 
 
 class ToolExecutor(Protocol):
@@ -30,22 +39,72 @@ class ToolExecutor(Protocol):
 
     def can_handle(self, tool_type: ToolType) -> bool: ...
 
-    async def execute(self, tool: ToolDef, args: dict[str, Any]) -> str: ...
+    async def execute(self, tool: Any, args: dict[str, Any]) -> str: ...
 
 
-def _build_tool_prompt(tools: list[ToolDef]) -> str:
-    """构造工具使用说明，注入 system prompt。"""
-    if not tools:
-        return ""
-    lines = ["", "可用工具：", "调用工具请输出 ```tool_calls``` 代码块，内含 JSON 数组：",
-             '[{"name": "tool_name", "args": {...}}]']
+def _agent_tools_to_llm_tools(tools: list[Any]) -> list[ToolDef]:
+    """把 Agent.tools（dict / ToolDef）转为 LLMClient 的 ToolDef。
+
+    Agent ORM 的 tools 字段是无 schema 的 JSONB（仅 name/type/description/config），
+    LLM 原生 function calling 需要显式 parameters JSON Schema。这里按 ToolType
+    生成最小 schema：search/rag 一个 query 参数，calculator 一个 expr 参数，
+    http/code/custom 透传 config 作为 properties。
+    """
+    llm_tools: list[ToolDef] = []
     for t in tools:
-        lines.append(f"- {t.name} ({t.type.value}): {t.description or '无描述'}")
-    return "\n".join(lines)
+        if isinstance(t, dict):
+            name = t.get("name", "")
+            ttype = t.get("type", "custom")
+            desc = t.get("description") or ""
+            config = t.get("config", {}) or {}
+        else:
+            name = t.name
+            ttype = t.type.value if hasattr(t.type, "value") else str(t.type)
+            desc = t.description or ""
+            config = t.config
+        if not name:
+            continue
+        params = _tool_parameters(name, ttype, config)
+        llm_tools.append(ToolDef(name=name, description=desc or name, parameters=params))
+    return llm_tools
+
+
+def _tool_parameters(name: str, ttype: str, config: dict[str, Any]) -> dict[str, Any]:
+    """按工具类型生成最小 JSON Schema。"""
+    if ttype in ("search", "rag"):
+        return {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "检索查询"}},
+            "required": ["query"],
+        }
+    if ttype == "calculator":
+        return {
+            "type": "object",
+            "properties": {"expr": {"type": "string", "description": "数学表达式"}},
+            "required": ["expr"],
+        }
+    if ttype == "http":
+        return {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "method": {"type": "string", "default": "GET"},
+            },
+            "required": ["url"],
+        }
+    if ttype == "code":
+        return {
+            "type": "object",
+            "properties": {"code": {"type": "string"}},
+            "required": ["code"],
+        }
+    # custom：透传 config 字段为 properties
+    props = {k: {"type": "string"} for k in config}
+    return {"type": "object", "properties": props or {}}
 
 
 class AgentExecutor:
-    """Agent 执行器，实现 ReAct 循环。"""
+    """Agent 执行器，实现 ReAct 循环（P0-2 原生 function calling）。"""
 
     def __init__(
         self,
@@ -64,25 +123,27 @@ class AgentExecutor:
     ) -> ExecutionResult:
         """执行 Agent。循环直到无工具调用或达到 max_turns。"""
         turns = min(max_turns or agent.max_turns, agent.max_turns)
-        tool_defs = [ToolDef(**t) if isinstance(t, dict) else t for t in agent.tools]
-        messages = self._init_messages(agent, user_input, context, tool_defs)
+        # P0-2：把 Agent.tools 转为 LLMClient 原生 ToolDef
+        llm_tools = _agent_tools_to_llm_tools(agent.tools)
+        messages = self._init_messages(agent, user_input, context)
         traces: list[ExecutionTrace] = []
-        total_tokens = 0
         final_answer = ""
-        # success 仅在 LLM 给出最终答案时为 True；达到 max_turns 截断视为失败。
+        # success 仅在 LLM 给出最终答案时为 True；达到 max_turns 截断视为未完成。
+        # P2-8：截断不再硬判失败，标记 success=False 但 final_answer 保留最后输出。
         success = False
         for turn in range(1, turns + 1):
+            # P2-8：context 压缩，避免长任务超 context window
+            if len(messages) > _CONTEXT_COMPRESS_THRESHOLD:
+                messages = await self._compress_context(messages)
             done, answer = await self._run_turn(
-                turn, messages, tool_defs, traces
+                turn, messages, llm_tools, traces
             )
             if done:
                 final_answer = answer
                 success = True
                 break
         else:
-            final_answer = "达到最大轮次仍未给出最终答案。"
-        # total_tokens 由 _run_turn 逐轮累积（traces[-1].tokens 即为当前累计值），
-        # 此处取末轮值即可，无需在循环内反复覆盖。
+            final_answer = messages[-1].content if messages else "达到最大轮次未给出最终答案。"
         total_tokens = traces[-1].tokens if traces else 0
         return ExecutionResult(
             agent_id=agent.id,
@@ -97,14 +158,15 @@ class AgentExecutor:
         agent: Agent,
         user_input: str,
         context: dict[str, Any] | None,
-        tool_defs: list[ToolDef],
     ) -> list[Message]:
-        """构造初始消息列表（system + user + 可选 context）。"""
-        system = (agent.system_prompt or "You are a helpful assistant.") + _build_tool_prompt(
-            tool_defs
-        )
+        """构造初始消息列表（system + user + 可选 context）。
+
+        P2-10：system prompt 标记 cache_control=True 启用 prompt caching，
+        多轮对话复用 system 段省 50%+ 成本。
+        """
+        system = agent.system_prompt or "You are a helpful assistant."
         messages = [
-            Message(role="system", content=system),
+            Message(role="system", content=system, cache_control=True),
             Message(role="user", content=user_input),
         ]
         if context:
@@ -117,29 +179,30 @@ class AgentExecutor:
         self,
         turn: int,
         messages: list[Message],
-        tool_defs: list[ToolDef],
+        llm_tools: list[ToolDef],
         traces: list[ExecutionTrace],
     ) -> tuple[bool, str]:
-        """执行单轮：调用 LLM → 解析工具调用 → 更新消息与追踪。
+        """执行单轮：调用 LLM（原生 tools）→ 执行工具 → 更新消息与追踪。
 
         返回 (是否结束, 最终答案)。
         """
-        from app.core.llm_client import parse_tool_calls_json
-
         prev_tokens = traces[-1].tokens if traces else 0
-        response: LLMResponse = await self.llm.chat(messages)
+        response: LLMResponse = await self.llm.chat(messages, tools=llm_tools or None)
         total_tokens = prev_tokens + int(response.usage.get("total_tokens", 0))
-        tool_calls = parse_tool_calls_json(response.content)
-        if not tool_calls:
+        # P0-2：原生 function calling，工具调用结构化返回
+        if not response.tool_calls:
             traces.append(ExecutionTrace(
                 turn=turn, thought=response.content, tokens=total_tokens
             ))
             return True, response.content
-        observation = await self._execute_tools(tool_defs, tool_calls)
+        observation = await self._execute_tools(response.tool_calls)
         traces.append(ExecutionTrace(
             turn=turn,
             thought=response.content,
-            action=json.dumps(tool_calls, ensure_ascii=False),
+            action=json.dumps(
+                [{"name": c.name, "args": c.args} for c in response.tool_calls],
+                ensure_ascii=False,
+            ),
             observation=observation,
             tokens=total_tokens,
         ))
@@ -147,32 +210,65 @@ class AgentExecutor:
         messages.append(Message(role="tool", content=observation))
         return False, ""
 
-    async def _execute_tools(
-        self, tool_defs: list[ToolDef], tool_calls: list[dict[str, object]]
-    ) -> str:
-        """执行一批工具调用，拼接观察结果。"""
+    async def _execute_tools(self, tool_calls: list[ToolCall]) -> str:
+        """执行一批工具调用（P2-8 并发），拼接观察结果。
+
+        串行 → asyncio.gather 并发，多工具调用延迟从 N×T 降到 max(T)。
+        """
         if self.tools is None:
             return "[tool executor 未配置，跳过工具调用]"
-        results: list[str] = []
-        tool_map = {t.name: t for t in tool_defs}
-        for call in tool_calls:
-            name = str(call.get("name", ""))
-            args = call.get("args", {})
-            if not isinstance(args, dict):
-                args = {}
-            tool = tool_map.get(name)
-            if tool is None:
-                results.append(f"[未知工具: {name}]")
-                continue
-            try:
-                output = await self.tools.execute(tool, args)
-                results.append(f"[{name}] {output}")
-            except Exception as exc:  # noqa: BLE001
-                # 工具异常拼入 observation 供 LLM 决策（如换工具或放弃），
-                # 同时记录完整 traceback 便于排障（编程错误不应被静默吞掉）。
-                logger.warning("tool %s execution failed", name, exc_info=True)
-                results.append(f"[{name} 错误] {exc}")
-        return "\n".join(results)
+        # 并发执行所有工具调用
+        results = await asyncio.gather(
+            *(self._execute_single(tc) for tc in tool_calls),
+            return_exceptions=True,
+        )
+        lines: list[str] = []
+        for tc, res in zip(tool_calls, results, strict=True):
+            if isinstance(res, Exception):
+                logger.warning("tool %s execution failed", tc.name, exc_info=res)
+                lines.append(f"[{tc.name} 错误] {res}")
+            else:
+                lines.append(f"[{tc.name}] {res}")
+        return "\n".join(lines)
+
+    async def _execute_single(self, tc: ToolCall) -> str:
+        """执行单个工具调用。"""
+        # Agent.tools 是 JSONB dict，tool_executor 协议接收 ToolDef-like 对象。
+        # 这里构造一个轻量对象满足 execute 签名。
+        tool_def = _SimpleToolDef(name=tc.name)
+        return await self.tools.execute(tool_def, tc.args)  # type: ignore[union-attr]
+
+    async def _compress_context(self, messages: list[Message]) -> list[Message]:
+        """P2-8：context 压缩。保留 system + 最近若干轮，中间用 LLM 摘要替代。
+
+        避免 Agent 长任务到 max_turns 因超 context window 失败。
+        摘要失败时降级为简单截断（保留首尾），不阻塞主流程。
+        """
+        if len(messages) <= _CONTEXT_COMPRESS_THRESHOLD:
+            return messages
+        # 保留首条 system + 最后 6 条，中间摘要素
+        head = messages[:1]
+        middle = messages[1:-6]
+        tail = messages[-6:]
+        summary_text = "\n".join(f"[{m.role}] {m.content[:200]}" for m in middle)
+        try:
+            resp = await self.llm.chat([
+                Message(role="system", content="Summarize the conversation so far concisely."),
+                Message(role="user", content=summary_text),
+            ])
+            summary_msg = Message(role="system", content=f"previous_summary: {resp.content}")
+        except Exception:  # noqa: BLE001
+            # 摘要失败降级：直接丢弃中间，不阻塞主流程
+            logger.warning("context compression failed, falling back to truncation")
+            return head + tail
+        return head + [summary_msg] + tail
+
+
+@dataclass(slots=True)
+class _SimpleToolDef:
+    """轻量 ToolDef 替身，仅满足 ToolExecutor.execute 签名（name 字段）。"""
+
+    name: str
 
 
 async def execute_workflow_dag(

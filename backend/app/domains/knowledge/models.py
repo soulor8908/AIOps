@@ -15,6 +15,7 @@ from pgvector.sqlalchemy import Vector
 from pydantic import BaseModel, Field
 from sqlalchemy import BigInteger, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import TSVECTOR as TSVector
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -84,6 +85,9 @@ class Chunk(Base):
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM))
+    # BM25 全文检索列：PG 上由 ingest 时 func.to_tsvector('simple', content) 写入；
+    # SQLite 上由 conftest 渲染为 TEXT（仅存储，全文检索降级为 LIKE）。
+    search_vector: Mapped[Any] = mapped_column(TSVector, nullable=True)
     token_count: Mapped[int | None] = mapped_column(Integer)
     metadata_: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSONB, nullable=False, default=dict
@@ -98,6 +102,12 @@ class Chunk(Base):
             postgresql_using="hnsw",
             postgresql_with={"m": 16, "ef_construction": 64},
             postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+        # GIN 倒排索引，加速 @@ tsquery 匹配；PG 专属，SQLite 上降级为普通索引
+        Index(
+            "idx_knowledge_chunks_search",
+            "search_vector",
+            postgresql_using="gin",
         ),
     )
 
@@ -161,7 +171,12 @@ class SearchResult(BaseModel):
 
 
 class RAGQuery(BaseModel):
-    """RAG 查询请求（检索 + LLM 生成）。"""
+    """RAG 查询请求（检索 + LLM 生成）。
+
+    ``rerank=True`` 时启用 LLM reranker（单次 LLM 调用对候选打分重排），
+    默认关闭以避免额外的 LLM 成本与延迟；hybrid search + RRF 融合始终启用。
+    """
 
     question: str = Field(min_length=1)
     top_k: int = Field(default=5, ge=1, le=20)
+    rerank: bool = False

@@ -21,6 +21,7 @@ from app.domains.knowledge.models import (
     SearchQuery,
     SearchResult,
 )
+from app.domains.knowledge.parser import DOCX_MIME, extract_text
 from app.domains.knowledge.service import MAX_DOC_BYTES
 
 logger = logging.getLogger("app.audit.knowledge")
@@ -28,11 +29,10 @@ logger = logging.getLogger("app.audit.knowledge")
 router = APIRouter(prefix="/knowledge-bases", tags=["knowledge"])
 
 # security.spec.md§7.2 — 文件上传 content-type 白名单。
-# 仅放行文本类 MIME：当前 pipeline 对内容做 UTF-8 decode + 文本分块，
-# 二进制格式（PDF/DOCX）需专用提取器，暂不支持以避免静默数据损坏
-# （PDF 逐字节 UTF-8 decode 会全替换为 U+FFFD，产出垃圾 embedding）。
+# 文本类直接 UTF-8 decode；PDF/DOCX 由 parser 模块走专用提取器
+# （pypdf / python-docx），避免二进制当 UTF-8 decode 静默损坏成 U+FFFD。
 ALLOWED_MIME_TYPES: frozenset[str] = frozenset(
-    {"text/plain", "text/markdown"}
+    {"text/plain", "text/markdown", "application/pdf", DOCX_MIME}
 )
 # Content-Length 预检阈值：50MB 文档 + 1MB multipart 开销余量（security.spec.md§7.1）。
 _MAX_CONTENT_LENGTH = MAX_DOC_BYTES + 1024 * 1024
@@ -122,7 +122,11 @@ async def upload_document(
             f"不支持的文件类型 '{file.content_type}'，"
             f"仅允许: {', '.join(sorted(ALLOWED_MIME_TYPES))}"
         )
-    content = (await file.read()).decode("utf-8", errors="replace")
+    # parser 按 content-type 分发：文本走 UTF-8 decode，PDF/DOCX 走专用提取器。
+    # file.content_type 经白名单校验后必为 ALLOWED_MIME_TYPES 中的非空字符串，
+    # ``or ""`` 仅用于将 ``str | None`` 收敛为 ``str`` 以满足类型签名。
+    raw = await file.read()
+    content = extract_text(raw, file.content_type or "")
     if not content.strip():
         logger.warning(
             "file_upload_rejected",

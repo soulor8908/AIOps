@@ -9,9 +9,9 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
-from app.core.deps import get_current_user
+from app.core.deps import get_current_admin, get_current_user
 from app.domains.analytics import service
-from app.domains.analytics.models import ConversationOut, DashboardMetrics
+from app.domains.analytics.models import AIHealthMetrics, ConversationOut, DashboardMetrics
 from app.domains.auth.models import User
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
@@ -59,3 +59,16 @@ async def dashboard(
     current_user: User = Depends(get_current_user),
 ) -> DashboardMetrics:
     return await service.get_dashboard_metrics(session, days=days)
+
+
+@router.get("/ai-health", response_model=AIHealthMetrics)
+async def ai_health(
+    session: AsyncSession = Depends(get_session),
+    admin: User = Depends(get_current_admin),
+) -> AIHealthMetrics:
+    """AI 系统健康度（P2-9）。
+
+    需 admin 权限——与 ``/metrics`` 一致：错误率/调用量等运维指标含敏感信息，
+    匿名暴露会泄露系统稳定性信号，可被用于侧信道侦察（如定向压测已知高错误率模型）。
+    """
+    return await service.get_ai_health_metrics(session)

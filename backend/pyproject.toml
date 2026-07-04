@@ -26,6 +26,10 @@ dependencies = [
     "python-multipart>=0.0.12",
     # EmailStr（auth 域 UserCreate/LoginRequest）依赖 email-validator 运行期校验
     "email-validator>=2.1",
+    # 知识库文档解析（knowledge.spec.md§P3-13）：纯 Python 实现，无系统级依赖
+    # pypdf 提取 PDF 文本，python-docx 提取 DOCX 段落，避免二进制当 UTF-8 decode 静默损坏
+    "pypdf>=4.0",
+    "python-docx>=1.1",
 ]
 
 [project.optional-dependencies]
@@ -85,4 +89,10 @@ warn_unused_configs = true
 
 [[tool.mypy.overrides]]
 module = ["pgvector.*"]
+ignore_missing_imports = true
+
+# pypdf / python-docx 暂未提供 py.typed 类型存根，忽略缺失导入
+# （运行期行为已由 tests/test_knowledge_parser.py 覆盖）
+[[tool.mypy.overrides]]
+module = ["pypdf.*", "docx.*"]
 ignore_missing_imports = true

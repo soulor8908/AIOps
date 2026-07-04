@@ -112,6 +112,11 @@ class EvalRun(Base):
     pass_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     fail_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     score: Mapped[float | None] = mapped_column(Float)
+    # P1-6：基线 score（上次成功 run 的 score）+ regression 标记。
+    # 若当前 score 低于 baseline 超过 _REGRESSION_THRESHOLD（默认 0.05），
+    # 标记 is_regression=True，供回归检测告警。
+    baseline_score: Mapped[float | None] = mapped_column(Float)
+    is_regression: Mapped[bool] = mapped_column(default=False)
     started_at: Mapped[datetime | None] = mapped_column()
     finished_at: Mapped[datetime | None] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
@@ -181,6 +186,8 @@ class EvalRunOut(BaseModel):
     pass_count: int
     fail_count: int
     score: float | None = None
+    baseline_score: float | None = None
+    is_regression: bool = False
     started_at: datetime | None = None
     finished_at: datetime | None = None
     created_at: datetime

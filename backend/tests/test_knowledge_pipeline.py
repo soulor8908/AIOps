@@ -35,6 +35,7 @@ from app.domains.knowledge.chunker import chunk_text
 from app.domains.knowledge.embedder import embed_batch, embed_text
 from app.domains.knowledge.models import (
     EMBEDDING_DIM,
+    Chunk,
     KnowledgeBase,
     RAGQuery,
     SearchQuery,
@@ -277,7 +278,11 @@ def test_upload_succeeds_with_zero_vector_embeddings(client: TestClient) -> None
 
 
 def test_rag_sources_match_search_and_includes_usage(client: TestClient) -> None:
-    """RAG 返回的 sources 与检索结果一致，并附带 LLM usage（SPEC 4）。"""
+    """RAG 返回的 sources 与 hybrid 检索结果一致，并附带 LLM usage（SPEC 4）。
+
+    rag_query 走 hybrid search（向量 + BM25 + RRF），此处 mock ``_hybrid_search``
+    返回固定 sources，验证 RAG 契约：sources 透传 + LLM usage 透传。
+    """
     from app.core.llm_client import LLMClient, Message
     from app.domains.knowledge.models import SearchResult
 
@@ -299,9 +304,13 @@ def test_rag_sources_match_search_and_includes_usage(client: TestClient) -> None
     async def _scenario(session: AsyncSession) -> None:
         kb = await _seed_kb(session, name="rag-kb")
 
-        # mock search_kb 返回固定 sources
-        async def _fake_search(
-            s: AsyncSession, kb_id: uuid.UUID, query: SearchQuery
+        # mock _hybrid_search 返回固定 sources（跳过向量/BM25/RRF 内部逻辑）
+        async def _fake_hybrid(
+            s: AsyncSession,
+            k: Any,
+            question: str,
+            top_k: int,
+            rerank: bool = False,
         ) -> list[SearchResult]:
             return expected_sources
 
@@ -321,10 +330,10 @@ def test_rag_sources_match_search_and_includes_usage(client: TestClient) -> None
         async def _fake_close(self: LLMClient) -> None:
             pass
 
-        orig_search = kb_service.search_kb
+        orig_hybrid = kb_service._hybrid_search
         orig_chat = LLMClient.chat
         orig_close = LLMClient.close
-        kb_service.search_kb = _fake_search  # type: ignore[assignment]
+        kb_service._hybrid_search = _fake_hybrid  # type: ignore[assignment]
         LLMClient.chat = _fake_chat  # type: ignore[method-assign]
         LLMClient.close = _fake_close  # type: ignore[method-assign]
         try:
@@ -334,7 +343,7 @@ def test_rag_sources_match_search_and_includes_usage(client: TestClient) -> None
                 RAGQuery(question="q?", top_k=2),
             )
         finally:
-            kb_service.search_kb = orig_search
+            kb_service._hybrid_search = orig_hybrid  # type: ignore[assignment]
             LLMClient.chat = orig_chat  # type: ignore[method-assign]
             LLMClient.close = orig_close  # type: ignore[method-assign]
 
@@ -412,3 +421,285 @@ def test_chunk_text_normal_case() -> None:
         assert c.token_count > 0
     # step = 100 - 20 = 80，相邻块有 overlap
     assert len(chunks[0].content) == 100
+
+
+# ===================== 7. hybrid search: RRF 融合 + BM25 + LLM rerank =====================
+
+
+def test_rrf_fuse_combines_vector_and_bm25_ranks() -> None:
+    """RRF 融合：双路同时命中的 chunk 分数叠加，应排首位（P1-4）。
+
+    构造 3 个 chunk：
+    - chunk_a 在向量 rank=1、BM25 rank=2 → 双路命中，RRF 分数最高
+    - chunk_b 在向量 rank=2、BM25 rank=1 → 双路命中，RRF 分数次高
+    - chunk_c 仅向量 rank=3 → 单路命中，RRF 分数最低
+    验证融合后顺序为 [a, b, c]，且 a 的分数严格大于 c。
+    """
+    chunk_a = _FakeChunk("00000000-0000-0000-0000-000000000001", "a")
+    chunk_b = _FakeChunk("00000000-0000-0000-0000-000000000002", "b")
+    chunk_c = _FakeChunk("00000000-0000-0000-0000-000000000003", "c")
+
+    vector_rows: list[tuple[_FakeChunk, float]] = [
+        (chunk_a, 0.9),
+        (chunk_b, 0.8),
+        (chunk_c, 0.7),
+    ]
+    bm25_rows: list[tuple[_FakeChunk, float]] = [
+        (chunk_b, 1.0),
+        (chunk_a, 1.0),
+    ]
+    fused = kb_service._rrf_fuse(
+        vector_rows,  # type: ignore[arg-type]
+        bm25_rows,  # type: ignore[arg-type]
+        top_k=3,
+    )
+    assert len(fused) == 3
+    # a、b 双路命中，c 仅单路；a 与 b 的 RRF 分数接近但 a 在向量 rank=1 更优
+    assert fused[0][0].id == chunk_a.id
+    assert fused[1][0].id == chunk_b.id
+    assert fused[2][0].id == chunk_c.id
+    # 双路命中的分数严格高于单路
+    assert fused[0][1] > fused[2][1]
+    assert fused[1][1] > fused[2][1]
+
+
+def test_rrf_fuse_respects_top_k_limit() -> None:
+    """RRF 融合结果不超过 top_k（P1-4 边界）。"""
+    chunks = [_FakeChunk() for _ in range(5)]
+    vector_rows = [(c, 0.9) for c in chunks]
+    bm25_rows: list[tuple[_FakeChunk, float]] = []
+    fused = kb_service._rrf_fuse(
+        vector_rows,  # type: ignore[arg-type]
+        bm25_rows,  # type: ignore[arg-type]
+        top_k=3,
+    )
+    assert len(fused) == 3
+
+
+def test_rrf_fuse_empty_inputs_returns_empty() -> None:
+    """RRF 融合：两路均空时返回空列表（P1-4 边界）。"""
+    fused = kb_service._rrf_fuse([], [], top_k=5)
+    assert fused == []
+
+
+def test_bm25_search_sqlite_like_path(client: TestClient) -> None:
+    """BM25 检索在 SQLite 上降级为 LIKE 模糊匹配（P1-4）。
+
+    SQLite 无 tsvector/ts_rank_cd，service 层按方言判断走 content LIKE。
+    构造 3 个 chunk（含/不含查询词），验证 LIKE 命中正确 chunk。
+    """
+
+    async def _scenario(session: AsyncSession) -> None:
+        kb = await _seed_kb(session, name="bm25-kb")
+        # 直接写 Chunk（绕过 upload_document 的 embed_batch 调用）
+        for i, content in enumerate(
+            ["AIOps 是 AI 原生控制台", "另一个无关文档", "AIOps 部署指南"]
+        ):
+            session.add(
+                Chunk(
+                    document_id=uuid.uuid4(),
+                    knowledge_base_id=kb.id,
+                    chunk_index=i,
+                    content=content,
+                    embedding=None,
+                    metadata_={"title": "doc"},
+                )
+            )
+        await session.flush()
+
+        rows = await kb_service._bm25_search(session, kb.id, "AIOps", top_k=10)
+        # 仅含 "AIOps" 的 2 个 chunk 命中
+        assert len(rows) == 2
+        contents = {c.content for c, _ in rows}
+        assert "AIOps 是 AI 原生控制台" in contents
+        assert "AIOps 部署指南" in contents
+        assert "另一个无关文档" not in contents
+
+    _run(client, _scenario)
+
+
+def test_hybrid_search_sqlite_returns_bm25_results(client: TestClient) -> None:
+    """hybrid search 在 SQLite 上退化为纯 BM25（向量检索跳过），仍返回相关结果（P1-4）。
+
+    SQLite 上 cosine_distance 不可用，_vector_search 返回 []，hybrid = BM25 only。
+    验证 _hybrid_search 端到端在 SQLite 上工作并返回 SearchResult。
+    """
+
+    async def _scenario(session: AsyncSession) -> None:
+        kb = await _seed_kb(session, name="hybrid-kb")
+        for i, content in enumerate(
+            ["AIOps 是 AI 原生控制台", "另一个无关文档", "AIOps 部署指南"]
+        ):
+            session.add(
+                Chunk(
+                    document_id=uuid.uuid4(),
+                    knowledge_base_id=kb.id,
+                    chunk_index=i,
+                    content=content,
+                    embedding=None,
+                    metadata_={"title": "doc"},
+                )
+            )
+        await session.flush()
+
+        results = await kb_service._hybrid_search(
+            session, kb, "AIOps", top_k=5, rerank=False
+        )
+        # SQLite 向量检索跳过，BM25 命中 2 个含 "AIOps" 的 chunk
+        assert len(results) == 2
+        contents = {r.content for r in results}
+        assert "AIOps 是 AI 原生控制台" in contents
+        assert "AIOps 部署指南" in contents
+        # score 为 RRF 融合分数（仅 BM25 单路，rank=1: 1/(60+1)）
+        for r in results:
+            assert r.score > 0.0
+
+    _run(client, _scenario)
+
+
+def test_llm_rerank_reorders_by_llm_order() -> None:
+    """LLM reranker 按 LLM 输出的顺序重排候选（P1-4）。
+
+    mock LLMClient.chat 返回 {"order": [2, 0, 1]}，验证候选按此顺序重排。
+    """
+    from app.core.llm_client import LLMClient, LLMResponse, Message
+
+    chunk_a = _FakeChunk("00000000-0000-0000-0000-000000000001", "content-a")
+    chunk_b = _FakeChunk("00000000-0000-0000-0000-000000000002", "content-b")
+    chunk_c = _FakeChunk("00000000-0000-0000-0000-000000000003", "content-c")
+    candidates: list[tuple[_FakeChunk, float]] = [
+        (chunk_a, 0.03),
+        (chunk_b, 0.02),
+        (chunk_c, 0.01),
+    ]
+
+    async def _fake_chat(
+        self: LLMClient, messages: list[Message]
+    ) -> LLMResponse:
+        return LLMResponse(content='{"order": [2, 0, 1]}')
+
+    async def _fake_close(self: LLMClient) -> None:
+        pass
+
+    orig_chat = LLMClient.chat
+    orig_close = LLMClient.close
+    LLMClient.chat = _fake_chat  # type: ignore[method-assign]
+    LLMClient.close = _fake_close  # type: ignore[method-assign]
+    try:
+        import asyncio
+
+        reranked = asyncio.run(
+            kb_service._llm_rerank("q?", candidates, top_k=3)  # type: ignore[arg-type]
+        )
+    finally:
+        LLMClient.chat = orig_chat  # type: ignore[method-assign]
+        LLMClient.close = orig_close  # type: ignore[method-assign]
+
+    # LLM 指定顺序 [2, 0, 1] → [chunk_c, chunk_a, chunk_b]
+    assert len(reranked) == 3
+    assert reranked[0][0].id == chunk_c.id
+    assert reranked[1][0].id == chunk_a.id
+    assert reranked[2][0].id == chunk_b.id
+
+
+def test_llm_rerank_fallback_on_unparseable_output() -> None:
+    """LLM reranker 输出无法解析时兜底按原 RRF 顺序返回（P1-4）。"""
+    from app.core.llm_client import LLMClient, LLMResponse, Message
+
+    chunk_a = _FakeChunk("00000000-0000-0000-0000-000000000001", "a")
+    chunk_b = _FakeChunk("00000000-0000-0000-0000-000000000002", "b")
+    candidates: list[tuple[_FakeChunk, float]] = [
+        (chunk_a, 0.03),
+        (chunk_b, 0.02),
+    ]
+
+    async def _fake_chat(
+        self: LLMClient, messages: list[Message]
+    ) -> LLMResponse:
+        # 非 JSON 输出，触发解析失败兜底
+        return LLMResponse(content="I cannot rank these")
+
+    async def _fake_close(self: LLMClient) -> None:
+        pass
+
+    orig_chat = LLMClient.chat
+    orig_close = LLMClient.close
+    LLMClient.chat = _fake_chat  # type: ignore[method-assign]
+    LLMClient.close = _fake_close  # type: ignore[method-assign]
+    try:
+        import asyncio
+
+        reranked = asyncio.run(
+            kb_service._llm_rerank("q?", candidates, top_k=2)  # type: ignore[arg-type]
+        )
+    finally:
+        LLMClient.chat = orig_chat  # type: ignore[method-assign]
+        LLMClient.close = orig_close  # type: ignore[method-assign]
+
+    # 解析失败 → 保持原 RRF 顺序
+    assert len(reranked) == 2
+    assert reranked[0][0].id == chunk_a.id
+    assert reranked[1][0].id == chunk_b.id
+
+
+def test_llm_rerank_empty_candidates_returns_empty() -> None:
+    """LLM reranker 候选为空时直接返回空列表（P1-4 边界）。"""
+    import asyncio
+
+    reranked = asyncio.run(kb_service._llm_rerank("q?", [], top_k=5))
+    assert reranked == []
+
+
+def test_hybrid_search_rerank_flag_calls_llm_rerank(client: TestClient) -> None:
+    """_hybrid_search rerank=True 时调用 _llm_rerank，rerank=False 时不调用（P1-4）。
+
+    SQLite 上向量检索跳过，BM25（LIKE）命中 2 个含查询词的 chunk 作为候选。
+    mock _llm_rerank 记录调用，验证 rerank 标志正确传递。
+    """
+    rerank_called = {"value": False}
+
+    async def _scenario(session: AsyncSession) -> None:
+        kb = await _seed_kb(session, name="rerank-hybrid-kb")
+        # 两个 chunk 都含查询词，确保 BM25 返回 2 个候选给 rerank
+        for i, content in enumerate(["AIOps 文档一", "AIOps 文档二"]):
+            session.add(
+                Chunk(
+                    document_id=uuid.uuid4(),
+                    knowledge_base_id=kb.id,
+                    chunk_index=i,
+                    content=content,
+                    embedding=None,
+                    metadata_={"title": "doc"},
+                )
+            )
+        await session.flush()
+
+        async def _fake_rerank(
+            question: str,
+            candidates: list[tuple[Any, float]],
+            top_k: int,
+        ) -> list[tuple[Any, float]]:
+            rerank_called["value"] = True
+            return candidates[:top_k]
+
+        orig_rerank = kb_service._llm_rerank
+        kb_service._llm_rerank = _fake_rerank  # type: ignore[assignment]
+        try:
+            # rerank=True → 应调用 _llm_rerank
+            results = await kb_service._hybrid_search(
+                session, kb, "AIOps", top_k=2, rerank=True
+            )
+            assert rerank_called["value"] is True
+            assert len(results) == 2
+
+            # rerank=False → 不应调用 _llm_rerank
+            rerank_called["value"] = False
+            results_no_rerank = await kb_service._hybrid_search(
+                session, kb, "AIOps", top_k=2, rerank=False
+            )
+            assert rerank_called["value"] is False
+            assert len(results_no_rerank) == 2
+        finally:
+            kb_service._llm_rerank = orig_rerank  # type: ignore[assignment]
+
+    _run(client, _scenario)

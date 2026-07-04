@@ -125,3 +125,28 @@ class DashboardMetrics(BaseModel):
     avg_latency_ms: float = 0.0
     active_models: list[dict[str, Any]] = Field(default_factory=list)
     conversations_last_7d: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AIHealthMetrics(BaseModel):
+    """AI 系统健康度（P2-9）。
+
+    区别于 ``DashboardMetrics``（业务指标：token/成本/对话数），本 schema 关注
+    AI 系统本身的运维健康度，从进程内 ``metrics`` 注册表读取累计值：
+
+    - ``llm_error_rate``: LLM 调用错误率 = ``llm_errors`` /
+      (``llm_errors`` + ``llm_calls``)；无调用时为 0.0。
+    - ``tool_call_success_rate``: 工具调用成功率（当前 metrics 未记录，
+      保留字段，默认 1.0 表示无失败证据）。
+    - ``avg_latency_ms``: LLM 平均延迟（ms）；当前从 dashboard 的 messages
+      avg(latency_ms) 推算（含 user/assistant），未来可独立采集 TTFT。
+    - ``active_model_count``: 活跃模型数（有 ``llm_calls`` 记录的模型数）。
+    - ``total_llm_calls`` / ``total_llm_errors``: 累计调用与错误计数，
+      便于运维直观看量级。
+    """
+
+    llm_error_rate: float = 0.0
+    tool_call_success_rate: float = 1.0
+    avg_latency_ms: float = 0.0
+    active_model_count: int = 0
+    total_llm_calls: int = 0
+    total_llm_errors: int = 0
