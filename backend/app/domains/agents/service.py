@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+from collections.abc import AsyncIterator
 from typing import Any
 
 from sqlalchemy import select
@@ -147,6 +148,50 @@ async def execute_agent(
         )
     finally:
         await client.close()
+
+
+async def stream_agent(
+    session: AsyncSession, agent_id: uuid.UUID, request: ExecuteRequest
+) -> AsyncIterator[str]:
+    """P2-8：流式执行 Agent，yield SSE 事件。
+
+    与 ``execute_agent`` 的差异：最终答案轮逐 token 流式输出，前端可即时
+    渲染打字机效果。事务边界同 ``execute_agent``（commit 释放 DB 连接后流式）。
+
+    SSE 事件格式见 ``AgentExecutor.run_stream`` 的 yield 事件类型。
+    """
+    import json as _json
+
+    agent = await get_agent(session, agent_id)
+    config = await _build_llm_config(session, agent.model_alias, agent.temperature)
+    await session.commit()
+    client = LLMClient(config)
+    executor = AgentExecutor(client)
+    try:
+        async for event in executor.run_stream(
+            agent, request.input, max_turns=request.max_turns, context=request.context
+        ):
+            # ExecutionResult 不可直接 json 序列化，转 dict
+            if event["type"] == "done":
+                result = event["result"]
+                payload = {
+                    "type": "done",
+                    "result": {
+                        "agent_id": str(result.agent_id) if result.agent_id else None,
+                        "final_answer": result.final_answer,
+                        "total_tokens": result.total_tokens,
+                        "success": result.success,
+                        "traces": [t.model_dump(mode="json") for t in result.traces],
+                    },
+                }
+            else:
+                payload = event
+            yield f"data: {_json.dumps(payload, ensure_ascii=False)}\n\n"
+    except Exception as exc:  # noqa: BLE001
+        yield f"data: {_json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+    finally:
+        await client.close()
+    yield "data: [DONE]\n\n"
 
 
 async def _preload_delegate_targets(

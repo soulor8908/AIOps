@@ -148,6 +148,10 @@ async def _llm_rerank(
 
     prompt 列出所有候选（内容截断），LLM 输出按相关度降序的索引列表。
     解析失败或返回不全时兜底按原 RRF 顺序补全，保证不丢候选。
+
+    注意：此为 LLM rerank 的回退路径。优先使用 ``_cross_encoder_rerank``
+    （本地 cross-encoder，无 API 成本、低延迟）。仅当 sentence-transformers
+    未安装时才走到此分支。
     """
     if not candidates:
         return []
@@ -200,6 +204,81 @@ async def _llm_rerank(
     return reranked[:top_k]
 
 
+# P1-4：cross-encoder 本地 reranker。sentence-transformers 为可选重依赖，
+# 仅在显式安装后启用；未安装时 _cross_encoder_available 为 False，rerank
+# 回退到 LLM rerank。模型首次加载后缓存到 _CROSS_ENCODER_MODEL 避免重复加载。
+_CROSS_ENCODER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+_CROSS_ENCODER_MODEL: Any = None
+_CROSS_ENCODER_AVAILABLE: bool | None = None
+
+
+def _is_cross_encoder_available() -> bool:
+    """检测 sentence-transformers 是否可导入（惰性，结果缓存）。"""
+    global _CROSS_ENCODER_AVAILABLE
+    if _CROSS_ENCODER_AVAILABLE is None:
+        try:
+            import sentence_transformers  # noqa: F401
+
+            _CROSS_ENCODER_AVAILABLE = True
+        except ImportError:
+            _CROSS_ENCODER_AVAILABLE = False
+            logger.info(
+                "sentence-transformers 未安装，rerank 回退到 LLM rerank。"
+                "安装：pip install sentence-transformers"
+            )
+    return _CROSS_ENCODER_AVAILABLE
+
+
+def _get_cross_encoder() -> Any:
+    """惰性加载 cross-encoder 模型（首次调用加载，后续复用缓存）。"""
+    global _CROSS_ENCODER_MODEL
+    if _CROSS_ENCODER_MODEL is not None:
+        return _CROSS_ENCODER_MODEL
+    from sentence_transformers import CrossEncoder
+
+    _CROSS_ENCODER_MODEL = CrossEncoder(_CROSS_ENCODER_MODEL_NAME)
+    return _CROSS_ENCODER_MODEL
+
+
+async def _cross_encoder_rerank(
+    question: str,
+    candidates: list[tuple[Chunk, float]],
+    top_k: int,
+) -> list[tuple[Chunk, float]]:
+    """P1-4：cross-encoder 本地 reranker。
+
+    用 ``cross-encoder/ms-marco-MiniLM-L-6-v2`` 对 (question, doc) 对打分，
+    按分数降序取 top_k。本地 CPU 推理，无 API 成本、低延迟（~10ms/candidate）。
+    ``predict`` 是 CPU 密集型，放线程池避免阻塞事件循环。
+    """
+    if not candidates:
+        return []
+    import asyncio
+
+    model = _get_cross_encoder()
+    pairs = [(question, c.content[:_RERANK_CONTENT_LIMIT]) for c, _ in candidates]
+    # CPU 密集 → 线程池执行，避免阻塞 async 事件循环
+    scores = await asyncio.to_thread(model.predict, pairs)
+    ranked = sorted(
+        zip(candidates, scores, strict=True), key=lambda x: x[1], reverse=True
+    )
+    return [(c, float(s)) for (c, _), s in ranked[:top_k]]
+
+
+async def _rerank(
+    question: str,
+    candidates: list[tuple[Chunk, float]],
+    top_k: int,
+) -> list[tuple[Chunk, float]]:
+    """P1-4：rerank 调度。优先 cross-encoder 本地推理，不可用时回退 LLM rerank。"""
+    if _is_cross_encoder_available():
+        try:
+            return await _cross_encoder_rerank(question, candidates, top_k)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("cross-encoder rerank 失败，回退 LLM rerank: %s", exc)
+    return await _llm_rerank(question, candidates, top_k)
+
+
 async def _hybrid_search(
     session: AsyncSession,
     kb: KnowledgeBase,
@@ -207,9 +286,11 @@ async def _hybrid_search(
     top_k: int,
     rerank: bool = False,
 ) -> list[SearchResult]:
-    """hybrid 检索：向量 + BM25 + RRF + 可选 LLM rerank。
+    """hybrid 检索：向量 + BM25 + RRF + 可选 reranker。
 
-    默认不开 rerank（避免额外 LLM 成本），RRF 融合已显著优于纯向量。
+    默认不开 rerank（避免额外成本），RRF 融合已显著优于纯向量。
+    开启 rerank 时优先用 cross-encoder 本地推理（无 API 成本），
+    sentence-transformers 未安装则回退 LLM rerank。
     """
     from app.domains.knowledge.embedder import embed_text
 
@@ -221,7 +302,7 @@ async def _hybrid_search(
     fused = _rrf_fuse(vec_rows, bm25_rows, top_k)
 
     if rerank and fused:
-        fused = await _llm_rerank(question, fused, top_k)
+        fused = await _rerank(question, fused, top_k)
 
     return [
         SearchResult(

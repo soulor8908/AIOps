@@ -763,3 +763,184 @@ async def test_executor_invokes_delegate_tool_end_to_end() -> None:
     assert "RAG" in result.final_answer
     assert result.traces[0].observation == "[ask_expert] B 的回答：什么是 RAG? 是检索增强生成"
     assert result.success is True
+
+
+# ===================== P2-8：Agent streaming token 输出 =====================
+
+
+def _make_streaming_mock_llm(
+    chat_responses: list[LLMResponse], stream_tokens: list[str]
+) -> Any:
+    """构造支持 chat + stream_chat 的 mock LLMClient。
+
+    chat 按 chat_responses 顺序返回（用于判断工具调用），
+    stream_chat 逐个 yield stream_tokens（用于最终答案流式输出）。
+    """
+    call_idx = {"n": 0}
+
+    async def fake_chat(
+        messages: list[Message],
+        tools: list[Any] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        idx = min(call_idx["n"], len(chat_responses) - 1)
+        call_idx["n"] += 1
+        return chat_responses[idx]
+
+    async def fake_stream(messages: list[Message]) -> Any:
+        for token in stream_tokens:
+            yield token
+
+    stub = MagicMock(spec=LLMClient)
+    stub.chat = fake_chat
+    stub.stream_chat = fake_stream
+    stub.close = AsyncMock()
+    return stub
+
+
+async def test_run_stream_yields_tokens_for_final_answer() -> None:
+    """P2-8：无工具时 run_stream 逐 token yield 最终答案 + done 事件。"""
+    agent = _make_agent(system_prompt="回答问题", max_turns=3)
+    mock_llm = _make_streaming_mock_llm(
+        chat_responses=[LLMResponse(content="答案是 42", usage={"total_tokens": 10})],
+        stream_tokens=["答案", "是", " ", "42"],
+    )
+    executor = AgentExecutor(mock_llm)
+    events = [e async for e in executor.run_stream(agent, "问题")]
+
+    # 4 个 token 事件 + 1 个 done 事件
+    token_events = [e for e in events if e["type"] == "token"]
+    done_events = [e for e in events if e["type"] == "done"]
+    assert len(token_events) == 4
+    assert "".join(e["content"] for e in token_events) == "答案是 42"
+    assert len(done_events) == 1
+    result = done_events[0]["result"]
+    assert result.final_answer == "答案是 42"
+    assert result.success is True
+
+
+async def test_run_stream_yields_tool_and_observation_events() -> None:
+    """P2-8：工具调用轮 yield tool + observation 事件，最终轮 yield token。"""
+    agent = _make_agent(
+        tools=[{"name": "calc", "type": "calculator"}],
+        max_turns=5,
+    )
+
+    class StubTool:
+        async def execute(self, tool: Any, args: dict[str, Any]) -> str:
+            return "计算结果: 2"
+
+        def can_handle(self, tool_type: ToolType) -> bool:
+            return True
+
+    # chat 第 1 次返回 tool_call，第 2 次返回最终答案
+    call_idx = {"n": 0}
+
+    async def chat_seq(
+        messages: list[Message],
+        tools: list[Any] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        idx = call_idx["n"]
+        call_idx["n"] += 1
+        if idx == 0:
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="t1", name="calc", args={"expr": "1+1"})],
+                usage={"total_tokens": 5},
+            )
+        return LLMResponse(content="最终答案 2", usage={"total_tokens": 3})
+
+    async def fake_stream(messages: list[Message]) -> Any:
+        for token in ["最终", "答案", " ", "2"]:
+            yield token
+
+    mock_llm = MagicMock(spec=LLMClient)
+    mock_llm.chat = chat_seq
+    mock_llm.stream_chat = fake_stream
+    mock_llm.close = AsyncMock()
+    executor = AgentExecutor(mock_llm, tool_executor=StubTool())
+    events = [e async for e in executor.run_stream(agent, "算 1+1")]
+
+    tool_events = [e for e in events if e["type"] == "tool"]
+    obs_events = [e for e in events if e["type"] == "observation"]
+    token_events = [e for e in events if e["type"] == "token"]
+    done_events = [e for e in events if e["type"] == "done"]
+
+    assert len(tool_events) == 1
+    assert tool_events[0]["name"] == "calc"
+    assert len(obs_events) == 1
+    assert "计算结果: 2" in obs_events[0]["content"]
+    assert len(token_events) == 4
+    assert "".join(e["content"] for e in token_events) == "最终答案 2"
+    assert len(done_events) == 1
+    result = done_events[0]["result"]
+    assert result.success is True
+    assert len(result.traces) == 2  # 工具轮 + 最终答案轮
+
+
+async def test_run_stream_stream_chat_failure_degrades_to_full_answer() -> None:
+    """P2-8：stream_chat 抛异常时降级 yield 完整答案，不阻塞流。"""
+    agent = _make_agent(system_prompt="回答", max_turns=3)
+    mock_llm = MagicMock(spec=LLMClient)
+
+    async def fake_chat(
+        messages: list[Message],
+        tools: list[Any] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        return LLMResponse(content="完整答案", usage={"total_tokens": 5})
+
+    async def failing_stream(messages: list[Message]) -> Any:
+        raise RuntimeError("stream 不可用")
+        yield  # 让它成为 async generator
+
+    mock_llm.chat = fake_chat
+    mock_llm.stream_chat = failing_stream
+    mock_llm.close = AsyncMock()
+    executor = AgentExecutor(mock_llm)
+    events = [e async for e in executor.run_stream(agent, "问题")]
+
+    token_events = [e for e in events if e["type"] == "token"]
+    done_events = [e for e in events if e["type"] == "done"]
+    # 降级：yield 一个含完整答案的 token 事件
+    assert len(token_events) == 1
+    assert token_events[0]["content"] == "完整答案"
+    assert len(done_events) == 1
+    assert done_events[0]["result"].final_answer == "完整答案"
+
+
+async def test_run_stream_max_turns_yields_done_with_success_false() -> None:
+    """P2-8：达到 max_turns 仍未给出最终答案时，done 事件 success=False。"""
+    agent = _make_agent(tools=[{"name": "calc", "type": "calculator"}], max_turns=2)
+
+    class StubTool:
+        async def execute(self, tool: Any, args: dict[str, Any]) -> str:
+            return "结果"
+
+        def can_handle(self, tool_type: ToolType) -> bool:
+            return True
+
+    # 每轮都返回 tool_call，永不给最终答案
+    mock_llm = MagicMock(spec=LLMClient)
+
+    async def always_tool_call(
+        messages: list[Message],
+        tools: list[Any] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        return LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="t1", name="calc", args={"expr": "1"})],
+            usage={"total_tokens": 2},
+        )
+
+    mock_llm.chat = always_tool_call
+    mock_llm.close = AsyncMock()
+    executor = AgentExecutor(mock_llm, tool_executor=StubTool())
+    events = [e async for e in executor.run_stream(agent, "问题")]
+
+    done_events = [e for e in events if e["type"] == "done"]
+    assert len(done_events) == 1
+    result = done_events[0]["result"]
+    assert result.success is False
