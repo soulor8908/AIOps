@@ -7,6 +7,8 @@ P0-2 起用原生 function calling：OpenAI tools / Anthropic tool_use API，
 工具调用由 provider 结构化返回，executor 直接拿到 ToolCall 列表。
 
 P2-8：多工具并发执行（asyncio.gather）+ context 压缩（达阈值摘要）。
+P1-4：注入记忆后端（``MemoryBackend``），执行前检索相关历史注入 context，
+每轮结束后持久化 observation / final_answer，替换纯 LLM 摘要压缩。
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from app.core.llm_client import (
     ToolDef,
 )
 from app.core.metrics import metrics
+from app.domains.agents.memory import MemoryBackend
 from app.domains.agents.models import (
     Agent,
     ExecutionResult,
@@ -39,6 +42,8 @@ from app.domains.agents.models import (
 logger = logging.getLogger("app.agents.executor")
 
 # context 压缩阈值（P2-8）：超过则用 LLM 摘要历史，避免超 context window
+# P1-4：记忆检索优先于此阈值——有 memory 时每轮注入 top-k 相关历史，
+# 此阈值仍作为单次 run 内消息过长的兜底（如长 observation 累积）。
 _CONTEXT_COMPRESS_THRESHOLD = 20
 
 
@@ -127,9 +132,12 @@ class AgentExecutor:
         self,
         llm_client: LLMClient,
         tool_executor: ToolExecutor | None = None,
+        memory: MemoryBackend | None = None,
     ) -> None:
         self.llm = llm_client
         self.tools = tool_executor
+        # P1-4：记忆后端。None 时退化为无记忆（与 P1-4 前行为一致）。
+        self.memory = memory
 
     async def run(
         self,
@@ -148,6 +156,10 @@ class AgentExecutor:
         # P0-2：把 Agent.tools 转为 LLMClient 原生 ToolDef
         llm_tools = _agent_tools_to_llm_tools(agent.tools)
         messages = self._init_messages(agent, user_input, context)
+        # P1-4：检索相关历史记忆，注入为 system 消息。memory 为 None 或检索
+        # 失败时返回 []，退化为无记忆（与 P1-4 前行为一致）。
+        session_id = uuid.uuid4()
+        await self._inject_retrieved_history(messages, agent.id, user_input)
         traces: list[ExecutionTrace] = []
         final_answer = ""
         # success 仅在 LLM 给出最终答案时为 True；达到 max_turns 截断视为未完成。
@@ -159,6 +171,10 @@ class AgentExecutor:
                 messages = await self._compress_context(messages)
             done, answer = await self._run_turn(
                 turn, messages, llm_tools, traces
+            )
+            # P1-4：持久化本轮 content 到记忆（observation 或 final_answer）
+            await self._persist_turn_memory(
+                agent.id, session_id, turn, traces[-1]
             )
             if done:
                 final_answer = answer
@@ -218,6 +234,11 @@ class AgentExecutor:
         turns = min(max_turns or agent.max_turns, agent.max_turns)
         llm_tools = _agent_tools_to_llm_tools(agent.tools)
         messages = self._init_messages(agent, user_input, context)
+        # P1-4：流式模式同样检索历史注入，但不做 per-turn upsert（流式 loop
+        # 结构不同，per-turn 持久化会复杂化事件流）。最终答案在 done 事件前
+        # 持久化一次。
+        session_id = uuid.uuid4()
+        await self._inject_retrieved_history(messages, agent.id, user_input)
         traces: list[ExecutionTrace] = []
         final_answer = ""
         success = False
@@ -294,6 +315,15 @@ class AgentExecutor:
             )
 
         total_tokens = traces[-1].tokens if traces else 0
+        # P1-4：流式模式在 done 事件前持久化最终答案到记忆
+        if self.memory is not None and final_answer and traces:
+            await self.memory.upsert(
+                agent_id=agent.id,
+                session_id=session_id,
+                turn=len(traces),
+                content=final_answer,
+                metadata={"type": "final_answer", "turn": len(traces)},
+            )
         result = ExecutionResult(
             agent_id=agent.id,
             final_answer=final_answer,
@@ -396,6 +426,60 @@ class AgentExecutor:
                 Message(role="system", content=f"context: {json.dumps(context)}")
             )
         return messages
+
+    async def _inject_retrieved_history(
+        self,
+        messages: list[Message],
+        agent_id: uuid.UUID,
+        user_input: str,
+    ) -> None:
+        """P1-4：检索相关历史记忆，追加为 system 消息（原地修改 messages）。
+
+        memory 为 None 或检索返回空时不追加（避免无谓 system 消息污染 prompt）。
+        检索失败由 ``MemoryBackend`` 实现捕获，此处不 try/except。
+        """
+        if self.memory is None:
+            return
+        history = await self.memory.search(agent_id, user_input)
+        if not history:
+            return
+        messages.append(
+            Message(
+                role="system",
+                content=f"relevant_history: {json.dumps(history, ensure_ascii=False)}",
+            )
+        )
+
+    async def _persist_turn_memory(
+        self,
+        agent_id: uuid.UUID,
+        session_id: uuid.UUID,
+        turn: int,
+        trace: ExecutionTrace,
+    ) -> None:
+        """P1-4：持久化单轮 content 到记忆。
+
+        优先存 observation（工具产出的事实），无 observation 时存 thought
+        （最终答案轮 thought 即 final_answer）。memory 为 None 时 no-op，
+        upsert 失败由 ``MemoryBackend`` 实现捕获，不阻塞主流程。
+        """
+        if self.memory is None:
+            return
+        content = trace.observation or trace.thought
+        if not content:
+            return
+        metadata: dict[str, Any] = {"turn": turn}
+        if trace.observation:
+            metadata["type"] = "observation"
+        else:
+            metadata["type"] = "final_answer"
+        await self.memory.upsert(
+            agent_id=agent_id,
+            session_id=session_id,
+            turn=turn,
+            content=content,
+            metadata=metadata,
+        )
 
     async def _run_turn(
         self,

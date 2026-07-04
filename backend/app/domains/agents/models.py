@@ -12,13 +12,18 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from pgvector.sqlalchemy import Vector
 from pydantic import BaseModel, Field, field_validator
 from pydantic_core import PydanticCustomError
-from sqlalchemy import Float, Index, Integer, String, Text, func
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
+
+# P1-4：Agent 记忆向量维度，对齐 OpenAI text-embedding-3-small（1536）。
+# 与 knowledge/models.py 的 EMBEDDING_DIM 保持一致，复用同一 embedder。
+AGENT_MEMORY_EMBEDDING_DIM = 1536
 
 # ===================== 枚举 =====================
 
@@ -91,6 +96,41 @@ class Workflow(Base):
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (Index("idx_workflows_active", "is_active"),)
+
+
+class AgentMemoryChunk(Base):
+    """P1-4：Agent 记忆分块。把每轮 ReAct 的 observation / final_answer 向量化
+    存入 pgvector，下次执行时按当前 query 检索 top-k 相关历史片段注入 context。
+
+    与 knowledge ``Chunk`` 解耦——此处无 KB/document FK 绑定，按 ``agent_id``
+    隔离命名空间，``session_id`` 标识单次 ``execute_agent`` 调用，``turn`` 标识轮次。
+    """
+
+    __tablename__ = "agent_memory_chunks"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id", ondelete="CASCADE"), index=True
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    turn: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(AGENT_MEMORY_EMBEDDING_DIM))
+    metadata_: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    __table_args__ = (
+        # HNSW 向量索引，余弦距离；PG 专属，SQLite 上降级为普通索引（dialect kwargs 被忽略）
+        Index(
+            "idx_agent_memory_embedding",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
 
 
 # ===================== Schemas =====================
