@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import StreamingResponse
@@ -45,6 +46,36 @@ async def create_agent(
 ) -> AgentOut:
     agent = await service.create_agent(session, payload)
     return AgentOut.model_validate(agent)
+
+
+@router.get("/agents/failure-clusters")
+async def list_failure_clusters(
+    distance_threshold: float | None = Query(default=None, ge=0.0, le=2.0),
+    current_admin: User = Depends(get_current_admin),
+) -> list[dict[str, Any]]:
+    """查看失败模式聚类（需 admin 权限）。
+
+    返回按 count 降序的簇列表，每簇含代表消息、计数、样本。
+    ``distance_threshold`` 可覆盖默认阈值（余弦距离，越小簇越细）。
+
+    注意：此静态路径必须在 ``/agents/{agent_id}`` 之前注册，否则会被
+    路径参数拦截（与 P0-3 同模式）。
+    """
+    from app.core.failure_cluster import get_failure_clusterer
+
+    clusterer = get_failure_clusterer()
+    clusters = clusterer.cluster(distance_threshold=distance_threshold)
+    return [
+        {
+            "cluster_id": c.cluster_id,
+            "representative_message": c.representative_message,
+            "count": c.count,
+            "samples": [
+                {"message": s.message, "metadata": s.metadata} for s in c.samples
+            ],
+        }
+        for c in clusters
+    ]
 
 
 @router.get("/agents/{agent_id}", response_model=AgentOut)
