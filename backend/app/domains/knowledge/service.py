@@ -15,8 +15,9 @@ from sqlalchemy.orm import selectinload
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.llm_client import LLMClient, LLMConfig, Message
 from app.domains.knowledge.chunker import chunk_text
-from app.domains.knowledge.embedder import embed_batch
+from app.domains.knowledge.embedder import EMBEDDING_MODEL_REGISTRY, embed_batch
 from app.domains.knowledge.models import (
+    EMBEDDING_DIM,
     Chunk,
     Document,
     KnowledgeBase,
@@ -235,7 +236,24 @@ async def _hybrid_search(
 
 
 async def create_kb(session: AsyncSession, payload: KnowledgeBaseCreate) -> KnowledgeBase:
-    """创建知识库。"""
+    """创建知识库。
+
+    P1-7：校验 ``embedding_model`` 已在注册表登记，并校验其维度与 chunks.embedding
+    列维度（``EMBEDDING_DIM``）一致。维度不匹配会导致 pgvector 写入/检索崩溃，
+    在创建阶段拦截给出明确错误，优于上传时才暴露。
+    """
+    if payload.embedding_model not in EMBEDDING_MODEL_REGISTRY:
+        raise ValidationError(
+            f"embedding_model '{payload.embedding_model}' 未登记，"
+            f"可选: {sorted(EMBEDDING_MODEL_REGISTRY)}"
+        )
+    model_dim = EMBEDDING_MODEL_REGISTRY[payload.embedding_model]
+    if model_dim != EMBEDDING_DIM:
+        raise ValidationError(
+            f"embedding_model '{payload.embedding_model}' 维度 {model_dim} "
+            f"与 chunks.embedding 列维度 {EMBEDDING_DIM} 不匹配，"
+            f"请选择维度为 {EMBEDDING_DIM} 的模型"
+        )
     kb = KnowledgeBase(
         name=payload.name,
         description=payload.description,
@@ -302,6 +320,14 @@ async def upload_document(
     await session.flush()
     chunks = chunk_text(content, chunk_size=kb.chunk_size, overlap=kb.chunk_overlap)
     embeddings = await embed_batch([c.content for c in chunks], kb.embedding_model)
+    # P1-7：防御性校验返回向量维度与列维度一致（API 异常或模型配置漂移时兜底）
+    for emb in embeddings:
+        if len(emb) != EMBEDDING_DIM:
+            raise ValidationError(
+                f"embedding 返回维度 {len(emb)} 与 chunks.embedding 列维度 "
+                f"{EMBEDDING_DIM} 不匹配（model={kb.embedding_model}），"
+                f"已中止上传避免脏数据"
+            )
     for chunk, emb in zip(chunks, embeddings, strict=True):
         session.add(
             Chunk(

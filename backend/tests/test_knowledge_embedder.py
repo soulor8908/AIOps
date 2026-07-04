@@ -247,3 +247,38 @@ def test_zero_vector_is_immutable_in_practice() -> None:
     assert v1 is not v2  # 不同实例
     v1[0] = 1.0
     assert v2[0] == 0.0  # 修改 v1 不影响 v2
+
+
+# ===================== P1-7：向量维度解耦 =====================
+
+def test_embedding_model_registry_lists_known_models() -> None:
+    """P1-7：注册表登记已知模型及其维度。"""
+    from app.domains.knowledge.embedder import EMBEDDING_MODEL_REGISTRY
+
+    assert "text-embedding-3-small" in EMBEDDING_MODEL_REGISTRY
+    assert EMBEDDING_MODEL_REGISTRY["text-embedding-3-small"] == 1536
+    assert EMBEDDING_MODEL_REGISTRY["text-embedding-3-large"] == 3072
+
+
+def test_get_embedding_dim_returns_registry_value() -> None:
+    """P1-7：get_embedding_dim 返回注册表维度。"""
+    from app.domains.knowledge.embedder import get_embedding_dim
+
+    assert get_embedding_dim("text-embedding-3-small") == 1536
+    assert get_embedding_dim("text-embedding-3-large") == 3072
+
+
+def test_get_embedding_dim_raises_for_unknown_model() -> None:
+    """P1-7：未登记模型抛 KeyError（调用方应在校验阶段拦截）。"""
+    from app.domains.knowledge.embedder import get_embedding_dim
+
+    with pytest.raises(KeyError):
+        get_embedding_dim("unknown-model")
+
+
+def test_zero_vector_respects_dim_parameter() -> None:
+    """P1-7：_zero_vector(dim) 按传入维度生成，不再硬编码 1536。"""
+    assert len(_zero_vector(3072)) == 3072
+    assert len(_zero_vector(768)) == 768
+    # 默认值仍为 1536（向后兼容）
+    assert len(_zero_vector()) == 1536

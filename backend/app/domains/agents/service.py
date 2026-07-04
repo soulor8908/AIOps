@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.llm_client import LLMClient, LLMConfig, Provider
-from app.domains.agents.executor import AgentExecutor, execute_workflow_dag
+from app.domains.agents.executor import AgentDelegateExecutor, AgentExecutor, execute_workflow_dag
 from app.domains.agents.models import (
     Agent,
     AgentCreate,
@@ -28,6 +28,8 @@ logger = logging.getLogger("app.agents.service")
 
 MAX_NODES = 50
 MAX_TURNS = 10
+# P3-12：A2A 委托最大递归深度，防止 Agent A → B → A 循环调用耗尽栈/预算
+_MAX_DELEGATE_DEPTH = 3
 
 # ModelConfig.provider 值 → LLMClient 支持的 Provider（Literal["openai","anthropic","local"]）。
 # Azure OpenAI 与 custom 兼容 OpenAI 协议，映射到 "openai"。
@@ -50,6 +52,11 @@ async def create_agent(session: AsyncSession, payload: AgentCreate) -> Agent:
         tools=[t.model_dump() for t in payload.tools],
         max_turns=min(payload.max_turns, MAX_TURNS),
         temperature=payload.temperature,
+        # P3-11：自主运维开关透传
+        self_eval=payload.self_eval,
+        self_heal=payload.self_heal,
+        self_eval_threshold=payload.self_eval_threshold,
+        self_heal_max_retries=payload.self_heal_max_retries,
     )
     session.add(agent)
     await session.flush()
@@ -85,19 +92,97 @@ async def execute_agent(
     事务边界：读取 agent + 查询模型配置后立即 commit 释放 DB 连接，
     LLM 调用在事务外执行（避免长事务占连接池）。``expire_on_commit=False``
     确保 agent 对象在 commit 后仍可访问。
+
+    P3-12：若 Agent 配置了 ``agent_delegate`` 工具，构造 ``AgentDelegateExecutor``
+    实现 A2A 消息传递 —— 执行时把 input 传给目标 Agent，返回其 final_answer。
+    委托递归深度受限（``_MAX_DELEGATE_DEPTH``）防止 A→B→A 循环。
     """
     agent = await get_agent(session, agent_id)
     config = await _build_llm_config(session, agent.model_alias, agent.temperature)
+    has_delegate = any(
+        isinstance(t, dict) and t.get("type") == "agent_delegate"
+        for t in (agent.tools or [])
+    )
+    # P3-12：委托工具需要按 agent_id 加载目标 Agent，预取所有 delegate 目标
+    # 与其 model_config，在 commit 前完成 DB 读取。
+    delegate_agents: dict[uuid.UUID, Agent] = {}
+    delegate_configs: dict[uuid.UUID, LLMConfig] = {}
+    if has_delegate:
+        delegate_agents, delegate_configs = await _preload_delegate_targets(
+            session, agent
+        )
     # P1-3：提交事务释放 DB 连接，LLM 调用不在事务内。
     await session.commit()
     client = LLMClient(config)
-    executor = AgentExecutor(client)
+    tool_executor = None
+    if has_delegate:
+        # A2A runner 闭包：加载目标 Agent → 构造 LLMClient → 跑 AgentExecutor
+        async def _delegate_runner(
+            target_id: uuid.UUID, delegate_input: str, depth: int = 0
+        ) -> str:
+            if depth >= _MAX_DELEGATE_DEPTH:
+                return f"[委托深度超 {_MAX_DELEGATE_DEPTH}，拒绝递归以防循环]"
+            target = delegate_agents.get(target_id)
+            if target is None:
+                return f"[目标 Agent {target_id} 不存在]"
+            target_config = delegate_configs.get(target_id)
+            if target_config is None:
+                return f"[目标 Agent {target_id} 模型配置缺失]"
+            target_client = LLMClient(target_config)
+            target_executor = AgentExecutor(target_client)
+            try:
+                result = await target_executor.run(target, delegate_input)
+                return result.final_answer
+            finally:
+                await target_client.close()
+
+        tool_executor = AgentDelegateExecutor(
+            agent_tools=agent.tools,
+            agent_runner=_delegate_runner,
+        )
+    executor = AgentExecutor(client, tool_executor=tool_executor)
     try:
         return await executor.run(
             agent, request.input, max_turns=request.max_turns, context=request.context
         )
     finally:
         await client.close()
+
+
+async def _preload_delegate_targets(
+    session: AsyncSession, agent: Agent
+) -> tuple[dict[uuid.UUID, Agent], dict[uuid.UUID, LLMConfig]]:
+    """P3-12：预取所有 agent_delegate 工具引用的目标 Agent 及其 LLMConfig。
+
+    在 commit 前批量查询，避免委托执行时每路 DB 往返。返回两个 dict 按 agent_id 索引。
+    """
+    target_ids: set[uuid.UUID] = set()
+    for t in agent.tools or []:
+        if not isinstance(t, dict) or t.get("type") != "agent_delegate":
+            continue
+        aid = t.get("config", {}).get("agent_id")
+        if aid:
+            try:
+                target_ids.add(uuid.UUID(str(aid)))
+            except (ValueError, TypeError):
+                logger.warning("agent_delegate 工具 agent_id 无效: %s", aid)
+    if not target_ids:
+        return {}, {}
+    targets = {
+        a.id: a
+        for a in (
+            await session.execute(select(Agent).where(Agent.id.in_(target_ids)))
+        ).scalars().all()
+    }
+    configs: dict[uuid.UUID, LLMConfig] = {}
+    for tid, tgt in targets.items():
+        try:
+            configs[tid] = await _build_llm_config(
+                session, tgt.model_alias, tgt.temperature
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("委托目标 %s 模型配置加载失败", tid)
+    return targets, configs
 
 
 async def create_workflow(session: AsyncSession, payload: WorkflowDef) -> Workflow:

@@ -98,6 +98,15 @@ def _tool_parameters(name: str, ttype: str, config: dict[str, Any]) -> dict[str,
             "properties": {"code": {"type": "string"}},
             "required": ["code"],
         }
+    if ttype == "agent_delegate":
+        # P3-12：A2A 委托工具。input 为传给目标 Agent 的问题。
+        return {
+            "type": "object",
+            "properties": {
+                "input": {"type": "string", "description": "传给目标 Agent 的问题"}
+            },
+            "required": ["input"],
+        }
     # custom：透传 config 字段为 properties
     props = {k: {"type": "string"} for k in config}
     return {"type": "object", "properties": props or {}}
@@ -121,7 +130,12 @@ class AgentExecutor:
         max_turns: int | None = None,
         context: dict[str, Any] | None = None,
     ) -> ExecutionResult:
-        """执行 Agent。循环直到无工具调用或达到 max_turns。"""
+        """执行 Agent。循环直到无工具调用或达到 max_turns。
+
+        P3-11：若 ``agent.self_eval`` 为真，最终答案产出后用 LLM judge 自评。
+        若 ``agent.self_heal`` 为真且自评不达标，追加反馈消息重跑（最多
+        ``self_heal_max_retries`` 次）。自评失败不阻塞主流程，降级返回原答案。
+        """
         turns = min(max_turns or agent.max_turns, agent.max_turns)
         # P0-2：把 Agent.tools 转为 LLMClient 原生 ToolDef
         llm_tools = _agent_tools_to_llm_tools(agent.tools)
@@ -145,13 +159,103 @@ class AgentExecutor:
         else:
             final_answer = messages[-1].content if messages else "达到最大轮次未给出最终答案。"
         total_tokens = traces[-1].tokens if traces else 0
+
+        # P3-11：自主运维 — 自评 + 自愈合
+        eval_score: float | None = None
+        eval_reason: str | None = None
+        heal_attempts = 0
+        if getattr(agent, "self_eval", False):
+            eval_score, eval_reason, healed_answer, healed_tokens, heal_attempts = (
+                await self._self_eval_and_heal(
+                    agent, user_input, final_answer, messages, llm_tools, traces
+                )
+            )
+            if healed_answer is not None:
+                final_answer = healed_answer
+                total_tokens = healed_tokens
+                success = True
         return ExecutionResult(
             agent_id=agent.id,
             final_answer=final_answer,
             traces=traces,
             total_tokens=total_tokens,
             success=success,
+            eval_score=eval_score,
+            eval_reason=eval_reason,
+            heal_attempts=heal_attempts,
         )
+
+    async def _self_eval_and_heal(
+        self,
+        agent: Agent,
+        user_input: str,
+        initial_answer: str,
+        messages: list[Message],
+        llm_tools: list[ToolDef],
+        traces: list[ExecutionTrace],
+    ) -> tuple[float | None, str | None, str | None, int, int]:
+        """P3-11：自评答案质量，不达标则自愈合重试。
+
+        返回 (eval_score, eval_reason, healed_answer, healed_tokens, heal_attempts)。
+        - healed_answer 为 None 表示未愈合（自评已达标或自愈合关闭/耗尽）
+        - 自评调用失败时降级：返回 (None, None, None, 0, 0)，不阻塞主流程
+        """
+        from app.domains.evals.judge import judge_llm
+
+        threshold = float(getattr(agent, "self_eval_threshold", 0.7))
+        max_retries = (
+            int(getattr(agent, "self_heal_max_retries", 0))
+            if getattr(agent, "self_heal", False)
+            else 0
+        )
+        current_answer = initial_answer
+        heal_attempts = 0
+        try:
+            judge_result = await judge_llm(
+                actual=current_answer,
+                expected=user_input,
+                client=self.llm,
+                criteria="回答是否准确、相关且完整地回应了用户问题",
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("self-eval judge 调用失败，跳过自愈合")
+            return None, None, None, 0, 0
+        eval_score = judge_result.score
+        eval_reason = judge_result.reason
+        if eval_score >= threshold or max_retries <= 0:
+            return eval_score, eval_reason, None, 0, 0
+        # 自愈合：追加反馈消息重跑
+        for _ in range(max_retries):
+            heal_attempts += 1
+            feedback = (
+                f"上一轮回答质量自评不达标（score={eval_score:.2f}, "
+                f"threshold={threshold:.2f}，原因：{eval_reason}）。"
+                f"请改进回答，更准确、相关且完整地回应问题。"
+            )
+            messages.append(Message(role="assistant", content=current_answer))
+            messages.append(Message(role="user", content=feedback))
+            done, answer = await self._run_turn(
+                len(traces) + 1, messages, llm_tools, traces
+            )
+            if not done:
+                break
+            current_answer = answer
+            try:
+                judge_result = await judge_llm(
+                    actual=current_answer,
+                    expected=user_input,
+                    client=self.llm,
+                    criteria="回答是否准确、相关且完整地回应了用户问题",
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("self-heal judge 调用失败，保留当前答案")
+                break
+            eval_score = judge_result.score
+            eval_reason = judge_result.reason
+            if eval_score >= threshold:
+                break
+        total_tokens = traces[-1].tokens if traces else 0
+        return eval_score, eval_reason, current_answer, total_tokens, heal_attempts
 
     def _init_messages(
         self,
@@ -269,6 +373,69 @@ class _SimpleToolDef:
     """轻量 ToolDef 替身，仅满足 ToolExecutor.execute 签名（name 字段）。"""
 
     name: str
+
+
+class AgentDelegateExecutor:
+    """P3-12：multi-agent A2A 工具执行器。
+
+    把另一个 Agent 注册为可调用工具（tool type = ``agent_delegate``）。
+    执行时按 tool name 查找目标 agent_id，调用 ``agent_runner`` 跑目标 Agent，
+    返回其 ``final_answer`` 作为观察结果。
+
+    可组合：传入 ``inner`` ToolExecutor 处理非 delegate 工具，单实例即可服务
+    混合工具集（一个 Agent 同时有 search/calc 与 agent_delegate 工具）。
+
+    ``agent_runner`` 签名：``async (agent_id: uuid.UUID, input: str) -> str``，
+    由 service 层注入（负责加载目标 Agent + 构造 LLMClient + 跑 AgentExecutor）。
+    """
+
+    def __init__(
+        self,
+        agent_tools: list[dict[str, Any]],
+        agent_runner: Any,
+        inner: ToolExecutor | None = None,
+    ) -> None:
+        # name → tool config（含 agent_id），仅登记 agent_delegate 类型工具
+        self._delegate_map: dict[str, str] = {}
+        for t in agent_tools:
+            if not isinstance(t, dict):
+                continue
+            ttype = t.get("type", "")
+            if ttype == "agent_delegate":
+                name = t.get("name", "")
+                agent_id = t.get("config", {}).get("agent_id", "")
+                if name and agent_id:
+                    self._delegate_map[name] = str(agent_id)
+        self._runner = agent_runner
+        self._inner = inner
+
+    def can_handle(self, tool_type: ToolType) -> bool:
+        """是否可处理该工具类型。"""
+        if tool_type == ToolType.AGENT_DELEGATE:
+            return True
+        return self._inner.can_handle(tool_type) if self._inner else False
+
+    async def execute(self, tool: Any, args: dict[str, Any]) -> str:
+        """执行工具调用。agent_delegate 走 A2A 委托，其余转交 inner。"""
+        tool_name = getattr(tool, "name", "")
+        target_agent_id = self._delegate_map.get(tool_name)
+        if target_agent_id is not None:
+            # P3-12：A2A 委托 — 把 input 传给目标 Agent
+            delegate_input = str(args.get("input", args.get("query", "")))
+            try:
+                result: str = await self._runner(
+                    uuid.UUID(target_agent_id), delegate_input
+                )
+                return result
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "agent delegate %s -> %s 执行失败: %s",
+                    tool_name, target_agent_id, exc,
+                )
+                return f"[{tool_name} 委托失败] {exc}"
+        if self._inner is not None:
+            return await self._inner.execute(tool, args)
+        return f"[{tool_name} 无可用执行器]"
 
 
 async def execute_workflow_dag(

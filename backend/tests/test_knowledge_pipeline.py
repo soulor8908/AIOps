@@ -388,6 +388,66 @@ def test_upload_empty_content_produces_zero_chunks(client: TestClient) -> None:
     assert chunk_text("") == []
 
 
+# ===================== P1-7：向量维度解耦 =====================
+
+
+def test_create_kb_rejects_unknown_embedding_model(client: TestClient) -> None:
+    """P1-7：未登记的 embedding_model 在创建阶段被拒绝（明确错误优于上传时崩溃）。"""
+
+    async def _scenario(session: AsyncSession) -> None:
+        from app.domains.knowledge.models import KnowledgeBaseCreate
+
+        with pytest.raises(ValidationError) as exc_info:
+            await kb_service.create_kb(
+                session,
+                KnowledgeBaseCreate(
+                    name="bad-model-kb", embedding_model="unknown-model"
+                ),
+            )
+        assert "未登记" in str(exc_info.value)
+
+    _run(client, _scenario)
+
+
+def test_create_kb_rejects_dimension_mismatch(client: TestClient) -> None:
+    """P1-7：维度与 chunks.embedding 列不一致的模型在创建阶段被拒绝。
+
+    text-embedding-3-large 维度 3072 != EMBEDDING_DIM(1536)，创建即报错，
+    避免上传时 pgvector 写入崩溃。
+    """
+
+    async def _scenario(session: AsyncSession) -> None:
+        from app.domains.knowledge.models import KnowledgeBaseCreate
+
+        with pytest.raises(ValidationError) as exc_info:
+            await kb_service.create_kb(
+                session,
+                KnowledgeBaseCreate(
+                    name="dim-mismatch-kb", embedding_model="text-embedding-3-large"
+                ),
+            )
+        assert "维度" in str(exc_info.value)
+
+    _run(client, _scenario)
+
+
+def test_create_kb_accepts_registered_dim_matching_model(client: TestClient) -> None:
+    """P1-7：已登记且维度匹配的模型创建成功。"""
+
+    async def _scenario(session: AsyncSession) -> None:
+        from app.domains.knowledge.models import KnowledgeBaseCreate
+
+        kb = await kb_service.create_kb(
+            session,
+            KnowledgeBaseCreate(
+                name="ok-kb", embedding_model="text-embedding-3-small"
+            ),
+        )
+        assert kb.embedding_model == "text-embedding-3-small"
+
+    _run(client, _scenario)
+
+
 # ===================== 6. chunk_text overlap ≥ chunk_size 抛 ValueError =====================
 
 
