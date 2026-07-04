@@ -23,10 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import NotFoundError, ValidationError
 from app.domains.evals import service as eval_service
 from app.domains.evals.models import (
-    EvalCaseInput,
     EvalRun,
-    EvalRunCreate,
-    EvalSample,
     EvalSampleCreate,
     EvalStatus,
     JudgeType,
@@ -373,7 +370,7 @@ def test_run_online_eval_regression_detection(client: TestClient) -> None:
 def test_run_online_eval_llm_judge_uses_mocked_client(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """LLM judge 路径：mock _build_llm_client_if_needed 返回 stub，验证 judge_llm_with_sampling 被调用。"""
+    """LLM judge 路径：mock client + judge_llm_with_sampling，验证返回 PASSED。"""
 
     async def _scenario(session: AsyncSession) -> None:
         await _seed_golden_run(session, name="gold-llm")
@@ -517,7 +514,6 @@ def test_execute_agent_sample_hook_fires_when_rate_1(
     mock rng 强制命中采样，mock AsyncSessionLocal 验证 record_sample 被调。
     """
     import uuid as _uuid
-    from unittest.mock import patch
 
     from app.domains.agents import service as agent_service
     from app.domains.agents.models import Agent, ExecutionResult
