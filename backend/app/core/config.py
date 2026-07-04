@@ -142,6 +142,15 @@ class Settings(BaseSettings):
     agent_failure_cluster_distance_threshold: float = Field(
         default=0.3, alias="AGENT_FAILURE_CLUSTER_DISTANCE_THRESHOLD", ge=0.0, le=2.0
     )
+    # P2-10：Planning + Reflection。默认关闭。启用后 execute_agent 在 ReAct
+    # 循环前用 LLM 生成执行计划注入 system 消息，循环后用 LLM 对照 plan + traces
+    # 产出结构化反思存入 ExecutionResult。两者独立可单独启用。
+    agent_planning_enabled: bool = Field(
+        default=False, alias="AGENT_PLANNING_ENABLED"
+    )
+    agent_reflection_enabled: bool = Field(
+        default=False, alias="AGENT_REFLECTION_ENABLED"
+    )
 
     @property
     def access_token_expire_seconds(self) -> int:

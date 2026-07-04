@@ -284,6 +284,9 @@ class ExecutionResult(BaseModel):
     eval_score: float | None = None
     eval_reason: str | None = None
     heal_attempts: int = 0
+    # P2-10：执行前 plan + 执行后 reflection。对应功能关闭或 LLM 失败时为 None。
+    plan: str | None = None
+    reflection: str | None = None
 
 
 class ExecuteRequest(BaseModel):

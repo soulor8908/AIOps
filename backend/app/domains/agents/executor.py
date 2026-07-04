@@ -38,6 +38,7 @@ from app.domains.agents.models import (
     ExecutionTrace,
     ToolType,
 )
+from app.domains.agents.planning import Plan, Planner, Reflector
 from app.domains.agents.self_diagnose import SelfDiagnoser
 
 logger = logging.getLogger("app.agents.executor")
@@ -153,11 +154,17 @@ class AgentExecutor:
         llm_client: LLMClient,
         tool_executor: ToolExecutor | None = None,
         memory: MemoryBackend | None = None,
+        planner: Planner | None = None,
+        reflector: Reflector | None = None,
     ) -> None:
         self.llm = llm_client
         self.tools = tool_executor
         # P1-4：记忆后端。None 时退化为无记忆（与 P1-4 前行为一致）。
         self.memory = memory
+        # P2-10：planner/reflector。None 时退化为无 plan / 无 reflection。
+        # 两者独立可单独启用，plan 失败不影响 reflect，反之亦然。
+        self.planner = planner
+        self.reflector = reflector
 
     async def run(
         self,
@@ -180,6 +187,17 @@ class AgentExecutor:
         # 失败时返回 []，退化为无记忆（与 P1-4 前行为一致）。
         session_id = uuid.uuid4()
         await self._inject_retrieved_history(messages, agent.id, user_input)
+        # P2-10：执行前 plan。planner 为 None 或 LLM 失败时返回 None，
+        # 退化为无 plan 的 ReAct 行为。plan 注入为 system 消息引导 ReAct 循环。
+        plan_obj: Plan | None = None
+        if self.planner is not None:
+            plan_obj = await self.planner.plan(
+                user_input, tools=agent.tools, system_prompt=agent.system_prompt
+            )
+            if plan_obj is not None:
+                messages.append(
+                    Message(role="system", content=plan_obj.to_prompt())
+                )
         traces: list[ExecutionTrace] = []
         final_answer = ""
         # success 仅在 LLM 给出最终答案时为 True；达到 max_turns 截断视为未完成。
@@ -218,6 +236,16 @@ class AgentExecutor:
                 final_answer = healed_answer
                 total_tokens = healed_tokens
                 success = True
+        # P2-10：执行后 reflection。reflector 为 None 或 LLM 失败时返回 None，
+        # 不阻塞主流程。reflect 在 self-heal 之后执行，对最终答案（含 healed）
+        # 进行反思，确保 reflection 评估的是真正返回给用户的答案。
+        reflection_str: str | None = None
+        if self.reflector is not None:
+            reflection_obj = await self.reflector.reflect(
+                user_input, plan_obj, traces, final_answer
+            )
+            if reflection_obj is not None:
+                reflection_str = reflection_obj.to_summary()
         return ExecutionResult(
             agent_id=agent.id,
             final_answer=final_answer,
@@ -227,6 +255,8 @@ class AgentExecutor:
             eval_score=eval_score,
             eval_reason=eval_reason,
             heal_attempts=heal_attempts,
+            plan=plan_obj.to_prompt() if plan_obj is not None else None,
+            reflection=reflection_str,
         )
 
     async def run_stream(
@@ -259,6 +289,17 @@ class AgentExecutor:
         # 持久化一次。
         session_id = uuid.uuid4()
         await self._inject_retrieved_history(messages, agent.id, user_input)
+        # P2-10：流式模式同样支持 plan 注入（不影响事件流结构）。
+        # reflection 不执行（与 self-eval 同模式：流式不重跑/不二次调 LLM）。
+        plan_obj: Plan | None = None
+        if self.planner is not None:
+            plan_obj = await self.planner.plan(
+                user_input, tools=agent.tools, system_prompt=agent.system_prompt
+            )
+            if plan_obj is not None:
+                messages.append(
+                    Message(role="system", content=plan_obj.to_prompt())
+                )
         traces: list[ExecutionTrace] = []
         final_answer = ""
         success = False
@@ -350,6 +391,7 @@ class AgentExecutor:
             traces=traces,
             total_tokens=total_tokens,
             success=success,
+            plan=plan_obj.to_prompt() if plan_obj is not None else None,
         )
         yield {"type": "done", "result": result}
 
