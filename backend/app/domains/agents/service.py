@@ -29,6 +29,7 @@ from app.domains.agents.models import (
     Workflow,
     WorkflowDef,
 )
+from app.domains.agents.planning import Planner, Reflector
 from app.domains.agents.query_rewrite import MultiQueryMemoryBackend, QueryRewriter
 from app.domains.evals.models import EvalSampleCreate
 from app.domains.models.models import ModelConfig
@@ -89,6 +90,20 @@ def _build_model_router() -> ModelRouter:
         premium_alias=settings.agent_cost_premium_model_alias,
         budget=_get_budget_tracker(),
     )
+
+
+def _build_planner(client: LLMClient) -> Planner | None:
+    """P2-10：构造执行前规划器。planning 关 → None；开 → Planner。"""
+    if not settings.agent_planning_enabled:
+        return None
+    return Planner(client)
+
+
+def _build_reflector(client: LLMClient) -> Reflector | None:
+    """P2-10：构造执行后反思器。reflection 关 → None；开 → Reflector。"""
+    if not settings.agent_reflection_enabled:
+        return None
+    return Reflector(client)
 
 # ModelConfig.provider 值 → LLMClient 支持的 Provider（Literal["openai","anthropic","local"]）。
 # Azure OpenAI 与 custom 兼容 OpenAI 协议，映射到 "openai"。
@@ -204,7 +219,12 @@ async def execute_agent(
             if target_config is None:
                 return f"[目标 Agent {target_id} 模型配置缺失]"
             target_client = LLMClient(target_config)
-            target_executor = AgentExecutor(target_client)
+            target_executor = AgentExecutor(
+                target_client,
+                # P2-10：委托目标也支持 plan / reflection（与主 agent 同模式）
+                planner=_build_planner(target_client),
+                reflector=_build_reflector(target_client),
+            )
             try:
                 result = await target_executor.run(target, delegate_input)
                 return result.final_answer
@@ -220,6 +240,9 @@ async def execute_agent(
         tool_executor=tool_executor,
         # P1-4/P1-5：记忆后端（可选 query rewrite 包装）。默认 None。
         memory=_build_memory_backend(client),
+        # P2-10：planner / reflector。默认 None，配置开关启用时注入。
+        planner=_build_planner(client),
+        reflector=_build_reflector(client),
     )
     try:
         result = await executor.run(
@@ -298,6 +321,9 @@ async def stream_agent(
         client,
         # P1-4/P1-5：流式模式同样支持记忆 + query rewrite
         memory=_build_memory_backend(client),
+        # P2-10：流式模式支持 plan 注入；reflection 跳过（与 self-eval 同模式）
+        planner=_build_planner(client),
+        reflector=_build_reflector(client),
     )
     try:
         async for event in executor.run_stream(
@@ -452,7 +478,12 @@ async def execute_workflow(
             else _fallback_llm_config(agent.model_alias, agent.temperature)
         )
         client = LLMClient(config)
-        executor = AgentExecutor(client)
+        executor = AgentExecutor(
+            client,
+            # P2-10：workflow 节点也支持 plan / reflection
+            planner=_build_planner(client),
+            reflector=_build_reflector(client),
+        )
         try:
             return await executor.run(
                 agent,
