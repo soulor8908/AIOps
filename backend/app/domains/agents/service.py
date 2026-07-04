@@ -28,6 +28,7 @@ from app.domains.agents.models import (
     Workflow,
     WorkflowDef,
 )
+from app.domains.agents.query_rewrite import MultiQueryMemoryBackend, QueryRewriter
 from app.domains.evals.models import EvalSampleCreate
 from app.domains.models.models import ModelConfig
 
@@ -42,6 +43,25 @@ _MAX_DELEGATE_DEPTH = 3
 _SCHEDULED_TRIGGER_INPUT = "scheduled autonomous run"
 # P0-3：采样率检查用的模块级 random 实例（避免每次新建 + 便于测试 monkeypatch）。
 _sample_rng = random.Random()
+
+
+def _build_memory_backend(client: LLMClient) -> PgMemoryBackend | MultiQueryMemoryBackend | None:
+    """构造记忆后端。P1-4 + P1-5 组合：memory 关 → None；memory 开 + rewrite 关
+    → PgMemoryBackend；两者都开 → MultiQueryMemoryBackend 包装 PgMemoryBackend。
+
+    query_rewrite 依赖 memory（无 memory 则 rewrite 无意义）。
+    """
+    if not settings.agent_memory_enabled:
+        return None
+    backend = PgMemoryBackend(AsyncSessionLocal, top_k=settings.agent_memory_top_k)
+    if not settings.agent_query_rewrite_enabled:
+        return backend
+    rewriter = QueryRewriter(
+        client,
+        n_variants=settings.agent_query_rewrite_n_variants,
+        enable_hyde=settings.agent_query_rewrite_hyde,
+    )
+    return MultiQueryMemoryBackend(backend, rewriter)
 
 # ModelConfig.provider 值 → LLMClient 支持的 Provider（Literal["openai","anthropic","local"]）。
 # Azure OpenAI 与 custom 兼容 OpenAI 协议，映射到 "openai"。
@@ -160,13 +180,8 @@ async def execute_agent(
     executor = AgentExecutor(
         client,
         tool_executor=tool_executor,
-        # P1-4：记忆后端。默认关闭（settings.agent_memory_enabled=False），
-        # 启用后用 AsyncSessionLocal 开独立会话做检索/持久化，不污染请求事务。
-        memory=(
-            PgMemoryBackend(AsyncSessionLocal, top_k=settings.agent_memory_top_k)
-            if settings.agent_memory_enabled
-            else None
-        ),
+        # P1-4/P1-5：记忆后端（可选 query rewrite 包装）。默认 None。
+        memory=_build_memory_backend(client),
     )
     try:
         result = await executor.run(
@@ -240,12 +255,8 @@ async def stream_agent(
     client = LLMClient(config)
     executor = AgentExecutor(
         client,
-        # P1-4：流式模式同样支持记忆注入（检索历史 + done 前持久化最终答案）
-        memory=(
-            PgMemoryBackend(AsyncSessionLocal, top_k=settings.agent_memory_top_k)
-            if settings.agent_memory_enabled
-            else None
-        ),
+        # P1-4/P1-5：流式模式同样支持记忆 + query rewrite
+        memory=_build_memory_backend(client),
     )
     try:
         async for event in executor.run_stream(
