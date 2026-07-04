@@ -299,6 +299,7 @@ async def record_sample(session: AsyncSession, payload: EvalSampleCreate) -> Eva
         actual_output=payload.actual_output,
         expected_output=payload.expected_output,
         metadata_=payload.metadata,
+        priority=payload.priority,
     )
     session.add(sample)
     await session.commit()
@@ -311,16 +312,26 @@ async def list_samples(
     *,
     judged: bool | None = None,
     agent_id: uuid.UUID | None = None,
+    priority_min: int | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> list[EvalSample]:
-    """列样本，支持按 judged / agent_id 过滤。默认按 sampled_at desc。"""
+    """列样本，支持按 judged / agent_id / priority_min 过滤。
+
+    C5：默认按 ``priority DESC, sampled_at DESC`` 排序——高优先级样本排在前面，
+    使 ``run_online_eval`` 自动选取时优先 judge 重要样本（长输入 / self-heal 触发 /
+    低 eval_score 的请求更可能暴露回归）。
+    """
     stmt = select(EvalSample)
     if judged is not None:
         stmt = stmt.where(EvalSample.judged.is_(judged))
     if agent_id is not None:
         stmt = stmt.where(EvalSample.agent_id == agent_id)
-    stmt = stmt.order_by(EvalSample.sampled_at.desc()).limit(limit).offset(offset)
+    if priority_min is not None:
+        stmt = stmt.where(EvalSample.priority >= priority_min)
+    stmt = stmt.order_by(
+        EvalSample.priority.desc(), EvalSample.sampled_at.desc()
+    ).limit(limit).offset(offset)
     return list((await session.execute(stmt)).scalars().all())
 
 

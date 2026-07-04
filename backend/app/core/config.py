@@ -100,6 +100,17 @@ class Settings(BaseSettings):
     online_eval_sample_rate: float = Field(
         default=0.0, alias="ONLINE_EVAL_SAMPLE_RATE", ge=0.0, le=1.0
     )
+    # C5：分层采样——高优先级样本（长输入 / self-heal 触发 / 低 eval_score）的
+    # 采样率倍数。effective_rate = min(base_rate * boost, 1.0)。默认 5.0 意味着
+    # priority>0 的请求采样率放大 5 倍，确保稀有但易暴露回归的流量不被均匀采样稀释。
+    online_eval_sample_rate_boost: float = Field(
+        default=5.0, alias="ONLINE_EVAL_SAMPLE_RATE_BOOST", ge=1.0, le=100.0
+    )
+    # C5：priority 启发式阈值——输入字符数超过此值则 priority +1（长查询更可能
+    # 触发上下文压缩 / 多轮工具调用，回归价值高）。
+    online_eval_priority_input_len_threshold: int = Field(
+        default=200, alias="ONLINE_EVAL_PRIORITY_INPUT_LEN_THRESHOLD", ge=1
+    )
     # P1-4：Agent 记忆层。默认关闭，单测/CI 不启用（避免 pgvector 依赖）。
     # 启用后 execute_agent 构造 PgMemoryBackend 传入 executor，执行前检索
     # top-k 相关历史注入 context，每轮结束后持久化 observation/final_answer。
@@ -154,6 +165,12 @@ class Settings(BaseSettings):
     )
     agent_failure_cluster_distance_threshold: float = Field(
         default=0.3, alias="AGENT_FAILURE_CLUSTER_DISTANCE_THRESHOLD", ge=0.0, le=2.0
+    )
+    # C6：FailureClusterer SQLite DLQ 路径。空字符串 = 不启用 DLQ（纯内存，
+    # 与历史行为一致）。``:memory:`` = 进程内临时库（单测用）。文件路径 = 持久化
+    # 到磁盘，进程重启后可 replay 未 embed 的记录。生产建议配置文件路径。
+    agent_failure_cluster_dlq_path: str = Field(
+        default="", alias="AGENT_FAILURE_CLUSTER_DLQ_PATH"
     )
     # P2-10：Planning + Reflection。默认关闭。启用后 execute_agent 在 ReAct
     # 循环前用 LLM 生成执行计划注入 system 消息，循环后用 LLM 对照 plan + traces

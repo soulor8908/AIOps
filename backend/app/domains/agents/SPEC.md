@@ -83,3 +83,12 @@
 - 工具执行异常 → 记录 `[{name} 错误] {exc}` 观察结果，不中断循环
 - `tool_executor` 未配置 → 记录 `[tool executor 未配置，跳过工具调用]`
 - 达到 `max_turns` 截断 → `ExecutionResult.success = False`（视为执行失败而非成功）
+
+> **C6 SQLite DLQ**：`FailureClusterer`（`app/core/failure_cluster.py`）可选注入
+> `FailureDLQ`（aiosqlite 直连，不经 ORM）。`add()` 先入 DLQ（`embedded=0`）再
+> embed，embed 成功后 `mark_embedded`；embedder 失败时记录留 DLQ 待重试。
+> `replay_dlq(limit)` 取未 embed 记录重新 embed，成功后加入内存缓冲并标记。
+> 进程重启后 DLQ 保留未 embed 记录，避免丢失。`dlq=None` 时退化为纯内存
+> （与历史行为一致）。路径由 `AGENT_FAILURE_CLUSTER_DLQ_PATH` 配置
+> （空=不启用，`:memory:`=单测，文件路径=生产持久化）。
+> 测试：`tests/test_failure_cluster.py`（26 tests，含 9 个 C6 DLQ 用例）。

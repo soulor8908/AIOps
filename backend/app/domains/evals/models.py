@@ -158,11 +158,16 @@ class EvalSample(Base):
     judge_score: Mapped[float | None] = mapped_column(Float)
     judge_reason: Mapped[str | None] = mapped_column(Text)
     eval_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    # C5：样本优先级（≥0）。采集时按启发式计算（长输入 / self-heal 触发 / 低 eval_score
+    # 加分），用于：① 采集时分层采样（高优先级 boost 采样率）；② 评估时优先选取
+    # （list_samples / run_online_eval 按 priority DESC 排序，确保重要样本先被 judge）。
+    priority: Mapped[int] = mapped_column(default=0)
 
     __table_args__ = (
         Index("idx_eval_samples_judged", "judged"),
         Index("idx_eval_samples_sampled_at", "sampled_at"),
         Index("idx_eval_samples_agent", "agent_id"),
+        Index("idx_eval_samples_priority", "priority"),
     )
 
 
@@ -245,6 +250,8 @@ class EvalSampleCreate(BaseModel):
     actual_output: str = Field(min_length=1)
     expected_output: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # C5：采集时计算的优先级（execute_agent 钩子按启发式填充，手动录入默认 0）。
+    priority: int = Field(default=0, ge=0)
 
 
 class EvalSampleOut(BaseModel):
@@ -267,6 +274,7 @@ class EvalSampleOut(BaseModel):
     judge_score: float | None = None
     judge_reason: str | None = None
     eval_run_id: uuid.UUID | None = None
+    priority: int = 0
 
 
 class OnlineEvalRequest(BaseModel):

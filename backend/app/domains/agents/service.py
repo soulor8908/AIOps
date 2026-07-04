@@ -50,6 +50,31 @@ _SCHEDULED_TRIGGER_INPUT = "scheduled autonomous run"
 _sample_rng = random.Random()
 
 
+def _compute_sample_priority(
+    input_text: str, result: ExecutionResult
+) -> int:
+    """C5：按启发式计算样本优先级（≥0）。
+
+    高优先级样本在采集时获得 boost 采样率，在评估时优先被 ``run_online_eval``
+    选取。启发式维度（每个 +1，可叠加）：
+    - 输入长度超过 ``online_eval_priority_input_len_threshold``（长查询更可能
+      触发上下文压缩 / 多轮工具调用，回归价值高）
+    - ``heal_attempts > 0``（self-heal 被触发 = 原始输出未通过自评，是强回归信号）
+    - ``eval_score`` 不为 None 且 < 0.7（自评低分 = 输出质量可疑）
+
+    纯函数，无副作用，便于单测。
+    """
+    priority = 0
+    threshold = settings.online_eval_priority_input_len_threshold
+    if len(input_text) > threshold:
+        priority += 1
+    if result.heal_attempts > 0:
+        priority += 1
+    if result.eval_score is not None and result.eval_score < 0.7:
+        priority += 1
+    return priority
+
+
 def _build_memory_backend(client: LLMClient) -> PgMemoryBackend | MultiQueryMemoryBackend | None:
     """构造记忆后端。P1-4 + P1-5 组合：memory 关 → None；memory 开 + rewrite 关
     → PgMemoryBackend；两者都开 → MultiQueryMemoryBackend 包装 PgMemoryBackend。
@@ -302,20 +327,31 @@ async def execute_agent(
         router.record_usage(result.total_tokens)
     # P0-3：成功执行后按采样率异步记录样本（fire-and-forget，不阻塞响应）。
     # scheduled 触发的 input 是固定字符串，无评估价值，跳过采样。
+    # C5：分层采样——按启发式计算 priority，priority>0 的请求采样率 boost 倍，
+    # 确保长输入 / self-heal 触发 / 低 eval_score 的稀有流量不被均匀采样稀释。
     if (
         result.success
         and request.input != _SCHEDULED_TRIGGER_INPUT
         and settings.online_eval_sample_rate > 0.0
-        and _sample_rng.random() < settings.online_eval_sample_rate
     ):
-        asyncio.create_task(
-            _record_execution_sample(
-                agent_id=agent_id,
-                trigger_source="http",
-                input=request.input,
-                actual_output=result.final_answer,
+        priority = _compute_sample_priority(request.input, result)
+        effective_rate = settings.online_eval_sample_rate
+        if priority > 0:
+            effective_rate = min(
+                settings.online_eval_sample_rate
+                * settings.online_eval_sample_rate_boost,
+                1.0,
             )
-        )
+        if _sample_rng.random() < effective_rate:
+            asyncio.create_task(
+                _record_execution_sample(
+                    agent_id=agent_id,
+                    trigger_source="http",
+                    input=request.input,
+                    actual_output=result.final_answer,
+                    priority=priority,
+                )
+            )
     return result
 
 
@@ -325,11 +361,15 @@ async def _record_execution_sample(
     trigger_source: str,
     input: str,
     actual_output: str,
+    priority: int = 0,
 ) -> None:
     """P0-3：用独立 session 记录执行样本（fire-and-forget task）。
 
     不抛异常出函数——采样失败仅记日志，绝不影响主请求路径
     （observability.spec.md§5：指标/采样不阻塞请求路径）。
+
+    C5：``priority`` 由 ``_compute_sample_priority`` 计算，透传到 EvalSample.priority，
+    供 ``list_samples`` / ``run_online_eval`` 优先选取。
     """
     from app.domains.evals.service import record_sample
 
@@ -342,6 +382,7 @@ async def _record_execution_sample(
                     trigger_source=trigger_source,
                     input=input,
                     actual_output=actual_output,
+                    priority=priority,
                 ),
             )
     except Exception:

@@ -52,14 +52,19 @@ async def create_eval(
 async def list_samples(
     judged: bool | None = Query(default=None),
     agent_id: uuid.UUID | None = Query(default=None),
+    priority_min: int | None = Query(default=None, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> list[EvalSampleOut]:
-    """列生产采样样本，支持按 judged / agent_id 过滤。"""
+    """列生产采样样本，支持按 judged / agent_id / priority_min 过滤。
+
+    C5：结果按 ``priority DESC, sampled_at DESC`` 排序，高优先级样本在前。
+    """
     samples = await service.list_samples(
-        session, judged=judged, agent_id=agent_id, limit=limit, offset=offset
+        session, judged=judged, agent_id=agent_id,
+        priority_min=priority_min, limit=limit, offset=offset,
     )
     return [EvalSampleOut.model_validate(s) for s in samples]
 

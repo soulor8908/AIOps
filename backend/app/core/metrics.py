@@ -12,6 +12,7 @@ P1 阶段。多 worker 部署时可通过外挂 Prometheus pushgateway 或替换
 - ``llm_cost`` (counter): labels=[model]
 - ``llm_errors`` (counter): labels=[model, error_type]
 - ``llm_calls`` (counter): labels=[model]，成功调用计数（P2-9 AI 健康度用）
+- ``llm_cached_tokens`` (counter): labels=[model]，prompt cache 命中的 token 数（C4）
 - ``llm_ttft`` (histogram): labels=[model]，首 token 延迟（P2-9 TTFT 采集）
 - ``tool_calls`` (counter): labels=[tool_name]，工具调用计数（P2-9 工具成功率）
 - ``tool_errors`` (counter): labels=[tool_name, error_type]，工具失败计数（P2-9 失败模式聚类）
@@ -69,6 +70,9 @@ class MetricRegistry:
             "llm_cost": ("model",),
             "llm_errors": ("model", "error_type"),
             "llm_calls": ("model",),
+            # C4：prompt cache 命中的 token 数（OpenAI prompt_tokens_details.cached_tokens /
+            # Anthropic cache_read_input_tokens）。用于量化 prompt caching 实际节省。
+            "llm_cached_tokens": ("model",),
             "tool_calls": ("tool_name",),
             "tool_errors": ("tool_name", "error_type"),
             # P0-2：autonomous loop 运行计数，status ∈ {success, failed, timeout}
@@ -113,19 +117,28 @@ class MetricRegistry:
         input_tokens: int = 0,
         output_tokens: int = 0,
         cost: float = 0.0,
+        cached_tokens: int = 0,
     ) -> None:
         """记录 LLM 调用 token 与成本。
 
         - ``llm_tokens{model,direction="in"}`` += input_tokens
         - ``llm_tokens{model,direction="out"}`` += output_tokens
         - ``llm_cost{model}`` += cost
+        - ``llm_cached_tokens{model}`` += cached_tokens（C4，prompt cache 命中）
 
         负值被忽略：counter 必须单调递增（Prometheus 语义），misconfigured
         ``cost_per_1k_*`` 导致的负 cost 不应破坏单调性。
+
+        C4：``cached_tokens`` 取自 OpenAI ``prompt_tokens_details.cached_tokens``
+        或 Anthropic ``cache_read_input_tokens``。用于量化 prompt caching 实际节省
+        （cache 命中率 = cached_tokens / input_tokens），验证 P2-10 cache_control
+        标记的效果。``cached_tokens`` 不从 ``input_tokens`` 中扣除——两者分别记录，
+        避免双重含义（input_tokens 是计费总量，cached_tokens 是其中命中 cache 的子集）。
         """
         in_key = ("llm_tokens", (model, "in"))
         out_key = ("llm_tokens", (model, "out"))
         cost_key = ("llm_cost", (model,))
+        cached_key = ("llm_cached_tokens", (model,))
 
         with self._lock:
             if input_tokens > 0:
@@ -134,6 +147,8 @@ class MetricRegistry:
                 self._counters[out_key] += output_tokens
             if cost > 0:
                 self._counters[cost_key] += cost
+            if cached_tokens > 0:
+                self._counters[cached_key] += cached_tokens
 
     def record_llm_error(self, model: str, error_type: str) -> None:
         """记录 LLM 调用失败（observability.spec.md§5.1：错误率可观测）。

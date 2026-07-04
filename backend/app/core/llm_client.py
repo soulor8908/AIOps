@@ -700,7 +700,14 @@ class LLMClient:
     # ===================== 指标采集 =====================
 
     def _record_usage(self, response: LLMResponse) -> None:
-        """记录 token 与成本指标（observability.spec.md§5.1）。"""
+        """记录 token 与成本指标（observability.spec.md§5.1）。
+
+        C4：额外提取 prompt cache 命中的 token 数（``cached_tokens``）记入
+        ``llm_cached_tokens{model}``，用于量化 prompt caching 实际节省。
+        - OpenAI: ``usage.prompt_tokens_details.cached_tokens``
+        - Anthropic: ``usage.cache_read_input_tokens``
+        两者均缺省时记 0（保持向后兼容，老 provider 无 cache 字段不受影响）。
+        """
         in_tokens = int(
             response.usage.get("prompt_tokens")
             or response.usage.get("input_tokens")
@@ -715,11 +722,19 @@ class LLMClient:
             in_tokens / 1000.0 * self.config.cost_per_1k_input
             + out_tokens / 1000.0 * self.config.cost_per_1k_output
         )
+        # C4：prompt cache 命中 token 数（OpenAI / Anthropic 字段名不同，统一提取）
+        details = response.usage.get("prompt_tokens_details") or {}
+        cached_tokens = int(
+            details.get("cached_tokens")
+            or response.usage.get("cache_read_input_tokens")
+            or 0
+        )
         metrics.record_llm_usage(
             model=self.config.model,
             input_tokens=in_tokens,
             output_tokens=out_tokens,
             cost=cost,
+            cached_tokens=cached_tokens,
         )
 
     async def close(self) -> None:
