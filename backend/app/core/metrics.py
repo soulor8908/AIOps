@@ -71,10 +71,14 @@ class MetricRegistry:
             "llm_calls": ("model",),
             "tool_calls": ("tool_name",),
             "tool_errors": ("tool_name", "error_type"),
+            # P0-2：autonomous loop 运行计数，status ∈ {success, failed, timeout}
+            "agent_runs": ("agent_name", "status"),
         }
         self._histogram_label_names: dict[str, tuple[str, ...]] = {
             "request_latency": ("endpoint",),
             "llm_ttft": ("model",),
+            # P0-2：autonomous loop 单次执行耗时（秒级）
+            "agent_run_duration": ("agent_name",),
         }
 
     # ===================== 记录接口 =====================
@@ -195,6 +199,28 @@ class MetricRegistry:
         key = ("tool_errors", (tool_name, error_type))
         with self._lock:
             self._counters[key] += 1.0
+
+    def record_agent_run(
+        self, agent_name: str, status: str, duration_ms: float
+    ) -> None:
+        """P0-2：记录一次 autonomous loop agent 执行。
+
+        - ``agent_runs{agent_name,status}`` += 1（status ∈ success/failed/timeout）
+        - ``agent_run_duration{agent_name}`` 观察 duration_ms
+
+        与 ``last_run_status`` ORM 字段配对：DB 存最近一次状态，metrics 存累计
+        统计用于趋势分析。长任务（>10s）落入 +Inf 桶，count/sum 仍准确。
+        """
+        counter_key = ("agent_runs", (agent_name, status))
+        hist_key = ("agent_run_duration", (agent_name,))
+        with self._lock:
+            self._counters[counter_key] += 1.0
+            hist = self._histograms[hist_key]
+            hist.count += 1
+            hist.sum += duration_ms
+            for i, threshold in enumerate(_LATENCY_BUCKETS_WITH_INF):
+                if duration_ms <= threshold:
+                    hist.buckets[i] += 1
 
     def get_counter_sum(self, name: str) -> float:
         """读取某 counter 跨所有 label 组合的累计总和（P2-9 健康度聚合用）。

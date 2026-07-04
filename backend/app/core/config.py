@@ -82,6 +82,18 @@ class Settings(BaseSettings):
     default_llm_model: str = Field(default="gpt-4o-mini", alias="DEFAULT_LLM_MODEL")
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
+    # P0-2：Agent autonomous loop worker。默认关闭，单测/CI 不启动 worker。
+    # 启用后 lifespan 创建后台 task 周期扫描到期 agent 并并发执行。
+    agent_scheduler_enabled: bool = Field(default=False, alias="AGENT_SCHEDULER_ENABLED")
+    agent_scheduler_interval_seconds: int = Field(
+        default=60, alias="AGENT_SCHEDULER_INTERVAL_SECONDS"
+    )
+    agent_scheduler_concurrency: int = Field(
+        default=5, alias="AGENT_SCHEDULER_CONCURRENCY"
+    )
+    agent_scheduler_timeout_seconds: int = Field(
+        default=300, alias="AGENT_SCHEDULER_TIMEOUT_SECONDS"
+    )
 
     @property
     def access_token_expire_seconds(self) -> int:
