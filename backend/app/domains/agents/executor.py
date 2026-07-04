@@ -38,6 +38,7 @@ from app.domains.agents.models import (
     ExecutionTrace,
     ToolType,
 )
+from app.domains.agents.self_diagnose import SelfDiagnoser
 
 logger = logging.getLogger("app.agents.executor")
 
@@ -373,12 +374,14 @@ class AgentExecutor:
         if eval_score >= threshold or max_retries <= 0:
             return eval_score, eval_reason, None, 0, 0
         # 自愈合：追加反馈消息重跑
+        # P1-7：用 self-diagnose 替换通用反馈——先根因分析再选修复策略。
+        diagnoser = SelfDiagnoser()
         for _ in range(max_retries):
             heal_attempts += 1
+            diagnosis = diagnoser.diagnose(eval_reason or "", current_answer)
             feedback = (
                 f"上一轮回答质量自评不达标（score={eval_score:.2f}, "
-                f"threshold={threshold:.2f}，原因：{eval_reason}）。"
-                f"请改进回答，更准确、相关且完整地回应问题。"
+                f"threshold={threshold:.2f}）。{diagnosis.feedback}"
             )
             messages.append(Message(role="assistant", content=current_answer))
             messages.append(Message(role="user", content=feedback))
