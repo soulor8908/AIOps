@@ -48,6 +48,12 @@ dev = [
     # 限流测试用 fakeredis（security.spec.md§5）：无需真实 Redis 即可验证滑动窗口逻辑
     "fakeredis>=2.20",
 ]
+# P1-4：cross-encoder 本地 reranker。重依赖（torch + transformers，约 2GB+），
+# 作为可选 extras 单独安装，未安装时 rerank 自动回退到 LLM rerank。
+# 安装：pip install -e ".[reranker]"
+reranker = [
+    "sentence-transformers>=3.0",
+]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
@@ -95,4 +101,9 @@ ignore_missing_imports = true
 # （运行期行为已由 tests/test_knowledge_parser.py 覆盖）
 [[tool.mypy.overrides]]
 module = ["pypdf.*", "docx.*"]
+ignore_missing_imports = true
+
+# P1-4：sentence-transformers 为可选重依赖（reranker extras），暂未提供 py.typed
+[[tool.mypy.overrides]]
+module = ["sentence_transformers.*"]
 ignore_missing_imports = true

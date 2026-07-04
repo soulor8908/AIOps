@@ -710,11 +710,13 @@ def test_llm_rerank_empty_candidates_returns_empty() -> None:
     assert reranked == []
 
 
-def test_hybrid_search_rerank_flag_calls_llm_rerank(client: TestClient) -> None:
-    """_hybrid_search rerank=True 时调用 _llm_rerank，rerank=False 时不调用（P1-4）。
+def test_hybrid_search_rerank_flag_calls_rerank(client: TestClient) -> None:
+    """_hybrid_search rerank=True 时调用 _rerank，rerank=False 时不调用（P1-4）。
 
     SQLite 上向量检索跳过，BM25（LIKE）命中 2 个含查询词的 chunk 作为候选。
-    mock _llm_rerank 记录调用，验证 rerank 标志正确传递。
+    mock _rerank 记录调用，验证 rerank 标志正确传递。
+    _rerank 内部优先 cross-encoder（未安装时回退 LLM rerank），此处直接
+    mock _rerank 调度层，与具体 reranker 实现解耦。
     """
     rerank_called = {"value": False}
 
@@ -742,17 +744,17 @@ def test_hybrid_search_rerank_flag_calls_llm_rerank(client: TestClient) -> None:
             rerank_called["value"] = True
             return candidates[:top_k]
 
-        orig_rerank = kb_service._llm_rerank
-        kb_service._llm_rerank = _fake_rerank  # type: ignore[assignment]
+        orig_rerank = kb_service._rerank
+        kb_service._rerank = _fake_rerank  # type: ignore[assignment]
         try:
-            # rerank=True → 应调用 _llm_rerank
+            # rerank=True → 应调用 _rerank
             results = await kb_service._hybrid_search(
                 session, kb, "AIOps", top_k=2, rerank=True
             )
             assert rerank_called["value"] is True
             assert len(results) == 2
 
-            # rerank=False → 不应调用 _llm_rerank
+            # rerank=False → 不应调用 _rerank
             rerank_called["value"] = False
             results_no_rerank = await kb_service._hybrid_search(
                 session, kb, "AIOps", top_k=2, rerank=False
@@ -760,6 +762,88 @@ def test_hybrid_search_rerank_flag_calls_llm_rerank(client: TestClient) -> None:
             assert rerank_called["value"] is False
             assert len(results_no_rerank) == 2
         finally:
-            kb_service._llm_rerank = orig_rerank  # type: ignore[assignment]
+            kb_service._rerank = orig_rerank  # type: ignore[assignment]
+
+    _run(client, _scenario)
+
+
+def test_rerank_dispatch_falls_back_to_llm_when_cross_encoder_unavailable(
+    client: TestClient,
+) -> None:
+    """P1-4：sentence-transformers 未安装时 _rerank 回退到 _llm_rerank。
+
+    测试环境不安装 sentence-transformers，_is_cross_encoder_available() 返回 False，
+    _rerank 应直接调用 _llm_rerank。mock _llm_rerank 验证被调用。
+    """
+    llm_rerank_called = {"value": False}
+    orig_available = kb_service._CROSS_ENCODER_AVAILABLE
+
+    async def _fake_llm_rerank(
+        question: str,
+        candidates: list[tuple[Any, float]],
+        top_k: int,
+    ) -> list[tuple[Any, float]]:
+        llm_rerank_called["value"] = True
+        return candidates[:top_k]
+
+    async def _scenario(session: AsyncSession) -> None:
+        # 强制 cross-encoder 不可用（模拟未安装 sentence-transformers）
+        kb_service._CROSS_ENCODER_AVAILABLE = False
+        orig_llm_rerank = kb_service._llm_rerank
+        kb_service._llm_rerank = _fake_llm_rerank  # type: ignore[assignment]
+        try:
+            result = await kb_service._rerank("q?", [], top_k=2)
+            assert llm_rerank_called["value"] is True
+            assert result == []
+        finally:
+            kb_service._llm_rerank = orig_llm_rerank  # type: ignore[assignment]
+            kb_service._CROSS_ENCODER_AVAILABLE = orig_available
+
+    _run(client, _scenario)
+
+
+def test_rerank_dispatch_uses_cross_encoder_when_available(
+    client: TestClient,
+) -> None:
+    """P1-4：sentence-transformers 可用时 _rerank 走 cross-encoder 路径。
+
+    mock _is_cross_encoder_available 返回 True + _cross_encoder_rerank 记录调用，
+    验证优先走本地 cross-encoder 而非 LLM rerank。
+    """
+    ce_rerank_called = {"value": False}
+    llm_rerank_called = {"value": False}
+
+    async def _fake_ce_rerank(
+        question: str,
+        candidates: list[tuple[Any, float]],
+        top_k: int,
+    ) -> list[tuple[Any, float]]:
+        ce_rerank_called["value"] = True
+        return candidates[:top_k]
+
+    async def _fake_llm_rerank(
+        question: str,
+        candidates: list[tuple[Any, float]],
+        top_k: int,
+    ) -> list[tuple[Any, float]]:
+        llm_rerank_called["value"] = True
+        return candidates[:top_k]
+
+    async def _scenario(session: AsyncSession) -> None:
+        # 强制 cross-encoder 可用
+        orig_available = kb_service._CROSS_ENCODER_AVAILABLE
+        kb_service._CROSS_ENCODER_AVAILABLE = True
+        orig_ce_rerank = kb_service._cross_encoder_rerank
+        orig_llm_rerank = kb_service._llm_rerank
+        kb_service._cross_encoder_rerank = _fake_ce_rerank  # type: ignore[assignment]
+        kb_service._llm_rerank = _fake_llm_rerank  # type: ignore[assignment]
+        try:
+            await kb_service._rerank("q?", [], top_k=2)
+            assert ce_rerank_called["value"] is True
+            assert llm_rerank_called["value"] is False
+        finally:
+            kb_service._cross_encoder_rerank = orig_ce_rerank  # type: ignore[assignment]
+            kb_service._llm_rerank = orig_llm_rerank  # type: ignore[assignment]
+            kb_service._CROSS_ENCODER_AVAILABLE = orig_available
 
     _run(client, _scenario)

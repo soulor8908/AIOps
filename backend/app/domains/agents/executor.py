@@ -16,6 +16,7 @@ import json
 import logging
 import uuid
 from collections import deque
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
@@ -184,6 +185,105 @@ class AgentExecutor:
             eval_reason=eval_reason,
             heal_attempts=heal_attempts,
         )
+
+    async def run_stream(
+        self,
+        agent: Agent,
+        user_input: str,
+        max_turns: int | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """P2-8：流式执行 Agent，逐 token yield SSE 事件。
+
+        与 ``run()`` 的差异：最终答案轮用 ``stream_chat`` 逐 token 产出，
+        前端可即时渲染打字机效果；工具调用轮仍用阻塞 ``chat``（需完整响应才能
+        解析 tool_calls 并发执行）。
+
+        yield 事件类型：
+        - ``{"type": "token", "content": "..."}`` — 最终答案的逐 token 输出
+        - ``{"type": "tool", "name": "...", "args": {...}}`` — 工具调用通知
+        - ``{"type": "observation", "content": "..."}`` — 工具执行结果
+        - ``{"type": "done", "result": ExecutionResult}`` — 执行结束（含 traces/tokens）
+
+        self-eval/self-heal 在流式模式下不执行（重跑会重复输出 token 造成
+        前端混乱），需自评的 Agent 应使用阻塞 ``run()``。
+        """
+        turns = min(max_turns or agent.max_turns, agent.max_turns)
+        llm_tools = _agent_tools_to_llm_tools(agent.tools)
+        messages = self._init_messages(agent, user_input, context)
+        traces: list[ExecutionTrace] = []
+        final_answer = ""
+        success = False
+
+        for turn in range(1, turns + 1):
+            if len(messages) > _CONTEXT_COMPRESS_THRESHOLD:
+                messages = await self._compress_context(messages)
+            prev_tokens = traces[-1].tokens if traces else 0
+
+            # 先用阻塞 chat 判断是否要调工具（流式无法中途解析 tool_calls）
+            response: LLMResponse = await self.llm.chat(
+                messages, tools=llm_tools or None
+            )
+            total_tokens = prev_tokens + int(
+                response.usage.get("total_tokens", 0)
+            )
+
+            if not response.tool_calls:
+                # 最终答案轮：用 stream_chat 重新生成并逐 token yield
+                # （阻塞 chat 已拿到完整答案，但为流式体验重跑一次流式生成）
+                # 注意：stream_chat 不支持 tools，仅用于纯文本答案的流式输出
+                streamed_chars: list[str] = []
+                try:
+                    async for token in self.llm.stream_chat(messages):
+                        streamed_chars.append(token)
+                        yield {"type": "token", "content": token}
+                except Exception:  # noqa: BLE001
+                    # 流式失败降级：用阻塞 chat 已拿到的完整答案
+                    logger.warning("stream_chat 失败，降级返回完整答案")
+                    yield {"type": "token", "content": response.content}
+                    streamed_chars = [response.content]
+                final_answer = "".join(streamed_chars) or response.content
+                traces.append(ExecutionTrace(
+                    turn=turn, thought=final_answer, tokens=total_tokens
+                ))
+                success = True
+                break
+
+            # 工具调用轮：yield 工具调用 + 执行 + 观察事件
+            for tc in response.tool_calls:
+                yield {
+                    "type": "tool",
+                    "name": tc.name,
+                    "args": tc.args,
+                }
+            observation = await self._execute_tools(response.tool_calls)
+            yield {"type": "observation", "content": observation}
+            traces.append(ExecutionTrace(
+                turn=turn,
+                thought=response.content,
+                action=json.dumps(
+                    [{"name": c.name, "args": c.args} for c in response.tool_calls],
+                    ensure_ascii=False,
+                ),
+                observation=observation,
+                tokens=total_tokens,
+            ))
+            messages.append(Message(role="assistant", content=response.content))
+            messages.append(Message(role="tool", content=observation))
+        else:
+            final_answer = (
+                messages[-1].content if messages else "达到最大轮次未给出最终答案。"
+            )
+
+        total_tokens = traces[-1].tokens if traces else 0
+        result = ExecutionResult(
+            agent_id=agent.id,
+            final_answer=final_answer,
+            traces=traces,
+            total_tokens=total_tokens,
+            success=success,
+        )
+        yield {"type": "done", "result": result}
 
     async def _self_eval_and_heal(
         self,

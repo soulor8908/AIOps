@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
@@ -64,6 +65,24 @@ async def execute_agent(
     current_user: User = Depends(get_current_user),
 ) -> ExecutionResult:
     return await service.execute_agent(session, agent_id, payload)
+
+
+@router.post("/agents/{agent_id}/execute/stream")
+async def execute_agent_stream(
+    agent_id: uuid.UUID,
+    payload: ExecuteRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> StreamingResponse:
+    """P2-8：流式执行 Agent，SSE 逐 token 输出最终答案。
+
+    事件类型：token（逐 token）/ tool（工具调用）/ observation（观察）/ done / error。
+    前端用 EventSource 消费，打字机效果即时渲染。
+    """
+    return StreamingResponse(
+        service.stream_agent(session, agent_id, payload),
+        media_type="text/event-stream",
+    )
 
 
 # ===================== Workflows =====================
