@@ -116,6 +116,24 @@ class Settings(BaseSettings):
     agent_query_rewrite_hyde: bool = Field(
         default=True, alias="AGENT_QUERY_REWRITE_HYDE"
     )
+    # P1-6：成本感知模型路由。默认关闭。启用后按任务复杂度路由到
+    # cheap/default/premium 模型，token budget 超限熔断降级到 cheapest。
+    agent_cost_routing_enabled: bool = Field(
+        default=False, alias="AGENT_COST_ROUTING_ENABLED"
+    )
+    agent_cost_cheap_model_alias: str = Field(
+        default="cheap", alias="AGENT_COST_CHEAP_MODEL_ALIAS"
+    )
+    agent_cost_premium_model_alias: str = Field(
+        default="premium", alias="AGENT_COST_PREMIUM_MODEL_ALIAS"
+    )
+    # token budget 滑动窗口（0 = 不限制）。默认 0，生产按需配置。
+    agent_cost_token_budget: int = Field(
+        default=0, alias="AGENT_COST_TOKEN_BUDGET", ge=0
+    )
+    agent_cost_budget_window_seconds: int = Field(
+        default=3600, alias="AGENT_COST_BUDGET_WINDOW_SECONDS", ge=1
+    )
 
     @property
     def access_token_expire_seconds(self) -> int:
