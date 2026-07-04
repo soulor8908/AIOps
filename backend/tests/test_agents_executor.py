@@ -328,6 +328,104 @@ async def test_executor_no_tool_executor_configured() -> None:
     assert "未配置" in result.traces[0].observation
 
 
+# ===================== P2-9 工具调用指标采集 =====================
+
+
+async def test_executor_records_tool_call_metrics_on_success() -> None:
+    """P2-9：工具调用成功时记录 tool_calls{tool_name}，不记 tool_errors。"""
+    from app.core.metrics import metrics as registry
+
+    registry.reset()
+    try:
+        agent = _make_agent(
+            tools=[{"name": "search", "type": "search"}],
+            max_turns=5,
+        )
+        mock_llm = _make_mock_llm([
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="t1", name="search", args={"query": "q"})],
+                usage={"total_tokens": 5},
+            ),
+            LLMResponse(content="done", usage={"total_tokens": 2}),
+        ])
+        tool_exec = _StubToolExecutor({"search": "found"})
+        executor = AgentExecutor(mock_llm, tool_executor=tool_exec)
+        await executor.run(agent, "test")
+
+        assert registry.get_counter("tool_calls", ("search",)) == 1.0
+        assert registry.get_counter_sum("tool_errors") == 0.0
+    finally:
+        registry.reset()
+
+
+async def test_executor_records_tool_error_metrics_on_exception() -> None:
+    """P2-9：工具调用抛异常时记 tool_calls + tool_errors{tool_name,error_type}。
+
+    error_type 为异常类名（RuntimeError），用于失败模式聚类。
+    """
+    from app.core.metrics import metrics as registry
+
+    registry.reset()
+    try:
+        agent = _make_agent(
+            tools=[{"name": "calc", "type": "calculator"}],
+            max_turns=5,
+        )
+        mock_llm = _make_mock_llm([
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="t1", name="calc", args={"x": 1})],
+                usage={"total_tokens": 5},
+            ),
+            LLMResponse(content="recovered", usage={"total_tokens": 2}),
+        ])
+        executor = AgentExecutor(mock_llm, tool_executor=_ErrorToolExecutor())
+        await executor.run(agent, "test")
+
+        # 工具调用计数（无论成功失败）
+        assert registry.get_counter("tool_calls", ("calc",)) == 1.0
+        # 工具失败计数，error_type 为异常类名
+        assert registry.get_counter("tool_errors", ("calc", "RuntimeError")) == 1.0
+    finally:
+        registry.reset()
+
+
+async def test_executor_records_metrics_for_multiple_tool_calls() -> None:
+    """P2-9：单轮多个工具调用时每个工具都记 tool_calls。"""
+    from app.core.metrics import metrics as registry
+
+    registry.reset()
+    try:
+        agent = _make_agent(
+            tools=[
+                {"name": "search", "type": "search"},
+                {"name": "calc", "type": "calculator"},
+            ],
+            max_turns=5,
+        )
+        mock_llm = _make_mock_llm([
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(id="t1", name="search", args={"query": "q"}),
+                    ToolCall(id="t2", name="calc", args={"expr": "1+1"}),
+                ],
+                usage={"total_tokens": 8},
+            ),
+            LLMResponse(content="done", usage={"total_tokens": 2}),
+        ])
+        tool_exec = _StubToolExecutor({"search": "s", "calc": "c"})
+        executor = AgentExecutor(mock_llm, tool_executor=tool_exec)
+        await executor.run(agent, "test")
+
+        assert registry.get_counter("tool_calls", ("search",)) == 1.0
+        assert registry.get_counter("tool_calls", ("calc",)) == 1.0
+        assert registry.get_counter_sum("tool_calls") == 2.0
+    finally:
+        registry.reset()
+
+
 # ===================== token 累积 =====================
 
 

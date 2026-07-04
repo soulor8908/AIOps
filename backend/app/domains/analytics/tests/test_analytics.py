@@ -195,3 +195,103 @@ async def test_get_ai_health_metrics_error_rate(session: AsyncSession) -> None:
         assert health.active_model_count == 2
     finally:
         registry.reset()
+
+
+@pytest.mark.asyncio
+async def test_get_ai_health_metrics_tool_success_rate(session: AsyncSession) -> None:
+    """P2-9：tool_call_success_rate = 1 - tool_errors / tool_calls。"""
+    from app.core.metrics import metrics as registry
+
+    registry.reset()
+    try:
+        # search: 4 成功 + 1 失败（共 5 次调用）
+        for _ in range(5):
+            registry.record_tool_call("search")
+        registry.record_tool_error("search", "TimeoutError")
+        # 无工具调用时默认 1.0，这里 1 - 1/5 = 0.8
+        health = await service.get_ai_health_metrics(session)
+        assert abs(health.tool_call_success_rate - 0.8) < 1e-6
+    finally:
+        registry.reset()
+
+
+@pytest.mark.asyncio
+async def test_get_ai_health_metrics_no_tool_calls_defaults_healthy(
+    session: AsyncSession,
+) -> None:
+    """P2-9：无工具调用记录时 tool_call_success_rate 默认 1.0。"""
+    from app.core.metrics import metrics as registry
+
+    registry.reset()
+    try:
+        health = await service.get_ai_health_metrics(session)
+        assert health.tool_call_success_rate == 1.0
+    finally:
+        registry.reset()
+
+
+@pytest.mark.asyncio
+async def test_get_ai_health_metrics_avg_ttft(session: AsyncSession) -> None:
+    """P2-9：avg_ttft_ms 从 llm_ttft histogram 读取平均值。"""
+    from app.core.metrics import metrics as registry
+
+    registry.reset()
+    try:
+        registry.record_ttft("gpt-4o", 100.0)
+        registry.record_ttft("gpt-4o", 200.0)
+        # 平均 (100+200)/2 = 150
+        health = await service.get_ai_health_metrics(session)
+        assert abs(health.avg_ttft_ms - 150.0) < 1e-6
+    finally:
+        registry.reset()
+
+
+@pytest.mark.asyncio
+async def test_get_ai_health_metrics_failure_mode_clusters(
+    session: AsyncSession,
+) -> None:
+    """P2-9：failure_mode_clusters 返回 tool_errors top 5 聚类。"""
+    from app.core.metrics import metrics as registry
+
+    registry.reset()
+    try:
+        # search/TimeoutError 3 次（最多）
+        for _ in range(3):
+            registry.record_tool_error("search", "TimeoutError")
+        # calc/ValueError 2 次
+        for _ in range(2):
+            registry.record_tool_error("calc", "ValueError")
+        # http/HTTPError 1 次
+        registry.record_tool_error("http", "HTTPError")
+
+        health = await service.get_ai_health_metrics(session)
+        assert len(health.failure_mode_clusters) == 3
+        # 降序：search/TimeoutError 排首位
+        top = health.failure_mode_clusters[0]
+        assert top["tool_name"] == "search"
+        assert top["error_type"] == "TimeoutError"
+        assert top["count"] == 3
+        # 第二位 calc/ValueError
+        second = health.failure_mode_clusters[1]
+        assert second["tool_name"] == "calc"
+        assert second["count"] == 2
+    finally:
+        registry.reset()
+
+
+@pytest.mark.asyncio
+async def test_get_ai_health_metrics_failure_clusters_top_n_limit(
+    session: AsyncSession,
+) -> None:
+    """P2-9：failure_mode_clusters 上限 5，超出截断。"""
+    from app.core.metrics import metrics as registry
+
+    registry.reset()
+    try:
+        # 构造 6 个不同的 (tool, error_type) 组合
+        for i in range(6):
+            registry.record_tool_error(f"tool_{i}", "Error")
+        health = await service.get_ai_health_metrics(session)
+        assert len(health.failure_mode_clusters) == 5
+    finally:
+        registry.reset()

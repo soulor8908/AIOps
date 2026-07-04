@@ -178,6 +178,95 @@ def test_render_prometheus_int_value_no_decimal() -> None:
     assert "100.0" not in out
 
 
+# ===================== P2-9 工具调用 / TTFT / 失败模式聚类 =====================
+
+
+def test_record_tool_call_increments_counter() -> None:
+    """tool_calls{tool_name} 按工具名计数（无论成功失败）。"""
+    metrics.record_tool_call("search")
+    metrics.record_tool_call("search")
+    metrics.record_tool_call("calc")
+
+    assert metrics.get_counter("tool_calls", ("search",)) == 2.0
+    assert metrics.get_counter("tool_calls", ("calc",)) == 1.0
+
+
+def test_record_tool_error_increments_counter() -> None:
+    """tool_errors{tool_name,error_type} 按工具+错误类型计数。"""
+    metrics.record_tool_error("search", "TimeoutError")
+    metrics.record_tool_error("search", "TimeoutError")
+    metrics.record_tool_error("calc", "ValueError")
+
+    assert metrics.get_counter("tool_errors", ("search", "TimeoutError")) == 2.0
+    assert metrics.get_counter("tool_errors", ("calc", "ValueError")) == 1.0
+
+
+def test_record_ttft_records_histogram() -> None:
+    """llm_ttft{model} histogram 记录 count + sum。"""
+    metrics.record_ttft("gpt-4o", 50.0)
+    metrics.record_ttft("gpt-4o", 150.0)
+
+    state = metrics.get_histogram("llm_ttft", ("gpt-4o",))
+    assert state.count == 2
+    assert state.sum == 200.0
+
+
+def test_record_ttft_different_models_isolated() -> None:
+    """不同 model 的 TTFT 直方图独立。"""
+    metrics.record_ttft("gpt-4o", 50.0)
+    metrics.record_ttft("claude", 80.0)
+
+    assert metrics.get_histogram("llm_ttft", ("gpt-4o",)).count == 1
+    assert metrics.get_histogram("llm_ttft", ("claude",)).count == 1
+
+
+def test_get_counter_top_labels_desc_order() -> None:
+    """get_counter_top_labels 返回 value 降序 top N。"""
+    # 构造 3 个 (tool, error_type) 组合，count 各不同
+    metrics.record_tool_error("search", "TimeoutError")  # 3 次
+    metrics.record_tool_error("search", "TimeoutError")
+    metrics.record_tool_error("search", "TimeoutError")
+    metrics.record_tool_error("calc", "ValueError")  # 2 次
+    metrics.record_tool_error("calc", "ValueError")
+    metrics.record_tool_error("http", "HTTPError")  # 1 次
+
+    top = metrics.get_counter_top_labels("tool_errors", top_n=2)
+    assert len(top) == 2
+    assert top[0] == (("search", "TimeoutError"), 3.0)
+    assert top[1] == (("calc", "ValueError"), 2.0)
+
+
+def test_get_counter_top_labels_empty() -> None:
+    """无记录时返回空列表。"""
+    assert metrics.get_counter_top_labels("tool_errors") == []
+
+
+def test_get_histogram_avg() -> None:
+    """get_histogram_avg 跨所有 label 求平均。"""
+    metrics.record_ttft("gpt-4o", 100.0)
+    metrics.record_ttft("gpt-4o", 200.0)
+    metrics.record_ttft("claude", 300.0)
+
+    # (100 + 200 + 300) / 3 = 200.0
+    assert metrics.get_histogram_avg("llm_ttft") == 200.0
+
+
+def test_get_histogram_avg_no_samples() -> None:
+    """无样本时返回 0.0（避免除零）。"""
+    assert metrics.get_histogram_avg("llm_ttft") == 0.0
+
+
+def test_get_counter_sum_tool_metrics() -> None:
+    """get_counter_sum 对 tool_calls / tool_errors 全量汇总。"""
+    metrics.record_tool_call("search")
+    metrics.record_tool_call("calc")
+    metrics.record_tool_call("calc")
+    metrics.record_tool_error("calc", "ValueError")
+
+    assert metrics.get_counter_sum("tool_calls") == 3.0
+    assert metrics.get_counter_sum("tool_errors") == 1.0
+
+
 # ===================== 隔离性 =====================
 
 def test_metric_registry_isolation() -> None:

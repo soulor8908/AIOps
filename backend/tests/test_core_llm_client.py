@@ -871,3 +871,64 @@ async def test_stream_chat_unsupported_provider_raises() -> None:
                 pass
     finally:
         await client.close()
+
+
+# ===================== P2-9 TTFT 采集 =====================
+
+
+async def test_stream_chat_records_ttft_on_first_token() -> None:
+    """P2-9：stream_chat 首 token 产出时记录 llm_ttft{model}。"""
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    sse_body = _sse_lines([
+        json.dumps({"choices": [{"delta": {"content": "Hel"}}]}),
+        json.dumps({"choices": [{"delta": {"content": "lo"}}]}),
+        "[DONE]",
+    ])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=sse_body, headers={"content-type": "text/event-stream"}
+        )
+
+    config = LLMConfig(provider="openai", model="gpt-4o-ttft", api_key="k")
+    client = _make_client(config, handler, max_retries=0)
+    try:
+        async for _ in client.stream_chat([Message(role="user", content="hi")]):
+            pass
+    finally:
+        await client.close()
+
+    # 首 token 产出后应记录一次 TTFT（非每 token 记录）
+    state = metrics.get_histogram("llm_ttft", ("gpt-4o-ttft",))
+    assert state.count == 1
+    assert state.sum > 0.0
+    metrics.reset()
+
+
+async def test_stream_chat_no_ttft_when_no_tokens() -> None:
+    """P2-9：流式无 token 产出时不记录 TTFT。"""
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    # 空 SSE（仅 [DONE]，无 delta）
+    sse_body = _sse_lines(["[DONE]"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=sse_body, headers={"content-type": "text/event-stream"}
+        )
+
+    config = LLMConfig(provider="openai", model="gpt-4o-empty", api_key="k")
+    client = _make_client(config, handler, max_retries=0)
+    try:
+        async for _ in client.stream_chat([Message(role="user", content="hi")]):
+            pass
+    finally:
+        await client.close()
+
+    # 无 token → 无 TTFT 记录
+    state = metrics.get_histogram("llm_ttft", ("gpt-4o-empty",))
+    assert state.count == 0
+    metrics.reset()
