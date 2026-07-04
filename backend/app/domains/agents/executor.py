@@ -48,6 +48,25 @@ logger = logging.getLogger("app.agents.executor")
 _CONTEXT_COMPRESS_THRESHOLD = 20
 
 
+def _record_failure_safely(message: str, metadata: dict[str, Any]) -> None:
+    """P2-8：向 FailureClusterer 异步记录失败（fire-and-forget，不阻塞主流程）。
+
+    仅当 ``settings.agent_failure_clustering_enabled`` 为真时记录。
+    用 ``asyncio.create_task`` 避免 await 阻塞；失败仅记日志。
+    """
+    from app.core.config import settings
+
+    if not settings.agent_failure_clustering_enabled:
+        return
+    try:
+        from app.core.failure_cluster import get_failure_clusterer
+
+        clusterer = get_failure_clusterer()
+        asyncio.create_task(clusterer.add(message, metadata))
+    except Exception:  # noqa: BLE001
+        logger.debug("P2-8 failure record skipped", exc_info=True)
+
+
 class ToolExecutor(Protocol):
     """工具执行协议。executor 依赖此协议，具体实现由调用方注入。"""
 
@@ -541,6 +560,8 @@ class AgentExecutor:
             if isinstance(res, Exception):
                 # P2-9：记录失败，error_type 为异常类名用于失败模式聚类
                 metrics.record_tool_error(tc.name, type(res).__name__)
+                # P2-8：向量化 error message 存入 FailureClusterer（fire-and-forget）
+                _record_failure_safely(f"[{tc.name}] {res}", {"tool": tc.name})
                 logger.warning("tool %s execution failed", tc.name, exc_info=res)
                 lines.append(f"[{tc.name} 错误] {res}")
             else:

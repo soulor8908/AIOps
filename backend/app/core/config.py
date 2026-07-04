@@ -134,6 +134,14 @@ class Settings(BaseSettings):
     agent_cost_budget_window_seconds: int = Field(
         default=3600, alias="AGENT_COST_BUDGET_WINDOW_SECONDS", ge=1
     )
+    # P2-8：失败模式聚类。默认关闭。启用后 executor 把工具/LLM 失败的 error
+    # message 向量化存入 FailureClusterer，可通过 /agents/failure-clusters 查看。
+    agent_failure_clustering_enabled: bool = Field(
+        default=False, alias="AGENT_FAILURE_CLUSTERING_ENABLED"
+    )
+    agent_failure_cluster_distance_threshold: float = Field(
+        default=0.3, alias="AGENT_FAILURE_CLUSTER_DISTANCE_THRESHOLD", ge=0.0, le=2.0
+    )
 
     @property
     def access_token_expire_seconds(self) -> int:
