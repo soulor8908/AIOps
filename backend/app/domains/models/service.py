@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+from collections.abc import AsyncIterator
 from decimal import Decimal
 from typing import Any
 
@@ -181,6 +183,45 @@ async def chat_completion(
         finally:
             await client.close()
     raise LLMError(f"所有候选模型均失败: {last_error}")
+
+
+async def stream_chat_completion(
+    session: AsyncSession, alias: str, request: ChatRequest
+) -> AsyncIterator[str]:
+    """流式聊天补全（P0-1）。
+
+    与阻塞版 ``chat_completion`` 的差异：
+    - 只用 primary 候选（fallback 在流式下难以平滑切换，中途切换会导致
+      已输出 token 与新模型输出拼接错乱）。
+    - yield SSE 格式的 token 事件，供前端 EventSource 消费。
+    - 失败时 yield 一个 error 事件而非抛异常（流已开始，无法改 HTTP 状态码）。
+
+    SSE 事件格式：``data: {"token": "..."}\\n\\n``，结束 ``data: [DONE]\\n\\n``。
+    """
+    candidates = await route_model(session, alias, request.strategy)
+    if not candidates:
+        yield _sse_event({"error": "无可用模型"})
+        return
+    config = candidates[0]
+    if config.provider in ("azure_openai", "custom") and not config.api_base:
+        yield _sse_event({"error": f"模型 {config.alias} 未配置 api_base"})
+        return
+    llm_config = _to_llm_config(config, request)
+    messages = [Message(role=m.role, content=m.content) for m in request.messages]
+    client = LLMClient(llm_config)
+    try:
+        async for token in client.stream_chat(messages):
+            yield _sse_event({"token": token})
+    except LLMError as exc:
+        yield _sse_event({"error": str(exc)})
+    finally:
+        await client.close()
+    yield "data: [DONE]\n\n"
+
+
+def _sse_event(payload: dict[str, str]) -> str:
+    """构造 SSE data 事件行。"""
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 def _to_llm_config(config: ModelConfig, request: ChatRequest) -> LLMConfig:

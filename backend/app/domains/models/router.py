@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
@@ -82,3 +83,17 @@ async def chat(
     current_user: User = Depends(get_current_user),
 ) -> ChatResponse:
     return await service.chat_completion(session, alias, payload)
+
+
+@router.post("/{alias}/chat/stream")
+async def chat_stream(
+    alias: str,
+    payload: ChatRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> StreamingResponse:
+    """流式聊天补全（P0-1）。SSE 格式，供前端 EventSource 消费。"""
+    return StreamingResponse(
+        service.stream_chat_completion(session, alias, payload),
+        media_type="text/event-stream",
+    )

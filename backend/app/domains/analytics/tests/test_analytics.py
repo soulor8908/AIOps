@@ -149,3 +149,49 @@ async def test_dashboard_respects_days_window(session: AsyncSession) -> None:
     assert metrics.total_messages == 2
     assert len(metrics.active_models) == 1
     assert metrics.active_models[0]["model"] == "gpt-4o-mini"
+
+
+# ===================== P2-9 AI 系统健康度 =====================
+
+
+@pytest.mark.asyncio
+async def test_get_ai_health_metrics_empty(session: AsyncSession) -> None:
+    """无调用记录时健康度全 0（除 tool_call_success_rate 默认 1.0）。"""
+    from app.core.metrics import metrics as registry
+
+    registry.reset()
+    try:
+        health = await service.get_ai_health_metrics(session)
+        assert health.llm_error_rate == 0.0
+        assert health.tool_call_success_rate == 1.0
+        assert health.avg_latency_ms == 0.0
+        assert health.active_model_count == 0
+        assert health.total_llm_calls == 0
+        assert health.total_llm_errors == 0
+    finally:
+        registry.reset()
+
+
+@pytest.mark.asyncio
+async def test_get_ai_health_metrics_error_rate(session: AsyncSession) -> None:
+    """错误率 = llm_errors / (llm_errors + llm_calls)，活跃模型数合并两者。"""
+    from app.core.metrics import metrics as registry
+
+    registry.reset()
+    try:
+        # gpt-4o: 4 成功 + 1 错误
+        for _ in range(4):
+            registry.record_llm_call("gpt-4o")
+        registry.record_llm_error("gpt-4o", "non_retryable")
+        # claude: 仅 1 错误（无成功调用，但仍计入活跃模型）
+        registry.record_llm_error("claude", "retryable_exhausted")
+
+        health = await service.get_ai_health_metrics(session)
+        # 总计 4 calls + 2 errors = 6，error_rate = 2/6 ≈ 0.3333
+        assert health.total_llm_calls == 4
+        assert health.total_llm_errors == 2
+        assert abs(health.llm_error_rate - round(2 / 6, 4)) < 1e-6
+        # 活跃模型：gpt-4o + claude
+        assert health.active_model_count == 2
+    finally:
+        registry.reset()

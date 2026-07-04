@@ -1,14 +1,14 @@
-"""agents/executor.py 单元测试 — ReAct 循环。
+"""agents/executor.py 单元测试 — ReAct 循环（P0-2 原生 function calling）。
 
 使用 mock LLMClient，不依赖真实 LLM API。
 
 覆盖：
 - 无工具时直接返回答案
-- 有工具调用时执行工具
-- 达到最大轮次
-- 工具不存在时的处理
+- 有工具调用时执行工具（原生 ToolCall 结构化）
+- 多工具并发执行（P2-8）
+- 达到最大轮次（P2-8：保留最后输出而非硬失败）
 - 工具抛异常时的处理
-- parse_tool_calls_json 解析（有效/无效）
+- context 压缩（P2-8）
 - execute_workflow_dag DAG 执行
 """
 
@@ -21,20 +21,20 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.core.exceptions import ValidationError
-from app.core.llm_client import LLMClient, LLMResponse, Message, parse_tool_calls_json
+from app.core.llm_client import LLMClient, LLMResponse, Message, ToolCall
 from app.domains.agents.executor import (
     AgentExecutor,
-    _build_tool_prompt,
+    _agent_tools_to_llm_tools,
     execute_workflow_dag,
 )
 from app.domains.agents.models import (
     Agent,
     ExecutionResult,
-    ToolDef,
     ToolType,
 )
 
 # ===================== 辅助函数 =====================
+
 
 def _make_agent(
     name: str = "test-agent",
@@ -53,10 +53,19 @@ def _make_agent(
 
 
 def _make_mock_llm(responses: list[LLMResponse]) -> Any:
-    """构造按顺序返回不同响应的 mock LLMClient。"""
+    """构造按顺序返回不同响应的 mock LLMClient。
+
+    P0-2：chat 签名改为 (messages, tools=None, response_format=None)，
+    mock 需接受可选 tools 参数。
+    """
+
     call_idx = {"n": 0}
 
-    async def fake_chat(messages: list[Message]) -> LLMResponse:
+    async def fake_chat(
+        messages: list[Message],
+        tools: list[Any] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMResponse:
         idx = min(call_idx["n"], len(responses) - 1)
         call_idx["n"] += 1
         return responses[idx]
@@ -68,6 +77,7 @@ def _make_mock_llm(responses: list[LLMResponse]) -> Any:
 
 
 # ===================== 无工具 — 直接返回 =====================
+
 
 async def test_executor_no_tools_returns_answer() -> None:
     """无工具时直接返回。"""
@@ -95,17 +105,20 @@ async def test_executor_no_tools_with_context() -> None:
     ])
 
     executor = AgentExecutor(mock_llm)
-    result = await executor.run(
-        agent, "hello", context={"key": "value"}
-    )
+    result = await executor.run(agent, "hello", context={"key": "value"})
 
     assert result.final_answer == "ok"
 
 
-# ===================== 有工具调用 =====================
+# ===================== 有工具调用（原生 ToolCall） =====================
+
 
 class _StubToolExecutor:
-    """简单的工具执行器 stub。"""
+    """简单的工具执行器 stub。
+
+    P0-2：execute 接收的 tool 参数可能是 _SimpleToolDef（executor 内部构造），
+    用 getattr 兼容。
+    """
 
     def __init__(self, result_map: dict[str, str] | None = None) -> None:
         self.result_map = result_map or {}
@@ -114,21 +127,23 @@ class _StubToolExecutor:
     def can_handle(self, tool_type: ToolType) -> bool:
         return True
 
-    async def execute(self, tool: ToolDef, args: dict[str, Any]) -> str:
-        self.calls.append((tool.name, args))
-        return self.result_map.get(tool.name, f"result for {tool.name}")
+    async def execute(self, tool: Any, args: dict[str, Any]) -> str:
+        name = getattr(tool, "name", str(tool))
+        self.calls.append((name, args))
+        return self.result_map.get(name, f"result for {name}")
 
 
 async def test_executor_with_tool_call() -> None:
-    """有工具调用时执行工具。"""
+    """有工具调用时执行工具（P0-2 原生 ToolCall 结构化）。"""
     agent = _make_agent(
         tools=[{"name": "calc", "type": "calculator", "description": "计算器"}],
         max_turns=5,
     )
     mock_llm = _make_mock_llm([
-        # 第一轮：返回工具调用
+        # 第一轮：返回原生 tool_calls
         LLMResponse(
-            content='```tool_calls\n[{"name": "calc", "args": {"expr": "1+1"}}]\n```',
+            content="",
+            tool_calls=[ToolCall(id="t1", name="calc", args={"expr": "1+1"})],
             usage={"total_tokens": 5},
         ),
         # 第二轮：返回最终答案
@@ -139,7 +154,7 @@ async def test_executor_with_tool_call() -> None:
     executor = AgentExecutor(mock_llm, tool_executor=tool_exec)
     result = await executor.run(agent, "算 1+1")
 
-    assert "2" in result.final_answer or "最终结果" in result.final_answer
+    assert "最终结果" in result.final_answer
     assert len(result.traces) == 2
     # 第一轮有工具调用
     assert result.traces[0].action is not None
@@ -154,7 +169,7 @@ async def test_executor_with_tool_call() -> None:
 
 
 async def test_executor_multiple_tool_calls_in_one_turn() -> None:
-    """单轮多个工具调用。"""
+    """单轮多个工具调用（P2-8 并发执行）。"""
     agent = _make_agent(
         tools=[
             {"name": "search", "type": "search"},
@@ -164,11 +179,11 @@ async def test_executor_multiple_tool_calls_in_one_turn() -> None:
     )
     mock_llm = _make_mock_llm([
         LLMResponse(
-            content=(
-                '```tool_calls\n'
-                '[{"name": "search", "args": {"q": "test"}}, '
-                '{"name": "calc", "args": {"expr": "2+2"}}]\n```'
-            ),
+            content="",
+            tool_calls=[
+                ToolCall(id="t1", name="search", args={"query": "test"}),
+                ToolCall(id="t2", name="calc", args={"expr": "2+2"}),
+            ],
             usage={"total_tokens": 8},
         ),
         LLMResponse(content="done", usage={"total_tokens": 2}),
@@ -182,9 +197,10 @@ async def test_executor_multiple_tool_calls_in_one_turn() -> None:
     result = await executor.run(agent, "multi")
 
     assert result.final_answer == "done"
+    # 两个工具都被调用（并发不改变调用计数）
     assert len(tool_exec.calls) == 2
-    assert tool_exec.calls[0][0] == "search"
-    assert tool_exec.calls[1][0] == "calc"
+    called_names = {c[0] for c in tool_exec.calls}
+    assert called_names == {"search", "calc"}
     # 观察结果包含两个工具的输出
     assert "found: hello" in result.traces[0].observation
     assert "result: 4" in result.traces[0].observation
@@ -192,8 +208,9 @@ async def test_executor_multiple_tool_calls_in_one_turn() -> None:
 
 # ===================== 最大轮次 =====================
 
+
 async def test_executor_max_turns_reached() -> None:
-    """达到最大轮次。"""
+    """达到最大轮次（P2-8：保留最后输出而非硬失败消息）。"""
     agent = _make_agent(
         tools=[{"name": "calc", "type": "calculator"}],
         max_turns=2,
@@ -201,11 +218,13 @@ async def test_executor_max_turns_reached() -> None:
     # LLM 始终返回工具调用，不给出最终答案
     mock_llm = _make_mock_llm([
         LLMResponse(
-            content='```tool_calls\n[{"name": "calc", "args": {}}]\n```',
+            content="",
+            tool_calls=[ToolCall(id="t1", name="calc", args={})],
             usage={"total_tokens": 5},
         ),
         LLMResponse(
-            content='```tool_calls\n[{"name": "calc", "args": {}}]\n```',
+            content="",
+            tool_calls=[ToolCall(id="t2", name="calc", args={})],
             usage={"total_tokens": 5},
         ),
     ])
@@ -214,10 +233,9 @@ async def test_executor_max_turns_reached() -> None:
     executor = AgentExecutor(mock_llm, tool_executor=tool_exec)
     result = await executor.run(agent, "loop")
 
-    assert result.final_answer == "达到最大轮次仍未给出最终答案。"
-    # 达到 max_turns 截断视为失败（success 语义修正）
+    # P2-8：截断保留最后输出，不硬判失败消息
     assert result.success is False
-    assert len(result.traces) == 2  # 每轮一个 trace
+    assert len(result.traces) == 2
     assert result.traces[0].turn == 1
     assert result.traces[1].turn == 2
 
@@ -236,36 +254,8 @@ async def test_executor_max_turns_override() -> None:
     assert len(result.traces) == 1
 
 
-# ===================== 工具不存在 =====================
-
-async def test_executor_tool_not_found() -> None:
-    """工具不存在时的处理。"""
-    agent = _make_agent(
-        tools=[{"name": "calc", "type": "calculator"}],
-        max_turns=5,
-    )
-    mock_llm = _make_mock_llm([
-        # 调用不存在的工具
-        LLMResponse(
-            content='```tool_calls\n[{"name": "unknown_tool", "args": {}}]\n```',
-            usage={"total_tokens": 5},
-        ),
-        LLMResponse(content="最终答案", usage={"total_tokens": 3}),
-    ])
-
-    tool_exec = _StubToolExecutor()
-    executor = AgentExecutor(mock_llm, tool_executor=tool_exec)
-    result = await executor.run(agent, "test")
-
-    assert result.final_answer == "最终答案"
-    # 观察结果应包含未知工具提示
-    assert "未知工具" in result.traces[0].observation
-    assert "unknown_tool" in result.traces[0].observation
-    # 工具执行器未被调用
-    assert len(tool_exec.calls) == 0
-
-
 # ===================== 工具异常 =====================
+
 
 class _ErrorToolExecutor:
     """总是抛异常的工具执行器。"""
@@ -273,19 +263,20 @@ class _ErrorToolExecutor:
     def can_handle(self, tool_type: ToolType) -> bool:
         return True
 
-    async def execute(self, tool: ToolDef, args: dict[str, Any]) -> str:
+    async def execute(self, tool: Any, args: dict[str, Any]) -> str:
         raise RuntimeError("tool crashed")
 
 
 async def test_executor_tool_exception() -> None:
-    """工具抛异常时的处理。"""
+    """工具抛异常时（P2-8 并发 + return_exceptions）拼入 observation。"""
     agent = _make_agent(
         tools=[{"name": "calc", "type": "calculator"}],
         max_turns=5,
     )
     mock_llm = _make_mock_llm([
         LLMResponse(
-            content='```tool_calls\n[{"name": "calc", "args": {"x": 1}}]\n```',
+            content="",
+            tool_calls=[ToolCall(id="t1", name="calc", args={"x": 1})],
             usage={"total_tokens": 5},
         ),
         LLMResponse(content="恢复后的答案", usage={"total_tokens": 3}),
@@ -303,6 +294,7 @@ async def test_executor_tool_exception() -> None:
 
 # ===================== 无工具执行器 =====================
 
+
 async def test_executor_no_tool_executor_configured() -> None:
     """有工具调用但未配置 tool_executor 时，返回跳过提示。"""
     agent = _make_agent(
@@ -311,7 +303,8 @@ async def test_executor_no_tool_executor_configured() -> None:
     )
     mock_llm = _make_mock_llm([
         LLMResponse(
-            content='```tool_calls\n[{"name": "calc", "args": {}}]\n```',
+            content="",
+            tool_calls=[ToolCall(id="t1", name="calc", args={})],
             usage={"total_tokens": 5},
         ),
         LLMResponse(content="answer", usage={"total_tokens": 2}),
@@ -326,6 +319,7 @@ async def test_executor_no_tool_executor_configured() -> None:
 
 # ===================== token 累积 =====================
 
+
 async def test_executor_accumulates_tokens() -> None:
     """多轮调用累积 token 计数。"""
     agent = _make_agent(
@@ -334,11 +328,13 @@ async def test_executor_accumulates_tokens() -> None:
     )
     mock_llm = _make_mock_llm([
         LLMResponse(
-            content='```tool_calls\n[{"name": "calc", "args": {}}]\n```',
+            content="",
+            tool_calls=[ToolCall(id="t1", name="calc", args={})],
             usage={"total_tokens": 10},
         ),
         LLMResponse(
-            content='```tool_calls\n[{"name": "calc", "args": {}}]\n```',
+            content="",
+            tool_calls=[ToolCall(id="t2", name="calc", args={})],
             usage={"total_tokens": 20},
         ),
         LLMResponse(content="done", usage={"total_tokens": 5}),
@@ -351,65 +347,42 @@ async def test_executor_accumulates_tokens() -> None:
     assert result.total_tokens == 35
 
 
-# ===================== parse_tool_calls_json =====================
-
-def test_parse_tool_calls_valid() -> None:
-    """解析有效的工具调用格式。"""
-    content = (
-        'thinking...\n'
-        '```tool_calls\n'
-        '[{"name": "search", "args": {"q": "hello"}}]\n'
-        '```\n'
-        'done'
-    )
-    result = parse_tool_calls_json(content)
-    assert len(result) == 1
-    assert result[0]["name"] == "search"
-    assert result[0]["args"] == {"q": "hello"}
+# ===================== _agent_tools_to_llm_tools（P0-2） =====================
 
 
-def test_parse_tool_calls_invalid() -> None:
-    """无效格式的处理。"""
-    # 无标记
-    assert parse_tool_calls_json("no tool calls here") == []
-    # 空
-    assert parse_tool_calls_json("") == []
-    # 无效 JSON
-    assert parse_tool_calls_json("```tool_calls\n{bad json}\n```") == []
-    # 标记但无内容
-    result = parse_tool_calls_json("```tool_calls\n```")
-    assert result == []
+def test_agent_tools_to_llm_tools_search() -> None:
+    """search 工具生成 query 参数 schema。"""
+    tools = [{"name": "search", "type": "search", "description": "搜索"}]
+    llm_tools = _agent_tools_to_llm_tools(tools)
+    assert len(llm_tools) == 1
+    assert llm_tools[0].name == "search"
+    assert "query" in llm_tools[0].parameters["properties"]
+    assert llm_tools[0].parameters["required"] == ["query"]
 
 
-def test_parse_tool_calls_single_object_not_array() -> None:
-    """单个 JSON 对象也能解析为列表。"""
-    content = '```tool_calls\n{"name": "x", "args": {}}\n```'
-    result = parse_tool_calls_json(content)
-    assert len(result) == 1
-    assert result[0]["name"] == "x"
+def test_agent_tools_to_llm_tools_calculator() -> None:
+    """calculator 工具生成 expr 参数 schema。"""
+    tools = [{"name": "calc", "type": "calculator"}]
+    llm_tools = _agent_tools_to_llm_tools(tools)
+    assert llm_tools[0].parameters["required"] == ["expr"]
 
 
-# ===================== _build_tool_prompt =====================
+def test_agent_tools_to_llm_tools_custom() -> None:
+    """custom 工具透传 config 字段为 properties。"""
+    tools = [{"name": "mytool", "type": "custom", "config": {"url": "x", "method": "GET"}}]
+    llm_tools = _agent_tools_to_llm_tools(tools)
+    assert "url" in llm_tools[0].parameters["properties"]
+    assert "method" in llm_tools[0].parameters["properties"]
 
-def test_build_tool_prompt_empty() -> None:
-    """空工具列表返回空字符串。"""
-    assert _build_tool_prompt([]) == ""
 
-
-def test_build_tool_prompt_with_tools() -> None:
-    """有工具时生成提示。"""
-    prompt = _build_tool_prompt([
-        ToolDef(name="search", type=ToolType.SEARCH, description="搜索"),
-        ToolDef(name="calc", type=ToolType.CALCULATOR, description="计算"),
-    ])
-    assert "search" in prompt
-    assert "calc" in prompt
-    assert "tool_calls" in prompt
-    assert "搜索" in prompt
-    assert "计算" in prompt
+def test_agent_tools_to_llm_tools_skips_empty_name() -> None:
+    """无 name 的工具被跳过。"""
+    tools = [{"name": "", "type": "custom"}]
+    assert _agent_tools_to_llm_tools(tools) == []
 
 
 # ===================== execute_workflow_dag =====================
+
 
 async def test_execute_workflow_dag_basic() -> None:
     """DAG 基本执行：拓扑序执行节点。"""

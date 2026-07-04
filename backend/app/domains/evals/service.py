@@ -16,12 +16,12 @@ from sqlalchemy.ext.asyncio import (
 
 from app.core.config import settings
 from app.core.exceptions import LLMError, NotFoundError, ValidationError
-from app.core.llm_client import LLMClient, LLMConfig
+from app.core.llm_client import LLMClient, LLMConfig, get_llm_client
 from app.domains.evals.judge import (
     JudgeResult,
     judge_contains,
     judge_exact,
-    judge_llm,
+    judge_llm_with_sampling,
     judge_semantic,
 )
 from app.domains.evals.models import (
@@ -33,6 +33,11 @@ from app.domains.evals.models import (
 )
 
 logger = logging.getLogger("app.evals.service")
+
+# P1-6：regression 阈值。当前 score 低于 baseline 超过此值则标回归。
+_REGRESSION_THRESHOLD = 0.05
+# P1-6：LLM judge 多采样次数（抑制 ±0.1 噪声）。
+_LLM_JUDGE_SAMPLES = 3
 
 
 async def create_eval(session: AsyncSession, payload: EvalRunCreate) -> EvalRun:
@@ -77,7 +82,9 @@ async def run_eval(
 
     失败状态独立事务：执行期抛错时，ERROR 状态通过独立 session 落库，
     避免被请求级 ``get_session`` 的 rollback 吞掉（之前 flush 后 raise 导致
-    状态丢失）。LLM 判官客户端单例化并在 finally 中关闭，杜绝连接泄漏。
+    状态丢失）。LLM 判官客户端走应用级单例（P1-5 ``get_llm_client``），
+    整个 run_eval 生命周期复用，关闭由 app shutdown 的 ``close_all_clients``
+    统一负责，run_eval 不再 close。
 
     注：evals 为批处理任务，LLM 调用期间持有 DB 连接的影响小于 agents 的
     请求路径 ReAct 循环（agents 已在 ``execute_agent`` 中 commit 释放连接）。
@@ -87,7 +94,12 @@ async def run_eval(
     run.started_at = datetime.now(UTC)
     await session.flush()
 
-    # LLM 判官客户端仅在需要时创建，整个 run_eval 生命周期复用一个实例。
+    # P1-6：查同 name 上次成功 run 的 score 作为基线（golden dataset 回归对比）
+    baseline = await _fetch_baseline_score(session, run.name, eval_id)
+    run.baseline_score = baseline
+
+    # LLM 判官客户端仅在需要时获取单例（P1-5），整个 run_eval 生命周期复用。
+    # 关闭由 app lifespan shutdown 的 close_all_clients 负责，此处不 close。
     client = _build_llm_client_if_needed(run.judge_type)
     results: list[CaseResult] = []
     pass_count = 0
@@ -106,18 +118,50 @@ async def run_eval(
         bind = session.bind
         await _persist_error_status(bind, eval_id)
         raise
-    finally:
-        if client is not None:
-            await client.close()
 
     run.results = [r.model_dump(mode="json") for r in results]
     run.pass_count = pass_count
     run.fail_count = len(results) - pass_count
     run.score = pass_count / len(results) if results else 0.0
     run.status = EvalStatus.PASSED.value if run.score >= 0.85 else EvalStatus.FAILED.value
+    # P1-6：regression 检测。score 低于 baseline 超阈值则标回归。
+    run.is_regression = _detect_regression(run.score, baseline)
     run.finished_at = datetime.now(UTC)
     await session.flush()
     return run
+
+
+async def _fetch_baseline_score(
+    session: AsyncSession, name: str, current_id: uuid.UUID
+) -> float | None:
+    """P1-6：查询同 name 的上次成功 run 的 score 作为基线。
+
+    基线 = 同 name 中 created_at 早于当前 run、status ∈ {PASSED, FAILED}
+    的最近一条 run 的 score。用于回归检测（当前 score vs 基线）。
+    """
+    stmt = (
+        select(EvalRun.score)
+        .where(
+            EvalRun.name == name,
+            EvalRun.id != current_id,
+            EvalRun.status.in_([EvalStatus.PASSED.value, EvalStatus.FAILED.value]),
+            EvalRun.score.is_not(None),
+        )
+        .order_by(EvalRun.created_at.desc())
+        .limit(1)
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    return float(row) if row is not None else None
+
+
+def _detect_regression(score: float | None, baseline: float | None) -> bool:
+    """P1-6：判断是否回归。score 低于 baseline 超阈值则回归。
+
+    无 baseline（首次 run）不算回归。score 或 baseline 为 None 不算。
+    """
+    if score is None or baseline is None:
+        return False
+    return (baseline - score) > _REGRESSION_THRESHOLD
 
 
 async def _persist_error_status(
@@ -183,7 +227,10 @@ async def _judge_case(
     async def _llm() -> JudgeResult:
         if llm_client is None:
             raise LLMError("LLM 判官需要客户端，但未提供")
-        return await judge_llm(actual, expected, llm_client)
+        # P1-6：多采样取均值，抑制 LLM judge ±0.1 噪声
+        return await judge_llm_with_sampling(
+            actual, expected, llm_client, samples=_LLM_JUDGE_SAMPLES
+        )
 
     judge_map: dict[str, Any] = {
         JudgeType.EXACT.value: _exact,
@@ -211,10 +258,15 @@ async def _judge_case(
 
 
 def _build_llm_client_if_needed(judge_type: str) -> LLMClient | None:
-    """仅当判官类型为 LLM 时构造客户端，避免无谓的 httpx 连接。"""
+    """仅当判官类型为 LLM 时获取单例客户端（P1-5），避免无谓的 httpx 连接。
+
+    复用 ``get_llm_client`` 缓存：相同 provider+base_url+api_key+model 的配置
+    在应用生命周期内共享同一个 httpx 连接池。关闭由 app shutdown 统一负责，
+    调用方不应自行 close。
+    """
     if judge_type != JudgeType.LLM.value:
         return None
-    return LLMClient(
+    return get_llm_client(
         LLMConfig(
             provider="openai",
             model=settings.default_llm_model,

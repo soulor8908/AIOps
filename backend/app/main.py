@@ -34,6 +34,7 @@ from app.core.config import _PROD_ENVS, settings
 from app.core.database import engine, init_db
 from app.core.deps import get_current_admin
 from app.core.exceptions import AppError
+from app.core.llm_client import close_all_clients
 from app.core.logging import (
     request_id_var,
     reset_request_context,
@@ -69,6 +70,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await engine.dispose()
     await close_redis()
     await close_embedder_client()
+    # P1-5：释放 LLMClient 连接池单例（evals judge 等应用级 client）。
+    await close_all_clients()
 
 
 app = FastAPI(

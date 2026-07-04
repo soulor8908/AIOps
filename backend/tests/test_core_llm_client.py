@@ -88,7 +88,7 @@ def test_message_model() -> None:
     assert msg.content == "hello world"
 
     d = asdict(msg)
-    assert d == {"role": "user", "content": "hello world"}
+    assert d == {"role": "user", "content": "hello world", "cache_control": False}
 
     # 不同 role
     for role in ("system", "user", "assistant", "tool"):
@@ -151,12 +151,18 @@ async def test_llm_client_chat_openai() -> None:
 
 
 async def test_llm_client_chat_openai_with_tool_calls() -> None:
-    """OpenAI 响应包含 tool_calls 时正确解析。"""
+    """OpenAI 响应包含原生 tool_calls 时正确解析为 ToolCall（P0-2）。"""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={
             "choices": [{"message": {
                 "content": "",
-                "tool_calls": [{"name": "search", "args": {"q": "test"}}],
+                "tool_calls": [{
+                    "id": "call_1",
+                    "function": {
+                        "name": "search",
+                        "arguments": '{"q": "test"}',
+                    },
+                }],
             }}],
             "usage": {},
         })
@@ -169,7 +175,8 @@ async def test_llm_client_chat_openai_with_tool_calls() -> None:
         await client.close()
 
     assert len(response.tool_calls) == 1
-    assert response.tool_calls[0]["name"] == "search"
+    assert response.tool_calls[0].name == "search"
+    assert response.tool_calls[0].args == {"q": "test"}
 
 
 async def test_llm_client_chat_openai_custom_base_url() -> None:
@@ -225,8 +232,10 @@ async def test_llm_client_chat_anthropic() -> None:
     finally:
         await client.close()
 
-    # system 消息应被抽离到顶层
-    assert captured["body"]["system"] == "You are a translator."
+    # system 消息应被抽离到顶层（P2-10：Anthropic system 为 list[dict] 格式）
+    assert captured["body"]["system"] == [
+        {"type": "text", "text": "You are a translator."}
+    ]
     # messages 中不含 system
     assert all(m["role"] != "system" for m in captured["body"]["messages"])
     assert len(captured["body"]["messages"]) == 1
@@ -264,10 +273,12 @@ async def test_llm_client_chat_anthropic_multiple_system() -> None:
     finally:
         await client.close()
 
+    # P2-10：system 为 list[dict]，多条 system 各成一个 block
     system_field = captured["body"]["system"]
-    assert "Rule 1." in system_field
-    assert "Rule 2." in system_field
-    assert "\n\n" in system_field  # 合并分隔符
+    assert isinstance(system_field, list)
+    texts = [block["text"] for block in system_field]
+    assert "Rule 1." in texts
+    assert "Rule 2." in texts
 
 
 async def test_llm_client_chat_anthropic_temperature_clamp() -> None:
@@ -705,3 +716,158 @@ async def test_llm_client_anthropic_usage_field_names() -> None:
         assert metrics.get_counter("llm_tokens", ("claude-test", "out")) == 20
     finally:
         metrics.reset()
+
+
+# ===================== P2-9 成功调用计数 llm_calls =====================
+
+async def test_llm_client_records_llm_call_on_success() -> None:
+    """成功调用后记录 llm_calls{model}（P2-9）。"""
+    from app.core.llm_client import close_all_clients
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    # 清空单例缓存，避免其他测试残留干扰
+    await close_all_clients()
+    try:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"total_tokens": 5},
+            })
+
+        config = LLMConfig(provider="openai", model="gpt-4o-health", api_key="k")
+        client = _make_client(config, handler, max_retries=0)
+        try:
+            await client.chat([Message(role="user", content="hi")])
+        finally:
+            await client.close()
+
+        assert metrics.get_counter("llm_calls", ("gpt-4o-health",)) == 1.0
+    finally:
+        metrics.reset()
+        await close_all_clients()
+
+
+# ===================== P1-5 连接池单例 =====================
+
+async def test_get_llm_client_singleton_by_config() -> None:
+    """相同 config 关键字段返回同一实例，不同字段返回不同实例（P1-5）。"""
+    from app.core.llm_client import close_all_clients, get_llm_client
+
+    await close_all_clients()
+    try:
+        cfg1 = LLMConfig(provider="openai", model="gpt-4o", api_key="k1")
+        cfg2 = LLMConfig(provider="openai", model="gpt-4o", api_key="k1")  # 同 key
+        cfg3 = LLMConfig(provider="openai", model="gpt-4o", api_key="k2")  # 不同 api_key
+        cfg4 = LLMConfig(provider="anthropic", model="gpt-4o", api_key="k1")  # 不同 provider
+
+        c1 = get_llm_client(cfg1)
+        c2 = get_llm_client(cfg2)
+        c3 = get_llm_client(cfg3)
+        c4 = get_llm_client(cfg4)
+
+        assert c1 is c2  # 相同关键字段 → 同一实例
+        assert c1 is not c3
+        assert c1 is not c4
+        assert c3 is not c4
+    finally:
+        await close_all_clients()
+
+
+async def test_close_all_clients_releases_instances() -> None:
+    """close_all_clients 释放所有缓存实例并清空缓存（P1-5）。"""
+    from app.core.llm_client import _clients, close_all_clients, get_llm_client
+
+    await close_all_clients()
+    try:
+        cfg = LLMConfig(provider="openai", model="gpt-4o", api_key="k")
+        c1 = get_llm_client(cfg)
+        assert len(_clients) == 1
+
+        await close_all_clients()
+        assert len(_clients) == 0
+
+        # 再次获取应是新实例
+        c2 = get_llm_client(cfg)
+        assert c1 is not c2
+    finally:
+        await close_all_clients()
+
+
+# ===================== Streaming（P0-1） =====================
+
+
+def _sse_lines(events: list[str]) -> bytes:
+    """构造 SSE 响应体（每行 data: 前缀，空行分隔）。"""
+    body = b""
+    for ev in events:
+        body += f"data: {ev}\n\n".encode()
+    return body
+
+
+async def test_stream_chat_openai_sse() -> None:
+    """OpenAI SSE 流式逐 token 产出（P0-1）。"""
+    sse_body = _sse_lines([
+        json.dumps({"choices": [{"delta": {"content": "Hel"}}]}),
+        json.dumps({"choices": [{"delta": {"content": "lo"}}]}),
+        json.dumps({"choices": [{"delta": {"content": "!"}}]}),
+        "[DONE]",
+    ])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=sse_body, headers={"content-type": "text/event-stream"}
+        )
+
+    config = LLMConfig(provider="openai", model="gpt-4o", api_key="k")
+    client = _make_client(config, handler, max_retries=0)
+    try:
+        tokens: list[str] = []
+        async for token in client.stream_chat([Message(role="user", content="hi")]):
+            tokens.append(token)
+    finally:
+        await client.close()
+
+    assert tokens == ["Hel", "lo", "!"]
+
+
+async def test_stream_chat_anthropic_sse() -> None:
+    """Anthropic SSE 流式（content_block_delta 事件）。"""
+    sse_body = _sse_lines([
+        json.dumps({"type": "message_start"}),
+        json.dumps({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Bon"}}),
+        json.dumps({
+            "type": "content_block_delta",
+            "delta": {"type": "text_delta", "text": "jour"},
+        }),
+        json.dumps({"type": "message_stop"}),
+    ])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=sse_body, headers={"content-type": "text/event-stream"}
+        )
+
+    config = LLMConfig(provider="anthropic", model="claude", api_key="k")
+    client = _make_client(config, handler, max_retries=0)
+    try:
+        tokens: list[str] = []
+        async for token in client.stream_chat([Message(role="user", content="hi")]):
+            tokens.append(token)
+    finally:
+        await client.close()
+
+    assert tokens == ["Bon", "jour"]
+
+
+async def test_stream_chat_unsupported_provider_raises() -> None:
+    """不支持的 provider 流式调用抛 LLMError。"""
+    config = LLMConfig(provider="openai", model="gpt-4o")
+    client = LLMClient(config)
+    client.config.provider = "unknown"  # type: ignore[assignment]
+    try:
+        with pytest.raises(LLMError, match="不支持"):
+            async for _ in client.stream_chat([Message(role="user", content="hi")]):
+                pass
+    finally:
+        await client.close()

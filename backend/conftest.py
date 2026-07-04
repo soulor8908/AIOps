@@ -4,7 +4,8 @@
 单元测试用 SQLite in-memory 以避免 PG 依赖。此处仅在 SQLite 方言上：
 
 1. 把 JSONB / VECTOR 列 DDL 渲染为 JSON（保持生产 ORM 类型定义忠实于 SPEC）。
-2. 注册 ``date_trunc(unit, ts)`` Python UDF，供 analytics dashboard 按天聚合。
+2. 把 TSVECTOR 列 DDL 渲染为 TEXT（仅作存储，全文检索在 service 层降级为 LIKE）。
+3. 注册 ``date_trunc(unit, ts)`` Python UDF，供 analytics dashboard 按天聚合。
 
 不改动任何生产模型或 service。``tests/conftest.py`` 负责 TestClient 级别的
 DB 隔离（StaticPool + monkeypatch init_db / engine）。
@@ -19,6 +20,7 @@ from typing import Any
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import event
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import TSVECTOR as TSVector
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.compiler import compiles
 
@@ -34,6 +36,16 @@ def _jsonb_to_json_sqlite(element: Any, compiler: Any, **kw: Any) -> str:
 def _vector_to_json_sqlite(element: Any, compiler: Any, **kw: Any) -> str:
     """SQLite 上将 VECTOR 列渲染为 JSON（测试不写入真实向量）。"""
     return "JSON"
+
+
+@compiles(TSVector, "sqlite")
+def _tsvector_to_text_sqlite(element: Any, compiler: Any, **kw: Any) -> str:
+    """SQLite 上将 TSVECTOR 列渲染为 TEXT（仅作存储，BM25 检索降级为 LIKE）。
+
+    生产 PG 上为真正的 tsvector 类型并由 GIN 索引加速；SQLite 无 tsvector，
+    service 层按方言判断：PG 走 ``ts_rank_cd`` + ``@@``，SQLite 走 ``content LIKE``。
+    """
+    return "TEXT"
 
 
 # CITEXT 在 SQLite 上渲染为 TEXT（大小写不敏感由应用层 email.lower() 归一化保证）

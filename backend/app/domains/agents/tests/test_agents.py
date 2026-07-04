@@ -14,9 +14,9 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.database import Base
-from app.core.llm_client import LLMClient, LLMResponse
+from app.core.llm_client import LLMClient, LLMResponse, ToolCall
 from app.domains.agents import service
-from app.domains.agents.executor import AgentExecutor, _build_tool_prompt
+from app.domains.agents.executor import AgentExecutor, _agent_tools_to_llm_tools
 from app.domains.agents.models import (
     AgentCreate,
     ToolDef,
@@ -102,11 +102,17 @@ async def test_executor_parses_tool_calls(session: AsyncSession) -> None:
 
     call_count = {"n": 0}
 
-    async def fake_chat(messages: Any) -> LLMResponse:
+    async def fake_chat(
+        messages: Any,
+        tools: Any = None,
+        response_format: Any = None,
+    ) -> LLMResponse:
+        # P0-2：原生 function calling，第一次返回结构化 ToolCall，第二次返回最终答案
         call_count["n"] += 1
         if call_count["n"] == 1:
             return LLMResponse(
-                content="```tool_calls\n[{\"name\": \"calc\", \"args\": {\"expr\": \"1+1\"}}]\n```",
+                content="",
+                tool_calls=[ToolCall(id="call_1", name="calc", args={"expr": "1+1"})],
                 usage={"total_tokens": 5},
             )
         return LLMResponse(content="最终结果 2", usage={"total_tokens": 5})
@@ -120,11 +126,15 @@ async def test_executor_parses_tool_calls(session: AsyncSession) -> None:
     assert len(result.traces) >= 2
 
 
-def test_build_tool_prompt_empty() -> None:
-    assert _build_tool_prompt([]) == ""
+def test_agent_tools_to_llm_tools_empty() -> None:
+    """P0-2：空工具列表返回空。"""
+    assert _agent_tools_to_llm_tools([]) == []
 
 
-def test_build_tool_prompt_lists_tools() -> None:
-    prompt = _build_tool_prompt([ToolDef(name="search", type=ToolType.SEARCH, description="搜索")])
-    assert "search" in prompt
-    assert "tool_calls" in prompt
+def test_agent_tools_to_llm_tools_lists_tools() -> None:
+    """P0-2：工具转为原生 ToolDef，含 search 的 query 参数。"""
+    tools = [{"name": "search", "type": "search", "description": "搜索"}]
+    llm_tools = _agent_tools_to_llm_tools(tools)
+    assert len(llm_tools) == 1
+    assert llm_tools[0].name == "search"
+    assert "query" in llm_tools[0].parameters["properties"]
