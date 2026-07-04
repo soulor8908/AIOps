@@ -21,7 +21,13 @@ from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
 from app.core.exceptions import ValidationError
-from app.core.llm_client import LLMClient, LLMResponse, Message, ToolCall, ToolDef
+from app.core.llm_client import (
+    LLMClient,
+    LLMResponse,
+    Message,
+    ToolCall,
+    ToolDef,
+)
 from app.core.metrics import metrics
 from app.domains.agents.models import (
     Agent,
@@ -194,15 +200,15 @@ class AgentExecutor:
         max_turns: int | None = None,
         context: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """P2-8：流式执行 Agent，逐 token yield SSE 事件。
+        """P6e 真 streaming：单流执行 Agent，逐 token yield SSE 事件。
 
-        与 ``run()`` 的差异：最终答案轮用 ``stream_chat`` 逐 token 产出，
-        前端可即时渲染打字机效果；工具调用轮仍用阻塞 ``chat``（需完整响应才能
-        解析 tool_calls 并发执行）。
+        与旧实现的差异（P6e）：不再"阻塞 chat 判断工具 + 重跑 stream 输出文本"，
+        改用 ``stream_chat_events`` 单流实时分流 text / tool_call 增量，
+        **每轮只调一次 LLM**，砍掉最终答案轮的双倍成本。
 
         yield 事件类型：
-        - ``{"type": "token", "content": "..."}`` — 最终答案的逐 token 输出
-        - ``{"type": "tool", "name": "...", "args": {...}}`` — 工具调用通知
+        - ``{"type": "token", "content": "..."}`` — 文本 delta（含思考与最终答案）
+        - ``{"type": "tool", "name": "...", "args": {...}}`` — 工具调用通知（完整 args）
         - ``{"type": "observation", "content": "..."}`` — 工具执行结果
         - ``{"type": "done", "result": ExecutionResult}`` — 执行结束（含 traces/tokens）
 
@@ -221,55 +227,66 @@ class AgentExecutor:
                 messages = await self._compress_context(messages)
             prev_tokens = traces[-1].tokens if traces else 0
 
-            # 先用阻塞 chat 判断是否要调工具（流式无法中途解析 tool_calls）
-            response: LLMResponse = await self.llm.chat(
-                messages, tools=llm_tools or None
-            )
+            # P6e：单流消费 stream_chat_events，实时分流 text / tool_call / finish
+            text_buf: list[str] = []
+            tool_calls: list[ToolCall] = []
+            usage: dict[str, int] = {}
+            try:
+                async for event in self.llm.stream_chat_events(
+                    messages, tools=llm_tools or None
+                ):
+                    if event.type == "text":
+                        text_buf.append(event.content)
+                        yield {"type": "token", "content": event.content}
+                    elif event.type == "tool_call":
+                        # 增量累积，不 yield（需完整 args 才能执行；finish 时统一拿到）
+                        pass
+                    elif event.type == "finish":
+                        # finish.content 是 text delta 的完整拼接，已逐 token yield 过，
+                        # 此处仅取 tool_calls / usage，不重复 append content。
+                        tool_calls = event.tool_calls
+                        usage = event.usage
+            except Exception:  # noqa: BLE001
+                # P6e：stream 失败降级——已收集的 text 作为最终答案，避免无 done 事件
+                logger.warning("stream_chat_events 失败，使用已收集文本降级")
+                final_answer = "".join(text_buf)
+                traces.append(ExecutionTrace(
+                    turn=turn, thought=final_answer, tokens=prev_tokens
+                ))
+                success = bool(final_answer)
+                break
+
+            full_text = "".join(text_buf)
             total_tokens = prev_tokens + int(
-                response.usage.get("total_tokens", 0)
+                usage.get("total_tokens")
+                or (usage.get("input_tokens", 0) + usage.get("output_tokens", 0))
             )
 
-            if not response.tool_calls:
-                # 最终答案轮：用 stream_chat 重新生成并逐 token yield
-                # （阻塞 chat 已拿到完整答案，但为流式体验重跑一次流式生成）
-                # 注意：stream_chat 不支持 tools，仅用于纯文本答案的流式输出
-                streamed_chars: list[str] = []
-                try:
-                    async for token in self.llm.stream_chat(messages):
-                        streamed_chars.append(token)
-                        yield {"type": "token", "content": token}
-                except Exception:  # noqa: BLE001
-                    # 流式失败降级：用阻塞 chat 已拿到的完整答案
-                    logger.warning("stream_chat 失败，降级返回完整答案")
-                    yield {"type": "token", "content": response.content}
-                    streamed_chars = [response.content]
-                final_answer = "".join(streamed_chars) or response.content
+            if not tool_calls:
+                # 最终答案轮：text 已逐 token yield，记 trace 后结束
+                final_answer = full_text
                 traces.append(ExecutionTrace(
                     turn=turn, thought=final_answer, tokens=total_tokens
                 ))
                 success = True
                 break
 
-            # 工具调用轮：yield 工具调用 + 执行 + 观察事件
-            for tc in response.tool_calls:
-                yield {
-                    "type": "tool",
-                    "name": tc.name,
-                    "args": tc.args,
-                }
-            observation = await self._execute_tools(response.tool_calls)
+            # 工具调用轮：yield 完整工具调用 + 执行 + 观察事件
+            for tc in tool_calls:
+                yield {"type": "tool", "name": tc.name, "args": tc.args}
+            observation = await self._execute_tools(tool_calls)
             yield {"type": "observation", "content": observation}
             traces.append(ExecutionTrace(
                 turn=turn,
-                thought=response.content,
+                thought=full_text,
                 action=json.dumps(
-                    [{"name": c.name, "args": c.args} for c in response.tool_calls],
+                    [{"name": c.name, "args": c.args} for c in tool_calls],
                     ensure_ascii=False,
                 ),
                 observation=observation,
                 tokens=total_tokens,
             ))
-            messages.append(Message(role="assistant", content=response.content))
+            messages.append(Message(role="assistant", content=full_text))
             messages.append(Message(role="tool", content=observation))
         else:
             final_answer = (

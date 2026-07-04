@@ -26,6 +26,8 @@ from app.core.llm_client import (
     LLMConfig,
     LLMResponse,
     Message,
+    ToolDef,
+    _assemble_tool_calls,
     parse_tool_calls_json,
 )
 
@@ -932,3 +934,319 @@ async def test_stream_chat_no_ttft_when_no_tokens() -> None:
     state = metrics.get_histogram("llm_ttft", ("gpt-4o-empty",))
     assert state.count == 0
     metrics.reset()
+
+
+# ===================== P6e 真 streaming（stream_chat_events） =====================
+
+
+async def test_stream_chat_events_openai_text_and_finish() -> None:
+    """P6e：OpenAI SSE 单流产出 text 事件 + finish 事件含完整 content 与 usage。"""
+    sse_body = _sse_lines([
+        json.dumps({"choices": [{"delta": {"content": "Hel"}}]}),
+        json.dumps({"choices": [{"delta": {"content": "lo"}}]}),
+        json.dumps({"choices": [{"delta": {"content": "!"}}]}),
+        json.dumps({"usage": {"total_tokens": 7}, "choices": []}),
+        "[DONE]",
+    ])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=sse_body, headers={"content-type": "text/event-stream"}
+        )
+
+    config = LLMConfig(provider="openai", model="gpt-4o", api_key="k")
+    client = _make_client(config, handler, max_retries=0)
+    try:
+        events = [
+            e
+            async for e in client.stream_chat_events(
+                [Message(role="user", content="hi")]
+            )
+        ]
+    finally:
+        await client.close()
+
+    text_events = [e for e in events if e.type == "text"]
+    finish_events = [e for e in events if e.type == "finish"]
+    assert [e.content for e in text_events] == ["Hel", "lo", "!"]
+    assert len(finish_events) == 1
+    # finish.content 为完整拼接
+    assert finish_events[0].content == "Hello!"
+    # usage 来自末帧
+    assert finish_events[0].usage.get("total_tokens") == 7
+    # 无工具调用
+    assert finish_events[0].tool_calls == []
+
+
+async def test_stream_chat_events_openai_tool_call_streaming() -> None:
+    """P6e：OpenAI 流式 tool_calls 按 index 累积，finish 时给出完整 ToolCall。
+
+    首帧含 id + function.name，后续帧含 function.arguments 片段（JSON 增量）。
+    """
+    sse_body = _sse_lines([
+        # text delta
+        json.dumps({"choices": [{"delta": {"content": "Let me calc"}}]}),
+        # tool_call 首帧：id + name
+        json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "call_abc", "function": {"name": "calc", "arguments": ""}}
+        ]}}]}),
+        # tool_call 后续帧：arguments 片段
+        json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": "{\"expr\":"}}
+        ]}}]}),
+        json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": "\"1+1\"}"}}
+        ]}}]}),
+        json.dumps({"usage": {"total_tokens": 12}, "choices": []}),
+        "[DONE]",
+    ])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=sse_body, headers={"content-type": "text/event-stream"}
+        )
+
+    config = LLMConfig(provider="openai", model="gpt-4o", api_key="k")
+    client = _make_client(config, handler, max_retries=0)
+    try:
+        events = [
+            e
+            async for e in client.stream_chat_events(
+                [Message(role="user", content="算 1+1")],
+                tools=[ToolDef(
+                    name="calc",
+                    description="计算器",
+                    parameters={"type": "object", "properties": {}},
+                )],
+            )
+        ]
+    finally:
+        await client.close()
+
+    text_events = [e for e in events if e.type == "text"]
+    tool_events = [e for e in events if e.type == "tool_call"]
+    finish_events = [e for e in events if e.type == "finish"]
+    assert len(text_events) == 1
+    assert text_events[0].content == "Let me calc"
+    # 首帧 tool_call 含 id + name
+    assert tool_events[0].tool_call_id == "call_abc"
+    assert tool_events[0].tool_call_name == "calc"
+    # 后续帧 args_delta 累积
+    args_delta_concat = "".join(e.args_delta for e in tool_events)
+    assert args_delta_concat == '{"expr":"1+1"}'
+    # finish 给出完整 ToolCall，args 已解析为 dict
+    assert len(finish_events) == 1
+    tc = finish_events[0].tool_calls
+    assert len(tc) == 1
+    assert tc[0].id == "call_abc"
+    assert tc[0].name == "calc"
+    assert tc[0].args == {"expr": "1+1"}
+    assert finish_events[0].usage.get("total_tokens") == 12
+
+
+async def test_stream_chat_events_openai_multiple_tool_calls_ordered() -> None:
+    """P6e：多个 tool_call 按 index 升序组装（顺序与 LLM 输出一致）。"""
+    sse_body = _sse_lines([
+        # 第一个工具：index 0
+        json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "call_1", "function": {"name": "search", "arguments": "{\"q\":"}}
+        ]}}]}),
+        json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": "\"x\"}"}}
+        ]}}]}),
+        # 第二个工具：index 1
+        json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 1, "id": "call_2", "function": {"name": "calc",
+             "arguments": "{\"e\":\"2+2\"}"}}
+        ]}}]}),
+        "[DONE]",
+    ])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=sse_body, headers={"content-type": "text/event-stream"}
+        )
+
+    config = LLMConfig(provider="openai", model="gpt-4o", api_key="k")
+    client = _make_client(config, handler, max_retries=0)
+    try:
+        events = [
+            e
+            async for e in client.stream_chat_events(
+                [Message(role="user", content="hi")]
+            )
+        ]
+    finally:
+        await client.close()
+
+    finish = [e for e in events if e.type == "finish"][0]
+    assert len(finish.tool_calls) == 2
+    # index 升序
+    assert finish.tool_calls[0].id == "call_1"
+    assert finish.tool_calls[0].name == "search"
+    assert finish.tool_calls[0].args == {"q": "x"}
+    assert finish.tool_calls[1].id == "call_2"
+    assert finish.tool_calls[1].name == "calc"
+    assert finish.tool_calls[1].args == {"e": "2+2"}
+
+
+async def test_stream_chat_events_anthropic_tool_use_streaming() -> None:
+    """P6e：Anthropic content_block_start + input_json_delta 解析 tool_use。"""
+    sse_body = _sse_lines([
+        json.dumps({"type": "message_start", "message": {"usage": {"input_tokens": 5}}}),
+        # tool_use block 开始
+        json.dumps({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "tool_use", "id": "toolu_xyz", "name": "calc"},
+        }),
+        # input_json_delta 片段
+        json.dumps({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": "{\"expr\":"},
+        }),
+        json.dumps({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": "\"9+1\"}"},
+        }),
+        # 文本 delta（独立 block index 1）
+        json.dumps({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "text_delta", "text": "done"},
+        }),
+        json.dumps({"type": "message_delta", "usage": {"output_tokens": 8}}),
+        json.dumps({"type": "message_stop"}),
+    ])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=sse_body, headers={"content-type": "text/event-stream"}
+        )
+
+    config = LLMConfig(provider="anthropic", model="claude", api_key="k")
+    client = _make_client(config, handler, max_retries=0)
+    try:
+        events = [
+            e
+            async for e in client.stream_chat_events(
+                [Message(role="user", content="算 9+1")]
+            )
+        ]
+    finally:
+        await client.close()
+
+    text_events = [e for e in events if e.type == "text"]
+    tool_events = [e for e in events if e.type == "tool_call"]
+    finish_events = [e for e in events if e.type == "finish"]
+    # text + tool_call 事件
+    assert len(text_events) == 1
+    assert text_events[0].content == "done"
+    # 首帧 tool_call 含 id + name
+    assert tool_events[0].tool_call_id == "toolu_xyz"
+    assert tool_events[0].tool_call_name == "calc"
+    # args_delta 累积
+    args_concat = "".join(e.args_delta for e in tool_events)
+    assert args_concat == '{"expr":"9+1"}'
+    # finish 给出完整 ToolCall
+    assert len(finish_events) == 1
+    assert finish_events[0].content == "done"
+    tc = finish_events[0].tool_calls
+    assert len(tc) == 1
+    assert tc[0].id == "toolu_xyz"
+    assert tc[0].name == "calc"
+    assert tc[0].args == {"expr": "9+1"}
+    # usage 来自 message_start + message_delta
+    assert finish_events[0].usage.get("input_tokens") == 5
+    assert finish_events[0].usage.get("output_tokens") == 8
+
+
+async def test_stream_chat_events_finish_records_llm_call_metric() -> None:
+    """P6e：finish 事件到达时记录一次 llm_calls{model}（caller 不 break）。"""
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    sse_body = _sse_lines([
+        json.dumps({"choices": [{"delta": {"content": "hi"}}]}),
+        "[DONE]",
+    ])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=sse_body, headers={"content-type": "text/event-stream"}
+        )
+
+    config = LLMConfig(provider="openai", model="gpt-4o-metric", api_key="k")
+    client = _make_client(config, handler, max_retries=0)
+    try:
+        async for _ in client.stream_chat_events([Message(role="user", content="hi")]):
+            pass
+    finally:
+        await client.close()
+
+    # finish 事件触发一次 llm_calls 计数
+    assert metrics.get_counter("llm_calls", ("gpt-4o-metric",)) == 1.0
+    metrics.reset()
+
+
+async def test_stream_chat_events_unsupported_provider_raises() -> None:
+    """P6e：stream_chat_events 不支持的 provider 抛 LLMError 并记 llm_errors。"""
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    config = LLMConfig(provider="openai", model="gpt-4o-bad")
+    client = LLMClient(config)
+    client.config.provider = "unknown"  # type: ignore[assignment]
+    try:
+        with pytest.raises(LLMError, match="不支持"):
+            async for _ in client.stream_chat_events([Message(role="user", content="hi")]):
+                pass
+    finally:
+        await client.close()
+    metrics.reset()
+
+
+# ===================== _assemble_tool_calls 单测（P6e） =====================
+
+
+def test_assemble_tool_calls_sorted_by_index() -> None:
+    """index 升序组装（即使 acc 字典乱序）。"""
+    acc = {
+        2: {"id": "c3", "name": "third", "args": "{}"},
+        0: {"id": "c1", "name": "first", "args": "{}"},
+        1: {"id": "c2", "name": "second", "args": "{}"},
+    }
+    calls = _assemble_tool_calls(acc)
+    assert [c.id for c in calls] == ["c1", "c2", "c3"]
+    assert [c.name for c in calls] == ["first", "second", "third"]
+
+
+def test_assemble_tool_calls_parses_args_json() -> None:
+    """args JSON 字符串解析为 dict。"""
+    acc = {0: {"id": "x", "name": "calc", "args": '{"expr": "1+1", "n": 2}'}}
+    calls = _assemble_tool_calls(acc)
+    assert len(calls) == 1
+    assert calls[0].args == {"expr": "1+1", "n": 2}
+
+
+def test_assemble_tool_calls_empty_args_yields_empty_dict() -> None:
+    """args 为空字符串时降级为空 dict。"""
+    acc = {0: {"id": "x", "name": "noop", "args": ""}}
+    calls = _assemble_tool_calls(acc)
+    assert len(calls) == 1
+    assert calls[0].args == {}
+
+
+def test_assemble_tool_calls_malformed_args_yields_empty_dict() -> None:
+    """args 为非法 JSON 时降级为空 dict，不抛异常。"""
+    acc = {0: {"id": "x", "name": "bad", "args": "{not json"}}
+    calls = _assemble_tool_calls(acc)
+    assert len(calls) == 1
+    assert calls[0].args == {}
+
+
+def test_assemble_tool_calls_empty_acc() -> None:
+    """空 acc 返回空列表。"""
+    assert _assemble_tool_calls({}) == []
