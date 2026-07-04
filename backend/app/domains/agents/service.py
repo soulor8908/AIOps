@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import random
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -13,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.database import AsyncSessionLocal
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.llm_client import LLMClient, LLMConfig, Provider
 from app.domains.agents.executor import AgentDelegateExecutor, AgentExecutor, execute_workflow_dag
@@ -24,6 +27,7 @@ from app.domains.agents.models import (
     Workflow,
     WorkflowDef,
 )
+from app.domains.evals.models import EvalSampleCreate
 from app.domains.models.models import ModelConfig
 
 logger = logging.getLogger("app.agents.service")
@@ -35,6 +39,8 @@ _MAX_DELEGATE_DEPTH = 3
 # P0-2：autonomous loop 触发输入。scheduled 触发无用户输入，用固定 trigger prompt
 # 保持 ExecuteRequest 契约不变（input min_length=1）。
 _SCHEDULED_TRIGGER_INPUT = "scheduled autonomous run"
+# P0-3：采样率检查用的模块级 random 实例（避免每次新建 + 便于测试 monkeypatch）。
+_sample_rng = random.Random()
 
 # ModelConfig.provider 值 → LLMClient 支持的 Provider（Literal["openai","anthropic","local"]）。
 # Azure OpenAI 与 custom 兼容 OpenAI 协议，映射到 "openai"。
@@ -152,11 +158,57 @@ async def execute_agent(
         )
     executor = AgentExecutor(client, tool_executor=tool_executor)
     try:
-        return await executor.run(
+        result = await executor.run(
             agent, request.input, max_turns=request.max_turns, context=request.context
         )
     finally:
         await client.close()
+    # P0-3：成功执行后按采样率异步记录样本（fire-and-forget，不阻塞响应）。
+    # scheduled 触发的 input 是固定字符串，无评估价值，跳过采样。
+    if (
+        result.success
+        and request.input != _SCHEDULED_TRIGGER_INPUT
+        and settings.online_eval_sample_rate > 0.0
+        and _sample_rng.random() < settings.online_eval_sample_rate
+    ):
+        asyncio.create_task(
+            _record_execution_sample(
+                agent_id=agent_id,
+                trigger_source="http",
+                input=request.input,
+                actual_output=result.final_answer,
+            )
+        )
+    return result
+
+
+async def _record_execution_sample(
+    *,
+    agent_id: uuid.UUID,
+    trigger_source: str,
+    input: str,
+    actual_output: str,
+) -> None:
+    """P0-3：用独立 session 记录执行样本（fire-and-forget task）。
+
+    不抛异常出函数——采样失败仅记日志，绝不影响主请求路径
+    （observability.spec.md§5：指标/采样不阻塞请求路径）。
+    """
+    from app.domains.evals.service import record_sample
+
+    try:
+        async with AsyncSessionLocal() as session:
+            await record_sample(
+                session,
+                EvalSampleCreate(
+                    agent_id=agent_id,
+                    trigger_source=trigger_source,
+                    input=input,
+                    actual_output=actual_output,
+                ),
+            )
+    except Exception:
+        logger.exception("P0-3 sample recording failed (input_len=%d)", len(input))
 
 
 async def stream_agent(

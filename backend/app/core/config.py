@@ -94,6 +94,12 @@ class Settings(BaseSettings):
     agent_scheduler_timeout_seconds: int = Field(
         default=300, alias="AGENT_SCHEDULER_TIMEOUT_SECONDS"
     )
+    # P0-3：online eval 生产采样率。0.0 = 关闭（默认，单测/CI 不采样）。
+    # 0~1 之间的概率，每次 execute_agent 成功后按此概率异步记录样本。
+    # 采样用 asyncio.create_task fire-and-forget，不阻塞请求响应。
+    online_eval_sample_rate: float = Field(
+        default=0.0, alias="ONLINE_EVAL_SAMPLE_RATE", ge=0.0, le=1.0
+    )
 
     @property
     def access_token_expire_seconds(self) -> int:

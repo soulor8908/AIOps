@@ -11,7 +11,13 @@ from app.core.database import get_session
 from app.core.deps import get_current_user
 from app.domains.auth.models import User
 from app.domains.evals import service
-from app.domains.evals.models import EvalRunCreate, EvalRunOut
+from app.domains.evals.models import (
+    EvalRunCreate,
+    EvalRunOut,
+    EvalSampleCreate,
+    EvalSampleOut,
+    OnlineEvalRequest,
+)
 
 router = APIRouter(prefix="/evals", tags=["evals"])
 
@@ -34,6 +40,57 @@ async def create_eval(
     current_user: User = Depends(get_current_user),
 ) -> EvalRunOut:
     run = await service.create_eval(session, payload)
+    return EvalRunOut.model_validate(run)
+
+
+# ===================== P0-3: Online eval 闭环 =====================
+# 注意：静态路径必须在 /{eval_id} 之前注册，否则会被路径参数拦截。
+# FastAPI 路由按注册顺序匹配，/{eval_id} 会消费任意单段路径。
+
+
+@router.get("/samples", response_model=list[EvalSampleOut])
+async def list_samples(
+    judged: bool | None = Query(default=None),
+    agent_id: uuid.UUID | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> list[EvalSampleOut]:
+    """列生产采样样本，支持按 judged / agent_id 过滤。"""
+    samples = await service.list_samples(
+        session, judged=judged, agent_id=agent_id, limit=limit, offset=offset
+    )
+    return [EvalSampleOut.model_validate(s) for s in samples]
+
+
+@router.post(
+    "/samples",
+    response_model=EvalSampleOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_sample(
+    payload: EvalSampleCreate,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> EvalSampleOut:
+    """手动录入采样样本（生产自动采样由 execute_agent 钩子完成）。"""
+    sample = await service.record_sample(session, payload)
+    return EvalSampleOut.model_validate(sample)
+
+
+@router.post("/online-eval", response_model=EvalRunOut)
+async def run_online_eval(
+    payload: OnlineEvalRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> EvalRunOut:
+    """触发 online eval 闭环：取样本 → 匹配离线 golden → LLM judge → 写 EvalRun。
+
+    同步执行（与 ``POST /evals/{id}/run`` 一致）。生产批量评估建议在低峰期
+    或异步任务中调用，避免阻塞请求线程。
+    """
+    run = await service.run_online_eval(session, payload)
     return EvalRunOut.model_validate(run)
 
 
