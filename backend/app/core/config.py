@@ -100,6 +100,11 @@ class Settings(BaseSettings):
     online_eval_sample_rate: float = Field(
         default=0.0, alias="ONLINE_EVAL_SAMPLE_RATE", ge=0.0, le=1.0
     )
+    # P1-4：Agent 记忆层。默认关闭，单测/CI 不启用（避免 pgvector 依赖）。
+    # 启用后 execute_agent 构造 PgMemoryBackend 传入 executor，执行前检索
+    # top-k 相关历史注入 context，每轮结束后持久化 observation/final_answer。
+    agent_memory_enabled: bool = Field(default=False, alias="AGENT_MEMORY_ENABLED")
+    agent_memory_top_k: int = Field(default=3, alias="AGENT_MEMORY_TOP_K", ge=1, le=20)
 
     @property
     def access_token_expire_seconds(self) -> int:

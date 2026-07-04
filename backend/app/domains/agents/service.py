@@ -19,6 +19,7 @@ from app.core.database import AsyncSessionLocal
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.llm_client import LLMClient, LLMConfig, Provider
 from app.domains.agents.executor import AgentDelegateExecutor, AgentExecutor, execute_workflow_dag
+from app.domains.agents.memory import PgMemoryBackend
 from app.domains.agents.models import (
     Agent,
     AgentCreate,
@@ -156,7 +157,17 @@ async def execute_agent(
             agent_tools=agent.tools,
             agent_runner=_delegate_runner,
         )
-    executor = AgentExecutor(client, tool_executor=tool_executor)
+    executor = AgentExecutor(
+        client,
+        tool_executor=tool_executor,
+        # P1-4：记忆后端。默认关闭（settings.agent_memory_enabled=False），
+        # 启用后用 AsyncSessionLocal 开独立会话做检索/持久化，不污染请求事务。
+        memory=(
+            PgMemoryBackend(AsyncSessionLocal, top_k=settings.agent_memory_top_k)
+            if settings.agent_memory_enabled
+            else None
+        ),
+    )
     try:
         result = await executor.run(
             agent, request.input, max_turns=request.max_turns, context=request.context
@@ -227,7 +238,15 @@ async def stream_agent(
     config = await _build_llm_config(session, agent.model_alias, agent.temperature)
     await session.commit()
     client = LLMClient(config)
-    executor = AgentExecutor(client)
+    executor = AgentExecutor(
+        client,
+        # P1-4：流式模式同样支持记忆注入（检索历史 + done 前持久化最终答案）
+        memory=(
+            PgMemoryBackend(AsyncSessionLocal, top_k=settings.agent_memory_top_k)
+            if settings.agent_memory_enabled
+            else None
+        ),
+    )
     try:
         async for event in executor.run_stream(
             agent, request.input, max_turns=request.max_turns, context=request.context
