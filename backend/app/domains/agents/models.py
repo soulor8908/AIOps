@@ -12,7 +12,8 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from pydantic_core import PydanticCustomError
 from sqlalchemy import Float, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -57,10 +58,22 @@ class Agent(Base):
     self_eval_threshold: Mapped[float] = mapped_column(Float, nullable=False, default=0.7)
     self_heal_max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     is_active: Mapped[bool] = mapped_column(default=True)
+    # P0-2：autonomous loop。schedule 格式 "interval:<seconds>"，schedule_enabled=True
+    # 时后台 worker 按 next_run_at 周期唤醒执行；last_run_* 记录最近一次运行状态。
+    schedule: Mapped[str | None] = mapped_column(String(128))
+    schedule_enabled: Mapped[bool] = mapped_column(default=False)
+    last_run_at: Mapped[datetime | None] = mapped_column()
+    last_run_status: Mapped[str | None] = mapped_column(String(32))
+    last_run_error: Mapped[str | None] = mapped_column(Text)
+    next_run_at: Mapped[datetime | None] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
-    __table_args__ = (Index("idx_agents_active", "is_active"),)
+    __table_args__ = (
+        Index("idx_agents_active", "is_active"),
+        # P0-2：worker 查询到期 agent 的覆盖索引
+        Index("idx_agents_schedule_due", "schedule_enabled", "next_run_at"),
+    )
 
 
 class Workflow(Base):
@@ -106,6 +119,37 @@ class AgentCreate(BaseModel):
     self_heal: bool = False
     self_eval_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     self_heal_max_retries: int = Field(default=1, ge=0, le=3)
+    # P0-2：autonomous loop。schedule="interval:<seconds>"，配合 schedule_enabled 启用。
+    schedule: str | None = None
+    schedule_enabled: bool = False
+
+    @field_validator("schedule")
+    @classmethod
+    def _validate_schedule_format(cls, v: str | None) -> str | None:
+        """schedule 必须为 ``interval:<seconds>`` 格式（seconds 为正整数）。
+
+        不引入 cron 库以保持零依赖；如需 cron 表达式可后续扩展。
+
+        使用 ``PydanticCustomError`` 而非 ``ValueError`` 以避免 pydantic v2
+        将异常对象放入 ``ctx['error']`` 导致 FastAPI JSONResponse 序列化失败。
+        """
+        if v is None or v == "":
+            return None
+        if not v.startswith("interval:"):
+            raise PydanticCustomError(
+                "schedule_format", "schedule 必须为 'interval:<seconds>' 格式"
+            )
+        try:
+            secs = int(v[len("interval:"):])
+        except ValueError:
+            raise PydanticCustomError(
+                "schedule_seconds", "schedule 的 seconds 必须为整数"
+            ) from None
+        if secs <= 0:
+            raise PydanticCustomError(
+                "schedule_positive", "schedule 的 seconds 必须为正整数"
+            )
+        return v
 
 
 class AgentOut(BaseModel):
@@ -124,6 +168,13 @@ class AgentOut(BaseModel):
     self_eval_threshold: float
     self_heal_max_retries: int
     is_active: bool
+    # P0-2：autonomous loop 字段
+    schedule: str | None = None
+    schedule_enabled: bool
+    last_run_at: datetime | None = None
+    last_run_status: str | None = None
+    last_run_error: str | None = None
+    next_run_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

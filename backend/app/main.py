@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -63,10 +64,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     也避免对已存在的表产生与迁移不符的结构。
 
     开发/测试环境保留 ``create_all`` 以降低本地启动门槛（无需手动 alembic upgrade）。
+
+    P0-2：``agent_scheduler_enabled=True`` 时启动 autonomous loop worker，
+    shutdown 时 cancel 并等待退出。
     """
     if settings.environment.lower() not in _PROD_ENVS:
         await init_db()
+    scheduler_task: asyncio.Task[None] | None = None
+    if settings.agent_scheduler_enabled:
+        from app.domains.agents.scheduler import run_scheduler_loop
+
+        scheduler_task = asyncio.create_task(run_scheduler_loop())
     yield
+    if scheduler_task is not None:
+        scheduler_task.cancel()
+        await asyncio.gather(scheduler_task, return_exceptions=True)
     await engine.dispose()
     await close_redis()
     await close_embedder_client()

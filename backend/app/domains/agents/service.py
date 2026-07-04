@@ -6,6 +6,7 @@ import logging
 import os
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -31,6 +32,9 @@ MAX_NODES = 50
 MAX_TURNS = 10
 # P3-12：A2A 委托最大递归深度，防止 Agent A → B → A 循环调用耗尽栈/预算
 _MAX_DELEGATE_DEPTH = 3
+# P0-2：autonomous loop 触发输入。scheduled 触发无用户输入，用固定 trigger prompt
+# 保持 ExecuteRequest 契约不变（input min_length=1）。
+_SCHEDULED_TRIGGER_INPUT = "scheduled autonomous run"
 
 # ModelConfig.provider 值 → LLMClient 支持的 Provider（Literal["openai","anthropic","local"]）。
 # Azure OpenAI 与 custom 兼容 OpenAI 协议，映射到 "openai"。
@@ -45,6 +49,7 @@ _PROVIDER_MAP: dict[str, Provider] = {
 
 async def create_agent(session: AsyncSession, payload: AgentCreate) -> Agent:
     """创建 Agent。"""
+    now = datetime.now(UTC)
     agent = Agent(
         name=payload.name,
         description=payload.description,
@@ -58,6 +63,10 @@ async def create_agent(session: AsyncSession, payload: AgentCreate) -> Agent:
         self_heal=payload.self_heal,
         self_eval_threshold=payload.self_eval_threshold,
         self_heal_max_retries=payload.self_heal_max_retries,
+        # P0-2：autonomous loop。schedule_enabled=True 时立即到期，worker 首轮即执行。
+        schedule=payload.schedule,
+        schedule_enabled=payload.schedule_enabled,
+        next_run_at=now if payload.schedule_enabled else None,
     )
     session.add(agent)
     await session.flush()
@@ -420,6 +429,78 @@ def _fallback_llm_config(model_alias: str, temperature: float | None) -> LLMConf
     )
 
 
+# ===================== P0-2 autonomous loop =====================
+
+
+def _compute_next_run(schedule: str | None, now: datetime) -> datetime | None:
+    """解析 ``schedule`` ("interval:<seconds>") 计算下次执行时间。
+
+    格式非法或 schedule 为空时返回 None（worker 跳过该 agent）。
+    与 AgentCreate._validate_schedule_format 配合，正常路径不会解析失败。
+    """
+    if not schedule or not schedule.startswith("interval:"):
+        return None
+    try:
+        secs = int(schedule[len("interval:"):])
+    except ValueError:
+        return None
+    if secs <= 0:
+        return None
+    return now + timedelta(seconds=secs)
+
+
+async def list_due_agents(
+    session: AsyncSession, now: datetime
+) -> list[Agent]:
+    """查询所有到期待执行的 scheduled agent。
+
+    条件：``is_active`` AND ``schedule_enabled`` AND ``next_run_at <= now``。
+    走 ``idx_agents_schedule_due`` 覆盖索引。worker 每 tick 调一次。
+    """
+    stmt = (
+        select(Agent)
+        .where(
+            Agent.is_active.is_(True),
+            Agent.schedule_enabled.is_(True),
+            Agent.next_run_at <= now,
+        )
+        .order_by(Agent.next_run_at.asc())
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def mark_agent_run_started(
+    session: AsyncSession, agent: Agent, now: datetime
+) -> None:
+    """标记 agent 开始执行：写 ``last_run_at`` / ``last_run_status="running"``，
+    清空 ``last_run_error``。立即 flush 让其他 session 可见状态。
+    """
+    agent.last_run_at = now
+    agent.last_run_status = "running"
+    agent.last_run_error = None
+    await session.flush()
+
+
+async def mark_agent_run_finished(
+    session: AsyncSession,
+    agent: Agent,
+    *,
+    status: str,
+    now: datetime,
+    error: str | None = None,
+) -> None:
+    """标记 agent 执行结束：写 ``last_run_status`` / ``last_run_error`` /
+    ``next_run_at``（按 schedule 推算下一次）。commit 持久化。
+
+    status ∈ {success, failed, timeout}。无论成败都推算 next_run_at，
+    保证 worker 下一轮能再次选中（失败不阻塞后续调度）。
+    """
+    agent.last_run_status = status
+    agent.last_run_error = error
+    agent.next_run_at = _compute_next_run(agent.schedule, now)
+    await session.commit()
+
+
 __all__ = [
     "MAX_NODES",
     "MAX_TURNS",
@@ -429,5 +510,8 @@ __all__ = [
     "execute_workflow",
     "get_agent",
     "list_agents",
+    "list_due_agents",
     "list_workflows",
+    "mark_agent_run_finished",
+    "mark_agent_run_started",
 ]
