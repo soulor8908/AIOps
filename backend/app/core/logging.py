@@ -49,6 +49,10 @@ class JsonFormatter(logging.Formatter):
     可选字段：``request_id`` / ``user_id`` / ``latency_ms``（仅当 LogRecord 携带）
     额外字段：调用方通过 ``logger.info("msg", extra={...})`` 传入的业务字段
     （如 ``method`` / ``path`` / ``status`` / ``model`` / ``prompt_id``）自动透传。
+
+    P0-9：敏感字段脱敏。键名匹配 ``_SENSITIVE_KEY_PREFIXES`` / ``_SENSITIVE_KEYS``
+    的 extra 字段值统一替换为 ``"***"``，防止凭据/密钥/PII 落入日志。
+    仅按键名匹配——值类型不影响判定（str / dict / list 一视同仁）。
     """
 
     # 标准 LogRecord 属性集合，不写入 payload（避免噪声）。
@@ -59,6 +63,63 @@ class JsonFormatter(logging.Formatter):
         "created", "msecs", "relativeCreated", "thread", "threadName",
         "processName", "process", "message", "asctime", "taskName",
     })
+
+    # P0-9：敏感字段精确匹配集合（小写比较）。
+    # 涵盖密码 / token / 密钥 / 连接串 / cookie 等常见凭据字段名。
+    _SENSITIVE_KEYS: frozenset[str] = frozenset({
+        "password", "passwd", "pwd", "secret", "api_key", "apikey",
+        "access_token", "refreshtoken", "refresh_token", "token",
+        "authorization", "auth", "bearer", "jwt", "jti",
+        "hashed_password", "private_key", "privatekey",
+        "client_secret", "clientsecret", "session_id", "sessionid",
+        "cookie", "cookies", "set_cookie", "set-cookie",
+        "ssn", "credit_card", "creditcard", "card_number", "cardnumber",
+        "cvv", "pin",
+    })
+
+    # P0-9：敏感字段前缀匹配（小写比较）。命中任一前缀即视为敏感。
+    # 覆盖 ``openai_api_key`` / ``anthropic_api_key`` / ``db_password`` 等
+    # 复合命名，避免穷举所有变体。
+    _SENSITIVE_KEY_PREFIXES: tuple[str, ...] = (
+        "password_", "passwd_", "pwd_", "secret_",
+        "api_key_", "apikey_", "token_",
+        "access_token_", "refresh_token_",
+        "private_key_", "client_secret_",
+        "authorization_",
+    )
+
+    # P0-9：敏感字段子串匹配（小写比较）。命中即视为敏感。
+    # 用于 ``x-api-key`` / ``my_token_value`` 等含分隔符的复合键名。
+    _SENSITIVE_KEY_SUBSTRINGS: tuple[str, ...] = (
+        "password", "secret", "api_key", "apikey", "access_token",
+        "refresh_token", "private_key", "client_secret",
+    )
+
+    @classmethod
+    def _is_sensitive_key(cls, key: str) -> bool:
+        """判定 extra 字段键名是否敏感（P0-9 脱敏白名单）。
+
+        小写比较；命中精确集合 / 前缀 / 子串任一即返回 True。
+        故意宽松——脱敏误伤（把非敏感字段替换为 ``***``）成本远低于
+        凭据泄漏成本，宁可多掩码也不漏。
+        """
+        lk = key.lower()
+        if lk in cls._SENSITIVE_KEYS:
+            return True
+        if any(lk.startswith(p) for p in cls._SENSITIVE_KEY_PREFIXES):
+            return True
+        if any(s in lk for s in cls._SENSITIVE_KEY_SUBSTRINGS):
+            return True
+        return False
+
+    @staticmethod
+    def _mask_value(value: Any) -> Any:
+        """脱敏值。统一替换为 ``"***"``，保留 None 语义（不输出）。"""
+        # None 不替换——``format`` 中 ``value is not None`` 已过滤掉 None，
+        # 此分支仅作类型完整。保留以便未来扩展（如保留长度提示）。
+        if value is None:
+            return None
+        return "***"
 
     def format(self, record: logging.LogRecord) -> str:
         # ISO 8601 UTC 时间戳（observability.spec.md§2.2）
@@ -76,7 +137,11 @@ class JsonFormatter(logging.Formatter):
             if key in self._STANDARD_ATTRS or key in payload or key.startswith("_"):
                 continue
             if value is not None:
-                payload[key] = value
+                # P0-9：敏感字段键名脱敏（值统一替换为 ***，不输出原始值）
+                if self._is_sensitive_key(key):
+                    payload[key] = self._mask_value(value)
+                else:
+                    payload[key] = value
 
         # 异常信息（ERROR/CRITICAL 必含上下文 observability.spec.md§3）
         if record.exc_info:

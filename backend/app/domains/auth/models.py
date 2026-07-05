@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import Boolean, String, func
 from sqlalchemy.dialects.postgresql import CITEXT, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -53,6 +53,15 @@ class UserCreate(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     full_name: str | None = Field(default=None, max_length=128)
     password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("password")
+    @classmethod
+    def _validate_password_strength(cls, v: str) -> str:
+        """P0-4：密码强度校验。拒绝纯数字 / 常见弱密码。"""
+        from app.core.security import validate_password_strength
+
+        validate_password_strength(v)
+        return v
 
 
 class UserLogin(BaseModel):

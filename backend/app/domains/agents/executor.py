@@ -65,6 +65,9 @@ def _record_failure_safely(message: str, metadata: dict[str, Any]) -> None:
 
     仅当 ``settings.agent_failure_clustering_enabled`` 为真时记录。
     用 ``asyncio.create_task`` 避免 await 阻塞；失败仅记日志。
+
+    P0-10：经 ``TaskRegistry.spawn`` 启动而非裸 ``create_task``，
+    防止 GC 静默回收未完成 task + 应用背压上限。
     """
     from app.core.config import settings
 
@@ -72,9 +75,14 @@ def _record_failure_safely(message: str, metadata: dict[str, Any]) -> None:
         return
     try:
         from app.core.failure_cluster import get_failure_clusterer
+        from app.core.task_registry import get_task_registry
 
         clusterer = get_failure_clusterer()
-        asyncio.create_task(clusterer.add(message, metadata))
+        # P0-10：经 TaskRegistry 启动——持有强引用防 GC + 背压上限防 OOM
+        get_task_registry().spawn(
+            clusterer.add(message, metadata),
+            name="failure_cluster_add",
+        )
     except Exception:  # noqa: BLE001
         logger.debug("P2-8 failure record skipped", exc_info=True)
 
@@ -517,11 +525,15 @@ class AgentExecutor:
 
         P2-10：system prompt 标记 cache_control=True 启用 prompt caching，
         多轮对话复用 system 段省 50%+ 成本。
+
+        P0-6：prompt injection 防护——system prompt 加固 + 用户输入结构隔离。
         """
-        system = agent.system_prompt or "You are a helpful assistant."
+        from app.core.prompt_safety import harden_system_prompt, sanitize_user_input
+
+        system = harden_system_prompt(agent.system_prompt)
         messages = [
             Message(role="system", content=system, cache_control=True),
-            Message(role="user", content=user_input),
+            Message(role="user", content=sanitize_user_input(user_input)),
         ]
         if context:
             messages.append(

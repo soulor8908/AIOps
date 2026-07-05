@@ -79,6 +79,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if scheduler_task is not None:
         scheduler_task.cancel()
         await asyncio.gather(scheduler_task, return_exceptions=True)
+    # P0-10：取消所有 fire-and-forget task 并等待退出，防止 event loop 关闭后
+    # task 还尝试运行（``Event loop is closed`` 错误）+ 释放强引用。
+    from app.core.task_registry import get_task_registry
+
+    await get_task_registry().shutdown()
     await engine.dispose()
     await close_redis()
     await close_embedder_client()
@@ -171,6 +176,23 @@ class ObservabilityMiddleware:
                 # 移除上游可能已存在的同名头，避免重复
                 headers = [(k, v) for k, v in headers if k != b"x-request-id"]
                 headers.append((b"x-request-id", request_id.encode("latin-1")))
+                # P0-8：安全响应头（security.spec.md§4）
+                # X-Content-Type-Options: 防止 MIME 嗅探
+                headers.append((b"x-content-type-options", b"nosniff"))
+                # X-Frame-Options: 禁止被 iframe 嵌入（防点击劫持）
+                headers.append((b"x-frame-options", b"DENY"))
+                # Referrer-Policy: 仅同源时发送 referrer
+                headers.append((b"referrer-policy", b"same-origin"))
+                # HSTS：仅 HTTPS 下生效，强制浏览器后续走 HTTPS（生产环境 1 年）
+                if scope.get("scheme") == "https":
+                    headers.append(
+                        (b"strict-transport-security", b"max-age=31536000; includeSubDomains")
+                    )
+                # CSP：默认禁止内联脚本/样式与外部资源加载，
+                # API 服务通常无 HTML 页面，严格 CSP 不影响功能
+                headers.append(
+                    (b"content-security-policy", b"default-src 'none'; frame-ancestors 'none'")
+                )
                 message["headers"] = headers
             await send(message)
 

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -18,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
 from app.core.exceptions import AuthenticationError, AuthorizationError
-from app.core.jwt import verify_token
+from app.core.jwt import verify_token_with_blacklist
 from app.core.logging import user_id_var
 
 if TYPE_CHECKING:
@@ -31,12 +32,15 @@ async def get_current_user(
     token: str | None = Depends(oauth2_scheme),
     session: AsyncSession = Depends(get_session),
 ) -> User:
-    """解析 Bearer token → 查 users 表 → 返回 User。延迟导入避免循环。"""
+    """解析 Bearer token → 查 users 表 → 返回 User。延迟导入避免循环。
+
+    P0-1：使用 ``verify_token_with_blacklist`` 检查 token 黑名单（已登出 token 拒绝）。
+    """
     from app.domains.auth.models import User
 
     if not token:
         raise AuthenticationError("未提供认证凭据")
-    user_id = verify_token(token)
+    user_id = await verify_token_with_blacklist(token)
     try:
         uid = UUID(user_id)
     except ValueError as exc:
@@ -61,3 +65,27 @@ async def get_current_admin(
     if not user.is_admin:
         raise AuthorizationError("需要管理员权限")
     return user
+
+
+def assert_resource_owner(
+    resource_owner_id: uuid.UUID | None,
+    current_user: "User",
+) -> None:
+    """P0-3：资源所有权校验（security.spec.md§3.2）。
+
+    非 admin 用户只能操作自有资源（``resource.owner_id == current_user.id``）。
+    admin 可操作任意资源。``owner_id is None`` 视为公共资源，放行。
+
+    用法（路由层）::
+
+        owner = assert_resource_owner(agent.owner_id, current_user)
+
+    非所有者且非 admin → ``AuthorizationError`` (403)。
+    """
+    if current_user.is_admin:
+        return
+    if resource_owner_id is None:
+        # 公共资源（owner_id IS NULL），放行
+        return
+    if resource_owner_id != current_user.id:
+        raise AuthorizationError("无权操作他人资源")

@@ -44,3 +44,37 @@ def verify_password(plain: str, hashed: str) -> bool:
     except (UnicodeEncodeError, AttributeError):
         return False
     return bcrypt.checkpw(_encode_password(plain), hashed_bytes)
+
+
+# P0-4：弱密码黑名单。这些是泄露数据库中最常见的密码，即使满足 8 字符长度
+# 也应拒绝。按 OWLOS Top 10000 精简，覆盖最高频的弱密码。
+_WEAK_PASSWORDS: frozenset[str] = frozenset({
+    "password", "password1", "password12", "password123",
+    "passw0rd", "passw0rd1", "passw0rd12",
+    "12345678", "123456789", "1234567890", "12345678a",
+    "11111111", "00000000", "88888888", "66666666",
+    "qwerty123", "qwertyui", "qwerty12",
+    "abc12345", "abcd1234", "abcdabcd",
+    "iloveyou", "letmein1", "welcome1", "monkey123",
+    "football", "baseball1", "dragon12",
+    "admin123", "admin1234", "root1234", "test1234",
+})
+
+
+def validate_password_strength(plain: str) -> None:
+    """P0-4：密码强度校验。拒绝过于简单的密码。
+
+    规则（security.spec.md§6 最小长度 8 字符的增强）：
+    1. 长度 ≥ 8（UserCreate 的 Pydantic Field 已强制，此处兜底）
+    2. 拒绝纯数字密码（最易被字典攻击命中）
+    3. 拒绝常见弱密码黑名单
+
+    抛 ``ValueError``（Pydantic validator 约定），由 UserCreate 的 field_validator
+    捕获转为 ValidationError(422)。
+    """
+    if len(plain) < 8:
+        raise ValueError("密码长度至少 8 字符")
+    if plain.isdigit():
+        raise ValueError("密码不能为纯数字")
+    if plain.lower() in _WEAK_PASSWORDS:
+        raise ValueError("密码过于常见，请使用更强的密码")

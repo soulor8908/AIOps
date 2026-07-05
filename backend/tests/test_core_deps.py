@@ -166,7 +166,11 @@ async def test_get_current_user_invalid_uuid_subject_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """token 解析出非 UUID 的 sub → AuthenticationError（防注入与类型混淆）。"""
-    monkeypatch.setattr("app.core.deps.verify_token", lambda _t: "not-a-uuid")
+    # P0-1：deps 改用 verify_token_with_blacklist（async），测试 stub 需 async
+    async def _fake_verify(_t: str) -> str:
+        return "not-a-uuid"
+
+    monkeypatch.setattr("app.core.deps.verify_token_with_blacklist", _fake_verify)
     session = await _resolve_session(session_factory)
     try:
         with pytest.raises(AuthenticationError) as exc_info:
@@ -180,11 +184,11 @@ async def test_get_current_user_token_verify_failure_propagates(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """verify_token 抛 AuthenticationError 时直接向上传播（不吞异常）。"""
-    def _raise(_t: str) -> str:
+    """verify_token_with_blacklist 抛 AuthenticationError 时直接向上传播（不吞异常）。"""
+    async def _raise(_t: str) -> str:
         raise AuthenticationError("token 已过期")
 
-    monkeypatch.setattr("app.core.deps.verify_token", _raise)
+    monkeypatch.setattr("app.core.deps.verify_token_with_blacklist", _raise)
     session = await _resolve_session(session_factory)
     try:
         with pytest.raises(AuthenticationError) as exc_info:
@@ -200,7 +204,11 @@ async def test_get_current_user_user_not_found_raises(
 ) -> None:
     """sub 合法但 DB 中无此用户 → AuthenticationError（用户不存在）。"""
     uid = uuid.uuid4()
-    monkeypatch.setattr("app.core.deps.verify_token", lambda _t: str(uid))
+
+    async def _fake_verify(_t: str) -> str:
+        return str(uid)
+
+    monkeypatch.setattr("app.core.deps.verify_token_with_blacklist", _fake_verify)
     session = await _resolve_session(session_factory)
     try:
         with pytest.raises(AuthenticationError) as exc_info:
@@ -217,7 +225,11 @@ async def test_get_current_user_inactive_user_raises(
     """is_active=False 用户 → AuthenticationError（已停用）。"""
     user = _make_user(is_active=False)
     await _seed_user(session_factory, user)
-    monkeypatch.setattr("app.core.deps.verify_token", lambda _t: str(user.id))
+
+    async def _fake_verify(_t: str) -> str:
+        return str(user.id)
+
+    monkeypatch.setattr("app.core.deps.verify_token_with_blacklist", _fake_verify)
     session = await _resolve_session(session_factory)
     try:
         with pytest.raises(AuthenticationError) as exc_info:
@@ -237,7 +249,11 @@ async def test_get_current_user_returns_user_on_success(
     """正常路径：合法 token + 存在的活跃用户 → 返回 User 实例。"""
     user = _make_user(is_active=True, is_admin=False)
     await _seed_user(session_factory, user)
-    monkeypatch.setattr("app.core.deps.verify_token", lambda _t: str(user.id))
+
+    async def _fake_verify(_t: str) -> str:
+        return str(user.id)
+
+    monkeypatch.setattr("app.core.deps.verify_token_with_blacklist", _fake_verify)
     session = await _resolve_session(session_factory)
     try:
         result = await get_current_user(token="t", session=session)
@@ -281,13 +297,13 @@ async def test_get_current_admin_propagates_get_current_user_errors(
 ) -> None:
     """get_current_admin 在 get_current_user 之前失败时直接传播 AuthenticationError。
 
-    通过直接调用 get_current_admin 并 monkeypatch verify_token 抛错来验证：
-    依赖链 get_current_admin → get_current_user → verify_token 的异常不被吞掉。
+    通过直接调用 get_current_admin 并 monkeypatch verify_token_with_blacklist 抛错来验证：
+    依赖链 get_current_admin → get_current_user → verify_token_with_blacklist 的异常不被吞掉。
     """
-    def _raise(_t: str) -> str:
+    async def _raise(_t: str) -> str:
         raise AuthenticationError("无效 token")
 
-    monkeypatch.setattr("app.core.deps.verify_token", _raise)
+    monkeypatch.setattr("app.core.deps.verify_token_with_blacklist", _raise)
     session = await _resolve_session(session_factory)
     try:
         with pytest.raises(AuthenticationError):

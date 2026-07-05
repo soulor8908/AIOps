@@ -90,11 +90,34 @@ def decode_token(token: str) -> dict[str, object]:
 
 
 def verify_token(token: str) -> str:
-    """校验 access token 并返回 subject（user_id）。拒绝 refresh token 类型。"""
+    """校验 access token 并返回 subject（user_id）。拒绝 refresh token 类型。
+
+    P0-1：本函数仅做签名/类型校验,不检查黑名单（黑名单是异步 Redis 操作,
+    不能塞进同步函数）。黑名单检查由 ``verify_token_with_blacklist`` 异步封装,
+    供 ``get_current_user`` 依赖调用。
+    """
     payload = decode_token(token)
     sub = payload.get("sub")
     if not isinstance(sub, str):
         raise AuthenticationError("token 缺少 sub")
     if payload.get("type") == TOKEN_TYPE_REFRESH:
         raise AuthenticationError("token 类型错误")
+    return sub
+
+
+async def verify_token_with_blacklist(token: str) -> str:
+    """校验 access token + 检查黑名单（P0-1）。
+
+    流程：``verify_token`` 同步校验签名/类型 → ``is_revoked`` 异步查 Redis 黑名单。
+    黑名单命中（已登出）→ ``AuthenticationError``。
+    Redis 不可用时 ``is_revoked`` 降级返回 False（放行）。
+    """
+    sub = verify_token(token)
+    from app.core.token_blacklist import is_revoked
+
+    # 取 jti 与 exp。旧 token 无 jti 时跳过黑名单检查（向后兼容）。
+    payload = decode_token(token)
+    jti = payload.get("jti")
+    if isinstance(jti, str) and await is_revoked(jti):
+        raise AuthenticationError("token 已被吊销")
     return sub

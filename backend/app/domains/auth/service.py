@@ -24,6 +24,7 @@ from app.core.jwt import (
     decode_token,
 )
 from app.core.security import hash_password, verify_password
+from app.core.token_blacklist import revoke_token
 from app.domains.auth.models import Token, User, UserCreate, UserOut
 
 
@@ -113,6 +114,9 @@ async def refresh_access_token(refresh_token_str: str) -> Token:
 
     - token 无效/过期 → ``TokenExpiredError`` / ``AuthenticationError``
     - type != refresh → ``AuthenticationError``
+
+    P0-5：轮换时把旧 refresh token 的 jti 加入黑名单（一次性使用），防止
+    重放攻击——攻击者拿到旧 refresh token 后无法重复换新 token。
     """
     payload = decode_token(refresh_token_str)
     sub = payload.get("sub")
@@ -121,11 +125,29 @@ async def refresh_access_token(refresh_token_str: str) -> Token:
     token_type = payload.get("type")
     if token_type != TOKEN_TYPE_REFRESH:
         raise AuthenticationError("token 类型错误：需要 refresh token")
+    # P0-5：旧 refresh token 吊销（一次性使用）。
+    jti = payload.get("jti")
+    exp = payload.get("exp")
+    if isinstance(jti, str):
+        await revoke_token(jti, int(exp) if isinstance(exp, (int, float)) else None)
     return Token(
         access_token=create_access_token(sub),
         refresh_token=create_refresh_token(sub),  # 轮换
         expires_in=settings.access_token_expire_seconds,
     )
+
+
+async def logout(access_token_str: str) -> None:
+    """P0-1：登出——把 access token 的 jti 加入黑名单。
+
+    登出后该 access token 在剩余有效期内不可用（Redis 不可用时降级：token
+    仍可用直到自然过期，与 blacklist 降级策略一致）。
+    """
+    payload = decode_token(access_token_str)
+    jti = payload.get("jti")
+    exp = payload.get("exp")
+    if isinstance(jti, str):
+        await revoke_token(jti, int(exp) if isinstance(exp, (int, float)) else None)
 
 
 def to_user_out(user: User) -> UserOut:

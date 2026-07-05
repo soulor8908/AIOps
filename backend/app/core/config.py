@@ -76,6 +76,21 @@ class Settings(BaseSettings):
     )
     refresh_token_expire_days: int = Field(default=7, alias="REFRESH_TOKEN_EXPIRE_DAYS")
     cors_origins: list[str] = Field(default_factory=_default_cors_origins, alias="CORS_ORIGINS")
+    # P0-1: token 黑名单开关。默认 True 启用,测试环境可关。Redis 不可用时
+    # 自动降级放行(见 token_blacklist.is_revoked 注释)。
+    token_blacklist_enabled: bool = Field(default=True, alias="TOKEN_BLACKLIST_ENABLED")
+    # P0-2: 登录失败锁定(security.spec.md§6)。连续失败 N 次锁定 M 分钟。
+    # Redis 不可用时降级放行(见 login_lockout 注释)。
+    login_max_failures: int = Field(default=5, alias="LOGIN_MAX_FAILURES", ge=1, le=20)
+    login_lockout_minutes: int = Field(default=15, alias="LOGIN_LOCKOUT_MINUTES", ge=1, le=1440)
+    # P0-10：fire-and-forget task 背压上限。``asyncio.create_task`` 启动的
+    # 在线 eval 采样 / 失败聚类记录等后台 task 经 TaskRegistry 统一管理，
+    # 超过此并发数时丢弃新 task（仅记 warning）。0 = 不限制（仅持有强引用
+    # 防 GC，不限并发——与历史行为一致，单测/CI 默认走此路径）。
+    # 生产建议配置 50~200，按 pod 资源与 QPS 调整。
+    task_registry_max_concurrency: int = Field(
+        default=0, alias="TASK_REGISTRY_MAX_CONCURRENCY", ge=0, le=10000
+    )
 
     # LLM 默认
     default_llm_provider: str = Field(default="openai", alias="DEFAULT_LLM_PROVIDER")

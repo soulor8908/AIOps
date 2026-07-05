@@ -343,14 +343,19 @@ async def execute_agent(
                 1.0,
             )
         if _sample_rng.random() < effective_rate:
-            asyncio.create_task(
+            # P0-10：经 TaskRegistry 启动而非裸 create_task——持有强引用防 GC
+            # 静默回收未完成 task（采样丢失无告警）+ 应用背压上限防高 QPS OOM。
+            from app.core.task_registry import get_task_registry
+
+            get_task_registry().spawn(
                 _record_execution_sample(
                     agent_id=agent_id,
                     trigger_source="http",
                     input=request.input,
                     actual_output=result.final_answer,
                     priority=priority,
-                )
+                ),
+                name="online_eval_sample",
             )
     return result
 
