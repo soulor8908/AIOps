@@ -65,14 +65,20 @@ app.debug = False
 def _skip_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """测试环境跳过限流（无 Redis 连接）。
 
-    使 ``get_redis`` 立即抛 ``ConnectionRefusedError``，中间件降级放行，
-    避免每个请求等待 Redis 连接超时。限流逻辑由 ``test_core_rate_limit.py``
-    用 fakeredis 独立测试。
+    使 ``get_redis`` 立即抛 ``ConnectionRefusedError``，中间件降级到本地桶
+    （P0-18），避免每个请求等待 Redis 连接超时。限流逻辑由
+    ``test_core_rate_limit.py`` 用 fakeredis 独立测试。
+
+    P0-18：本地桶是模块级状态，跨测试共享会累积计数导致后续测试 429。
+    每个测试开始时清空本地桶，保证隔离。
     """
     def _raise() -> None:
         raise ConnectionRefusedError("no redis in test env")
 
     monkeypatch.setattr("app.core.rate_limit.get_redis", _raise)
+    # 清空本地降级桶，防止跨测试计数累积
+    from app.core.rate_limit import _local_buckets
+    _local_buckets.clear()
 
 
 def _import_all_orm_models() -> None:
@@ -163,11 +169,11 @@ def _create_default_admin(client: TestClient) -> User:
 
 @pytest.fixture
 def healthy_deps(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """模拟依赖（DB/Redis）均可达，用于 /health ok 路径测试。
+    """模拟依赖（DB/Redis/LLM）均可达，用于 /health ok 路径测试。
 
-    测试环境无真实 Redis，且 /health 默认会探测依赖；本 fixture 把
-    ``check_db`` / ``check_redis`` 桩为 True，使 ok 路径测试无需真实依赖。
-    degraded 路径测试自行 monkeypatch 单项为 False。
+    测试环境无真实 Redis / LLM API，且 /health 默认会探测依赖；本 fixture 把
+    ``check_db`` / ``check_redis`` / ``check_llm`` 桩为 True，使 ok 路径测试
+    无需真实依赖。degraded 路径测试自行 monkeypatch 单项为 False。
     """
     from unittest.mock import AsyncMock
 
@@ -175,6 +181,8 @@ def healthy_deps(monkeypatch) -> None:  # type: ignore[no-untyped-def]
 
     monkeypatch.setattr(health_mod, "check_db", AsyncMock(return_value=True))
     monkeypatch.setattr(health_mod, "check_redis", AsyncMock(return_value=True))
+    # P0-19：LLM 探测桩为 True（测试环境无 API key + 不发真实请求）
+    monkeypatch.setattr(health_mod, "check_llm", AsyncMock(return_value=True))
 
 
 @pytest.fixture

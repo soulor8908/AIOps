@@ -105,14 +105,20 @@ def test_rate_limit_per_ip_for_unauthenticated(client: TestClient, monkeypatch) 
 
 
 def test_rate_limit_degrades_when_redis_unavailable(client: TestClient, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """Redis 不可用时降级放行（不返回 429，不注入限流头）。"""
+    """P0-18：Redis 不可用时降级到本地限流桶（仍返回 200 + 限流头）。
+
+    本地桶 per-pod 计数，避免 Redis 故障期间限流失效。降级路径仍注入
+    限流头（本地桶在做限流），与 Redis 路径行为一致。
+    """
     def _raise() -> None:
         raise ConnectionRefusedError("redis down")
 
     monkeypatch.setattr("app.core.rate_limit.get_redis", _raise)
     resp = client.get("/api/v1/prompts")
     assert resp.status_code == 200
-    assert "x-ratelimit-limit" not in resp.headers
+    # P0-18：本地降级桶生效，注入限流头
+    assert resp.headers["x-ratelimit-limit"] == "100"
+    assert resp.headers["x-ratelimit-remaining"] == "99"
 
 
 def test_rate_limit_skips_non_api_paths(client: TestClient, monkeypatch) -> None:  # type: ignore[no-untyped-def]

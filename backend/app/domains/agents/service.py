@@ -722,11 +722,54 @@ async def mark_agent_run_started(
 ) -> None:
     """标记 agent 开始执行：写 ``last_run_at`` / ``last_run_status="running"``，
     清空 ``last_run_error``。立即 flush 让其他 session 可见状态。
+
+    P0-17：同时把 ``next_run_at`` 推后 ``lease_seconds``，防止本轮 tick 重复
+    选中同一 agent（lease 期内 ``list_due_agents`` 的 ``next_run_at <= now``
+    条件不满足）。执行结束后由 ``mark_agent_run_finished`` 按 schedule 重算
+    ``next_run_at`` 覆盖此值。
     """
     agent.last_run_at = now
     agent.last_run_status = "running"
     agent.last_run_error = None
+    agent.next_run_at = now + timedelta(seconds=settings.agent_scheduler_lease_seconds)
     await session.flush()
+
+
+async def recover_stuck_agents(
+    session: AsyncSession, now: datetime, lease_seconds: int
+) -> int:
+    """P0-17：恢复卡死在 ``running`` 状态的 agent。
+
+    场景：pod 崩溃 / SIGKILL / 进程异常退出时，``mark_agent_run_finished``
+    未执行，``last_run_status`` 永久停留在 ``"running"``，agent 不再被调度。
+
+    策略：查询 ``last_run_status="running"`` AND ``last_run_at < now - lease``
+    的 agent，标记为 ``failed``（error="lease expired, recovered by scheduler"），
+    并把 ``next_run_at`` 设为 ``now``（立即重排，下一轮 tick 重新执行）。
+
+    返回恢复的 agent 数。tick 开始时调用，恢复后再查 due agent。
+    """
+    cutoff = now - timedelta(seconds=lease_seconds)
+    stmt = select(Agent).where(
+        Agent.is_active.is_(True),
+        Agent.schedule_enabled.is_(True),
+        Agent.last_run_status == "running",
+        Agent.last_run_at < cutoff,
+    )
+    stuck = list((await session.execute(stmt)).scalars().all())
+    if not stuck:
+        return 0
+    for agent in stuck:
+        agent.last_run_status = "failed"
+        agent.last_run_error = "lease expired, recovered by scheduler"
+        agent.next_run_at = now  # 立即重排
+    await session.commit()
+    logger.warning(
+        "P0-17 recovered %d stuck agent(s) (lease=%ds expired)",
+        len(stuck),
+        lease_seconds,
+    )
+    return len(stuck)
 
 
 async def mark_agent_run_finished(
@@ -762,4 +805,5 @@ __all__ = [
     "list_workflows",
     "mark_agent_run_finished",
     "mark_agent_run_started",
+    "recover_stuck_agents",
 ]

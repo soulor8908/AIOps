@@ -58,7 +58,8 @@ def test_production_rejects_short_secret() -> None:
 def test_production_accepts_strong_secret() -> None:
     """生产环境提供 ≥ 32 字节强密钥应通过。"""
     strong = "x" * 48  # 48 字节
-    s = _make_settings(environment="production", jwt_secret=strong)
+    # P0-13：生产环境同时要求 OPENAI_API_KEY 非空
+    s = _make_settings(environment="production", jwt_secret=strong, openai_api_key="sk-test")
     assert s.effective_secret_key == strong
 
 
@@ -122,6 +123,8 @@ def test_cors_production_rejects_wildcard() -> None:
         _make_settings(
             environment="production",
             jwt_secret=strong,
+            # P0-13：生产环境要求 OPENAI_API_KEY 非空，补上以走到 CORS 校验
+            openai_api_key="sk-test",
             cors_origins=["*"],
         )
     assert "CORS_ORIGINS" in str(exc_info.value)

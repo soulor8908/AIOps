@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any
 
@@ -9,8 +10,10 @@ from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_session
 from app.core.deps import get_current_admin, get_current_user
+from app.core.exceptions import GatewayTimeoutError
 from app.domains.agents import service
 from app.domains.agents.models import (
     AgentCreate,
@@ -23,6 +26,24 @@ from app.domains.agents.models import (
 from app.domains.auth.models import User
 
 router = APIRouter(tags=["agents"])
+
+
+async def _with_request_timeout(coro: Any) -> Any:
+    """P0-20：请求级超时包裹。
+
+    长 LLM 调用（多轮 ReAct + 工具执行）超 ``agent_execute_timeout_seconds``
+    时抛 ``GatewayTimeoutError`` (504)。客户端已等待过久，继续跑只会产生
+    LLM 成本但结果丢弃。超时后协程被 cancel，service 内部的 LLM 调用
+    在 cancel 传播时中止（httpx 请求在线程池中可能跑完但结果被丢弃）。
+    """
+    try:
+        return await asyncio.wait_for(
+            coro, timeout=settings.agent_execute_timeout_seconds
+        )
+    except TimeoutError as exc:
+        raise GatewayTimeoutError(
+            f"请求超 {settings.agent_execute_timeout_seconds}s 超时"
+        ) from exc
 
 
 # ===================== Agents =====================
@@ -95,7 +116,8 @@ async def execute_agent(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> ExecutionResult:
-    return await service.execute_agent(session, agent_id, payload)
+    # P0-20：请求级超时，超时抛 504 gateway_timeout
+    return await _with_request_timeout(service.execute_agent(session, agent_id, payload))
 
 
 @router.post("/agents/{agent_id}/execute/stream")
@@ -146,4 +168,7 @@ async def execute_workflow(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> ExecutionResult:
-    return await service.execute_workflow(session, workflow_id, payload)
+    # P0-20：请求级超时，超时抛 504 gateway_timeout
+    return await _with_request_timeout(
+        service.execute_workflow(session, workflow_id, payload)
+    )

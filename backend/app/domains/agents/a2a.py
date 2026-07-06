@@ -39,12 +39,22 @@ logger = logging.getLogger("app.agents.a2a")
 # Redis stream key 前缀
 _STREAM_PREFIX = "a2a:"
 _REPLY_PREFIX = "a2a:reply:"
+# P0-16：consume 消费进度 last_id 持久化 key 前缀。
+# 进程重启后从此 key 恢复上次消费位置，避免从头重消费已处理消息。
+_LAST_ID_PREFIX = "a2a:last_id:"
 # 默认 send_and_wait 超时（秒）
 _DEFAULT_TIMEOUT = 30.0
 # consume 默认 block 毫秒
 _BLOCK_MS = 5000
 # stream 最大长度（XADD MAXLEN ~，防止无限增长）
 _MAX_STREAM_LEN = 10000
+# P0-16：consume 连续失败重试参数。
+# Redis 永久不可用时若无限重试会持续占用协程并打日志；超此上限则退出 consume
+# （由上层调度决定是否重启），避免死循环。指数退避上限 30s 对齐 Redis 故障
+# 典型恢复时间窗口。
+_MAX_CONSUME_FAILURES = 20
+_MAX_BACKOFF_SECONDS = 30.0
+_BASE_BACKOFF_SECONDS = 1.0
 
 
 @dataclass(slots=True)
@@ -115,6 +125,14 @@ class A2ABus:
         阻塞循环：XREAD block 等待新消息，回调抛异常时记日志不中断循环。
         Redis 不可用时记日志并返回（不启动循环）。
 
+        P0-16 可靠性硬门槛：
+        - **last_id 持久化**：从 ``a2a:last_id:{agent_id}`` 恢复上次消费位置，
+          进程重启不重消费已处理消息。每条消息处理成功后异步写回（失败仅记
+          日志，不阻塞消费——最坏情况是重启后重消费少量消息，handler 需幂等）。
+        - **指数退避**：xread 失败时按 ``min(base * 2^n, 30s)`` 退避，避免
+          Redis 故障时持续打日志 + 占用 CPU。连续失败超 ``_MAX_CONSUME_FAILURES``
+          次退出 consume（由上层调度决定重启），避免死循环。
+
         注意：``block_ms=0`` 在 Redis 语义中表示永久阻塞，此处强制下限 1ms
         以避免 consume 永久挂起无法被取消的风险（虽 asyncio.CancelledError 仍可
         唤醒，但保险起见仍校验）。
@@ -124,8 +142,23 @@ class A2ABus:
         try:
             client = self._client()
             stream = f"{_STREAM_PREFIX}{agent_id}"
-            last_id = "0"  # 从头消费（生产应持久化 last_id）
+            # P0-16：从 Redis 恢复上次消费位置。读失败则从头消费（last_id="0"），
+            # 不阻塞启动。key 不设 TTL——消费进度需长期保留。
+            last_id = "0"
+            try:
+                saved = await client.get(f"{_LAST_ID_PREFIX}{agent_id}")
+                if saved is not None:
+                    last_id = saved.decode() if isinstance(saved, bytes) else str(saved)
+                    logger.info(
+                        "A2A consume resume agent=%s from last_id=%s", agent_id, last_id
+                    )
+            except redis.RedisError:
+                logger.warning(
+                    "A2A consume resume read last_id failed, start from 0 (agent=%s)",
+                    agent_id,
+                )
             logger.info("A2A consume start for agent=%s", agent_id)
+            consecutive_failures = 0
             while True:
                 try:
                     resp = cast(
@@ -133,9 +166,31 @@ class A2ABus:
                         await client.xread({stream: last_id}, count=count, block=block_ms),
                     )
                 except redis.RedisError:
-                    logger.exception("A2A xread failed, retry in 1s")
-                    await asyncio.sleep(1.0)
+                    consecutive_failures += 1
+                    if consecutive_failures > _MAX_CONSUME_FAILURES:
+                        logger.critical(
+                            "A2A consume exceeded max failures, exit (agent=%s, failures=%d)",
+                            agent_id,
+                            consecutive_failures,
+                        )
+                        return
+                    # P0-16：指数退避，上限 30s。避免 Redis 故障时 1s 固定重试
+                    # 持续打日志 + 占用 CPU。
+                    backoff = min(
+                        _BASE_BACKOFF_SECONDS * (2 ** (consecutive_failures - 1)),
+                        _MAX_BACKOFF_SECONDS,
+                    )
+                    logger.warning(
+                        "A2A xread failed, retry in %.1fs (agent=%s, failures=%d/%d)",
+                        backoff,
+                        agent_id,
+                        consecutive_failures,
+                        _MAX_CONSUME_FAILURES,
+                    )
+                    await asyncio.sleep(backoff)
                     continue
+                # xread 成功，重置失败计数
+                consecutive_failures = 0
                 if not resp:
                     continue
                 for _stream, entries in resp:
@@ -153,6 +208,19 @@ class A2ABus:
                         except Exception:  # noqa: BLE001
                             logger.exception(
                                 "A2A handler error (agent=%s, entry=%s)", agent_id, last_id
+                            )
+                        # P0-16：处理成功后异步写回 last_id（检查点）。
+                        # 用 create_task 非阻塞，失败仅记日志——最坏情况是
+                        # 重启后重消费此消息，handler 需幂等。
+                        try:
+                            await client.set(
+                                f"{_LAST_ID_PREFIX}{agent_id}", last_id
+                            )
+                        except redis.RedisError:
+                            logger.warning(
+                                "A2A consume checkpoint last_id failed (agent=%s, last_id=%s)",
+                                agent_id,
+                                last_id,
                             )
         except asyncio.CancelledError:
             logger.info("A2A consume cancelled for agent=%s", agent_id)

@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
@@ -54,12 +55,27 @@ async def _iter_lines_with_timeout(
     本包装对每次 ``aiter_lines()`` 迭代加 ``asyncio.wait_for`` 超时，超时
     抛 ``TimeoutError``——调用方的 ``except`` 块应将其转为 ``_RetryableLLMError``
     进入既有重试逻辑。
+
+    注意：``StopAsyncIteration``（正常结束）不能直接被 ``wait_for`` 传播——
+    ``wait_for`` 内部用 Task，Task 边界抛 ``StopAsyncIteration`` 会被转为
+    ``RuntimeError``。因此用哨兵值在 ``_next`` 内捕获，外层 ``wait_for``
+    只处理 ``TimeoutError``。
     """
     aiter = resp.aiter_lines().__aiter__()
+    _SENTINEL = object()
+
+    async def _next() -> object:
+        try:
+            return await aiter.__anext__()
+        except StopAsyncIteration:
+            return _SENTINEL
+
     while True:
-        # StopAsyncIteration 透传（正常结束）；TimeoutError 透传（卡死）
-        line = await asyncio.wait_for(aiter.__anext__(), timeout=timeout)
-        yield line
+        # TimeoutError 透传（卡死），哨兵透传（正常结束）
+        result = await asyncio.wait_for(_next(), timeout=timeout)
+        if result is _SENTINEL:
+            return
+        yield result  # type: ignore[misc]
 
 
 @dataclass(slots=True)
@@ -180,9 +196,18 @@ class LLMClient:
 
     @property
     def http(self) -> httpx.AsyncClient:
-        """懒初始化 httpx.AsyncClient（首次访问或上次已关闭时创建）。"""
+        """懒初始化 httpx.AsyncClient（首次访问或上次已关闭时创建）。
+
+        P0-21：注入 ``httpx.Limits`` 限制连接池上限，防止突发并发打满 fd。
+        """
         if self._http is None or self._http.is_closed:
-            self._http = httpx.AsyncClient(timeout=self._timeout)
+            from app.core.config import settings
+
+            limits = httpx.Limits(
+                max_connections=settings.llm_client_max_connections,
+                max_keepalive_connections=settings.llm_client_max_keepalive_connections,
+            )
+            self._http = httpx.AsyncClient(timeout=self._timeout, limits=limits)
         return self._http
 
     async def __aenter__(self) -> LLMClient:
@@ -785,7 +810,12 @@ class LLMClient:
 # 适用于应用级长期复用场景（如 evals judge client），避免每次调用 new 一个
 # httpx.AsyncClient 连接池。``agents/service.py`` 的请求级独立 client 模式
 # 不走此缓存（资源隔离优先），关闭由各自 try/finally 负责。
-_clients: dict[tuple[str, str, str, str], LLMClient] = {}
+# P0-21：OrderedDict + LRU 上限，防止 model_configs alias 变更或动态配置时
+# 无限增长。超 ``llm_client_cache_max_size`` 时驱逐最久未用的 client。
+_clients: OrderedDict[tuple[str, str, str, str], LLMClient] = OrderedDict()
+# 被驱逐但尚未 close 的 client（get_llm_client 是同步函数无法 await close）。
+# close_all_clients 时统一释放，避免连接泄漏。
+_evicted_clients: list[LLMClient] = []
 
 
 def get_llm_client(config: LLMConfig) -> LLMClient:
@@ -799,18 +829,40 @@ def get_llm_client(config: LLMConfig) -> LLMClient:
     适用场景：应用级长期复用（evals judge、后台批处理）。
     不适用：``agents`` 请求级独立 client（执行期可能很长，独立 client 便于
     资源隔离与显式释放，保持现有 ``try/finally close`` 模式）。
+
+    P0-21：LRU 淘汰——命中时 ``move_to_end``，新增时超上限则驱逐最旧
+    （``popitem(last=False)``）。被驱逐的 client 暂存 ``_evicted_clients``，
+    由 ``close_all_clients`` 统一 close（同步函数无法 await close）。
     """
+    from app.core.config import settings
+
     key = (config.provider, config.base_url, config.api_key, config.model)
-    if key not in _clients:
-        _clients[key] = LLMClient(config)
-    return _clients[key]
+    if key in _clients:
+        _clients.move_to_end(key)  # LRU: 命中提升到最新
+        return _clients[key]
+    client = LLMClient(config)
+    _clients[key] = client
+    # LRU 驱逐：超上限时移除最久未用的 client
+    while len(_clients) > settings.llm_client_cache_max_size:
+        _evicted_key, evicted = _clients.popitem(last=False)
+        _evicted_clients.append(evicted)
+        logger.debug(
+            "LLMClient cache LRU evict (size limit), key=%s", _evicted_key
+        )
+    return client
 
 
 async def close_all_clients() -> None:
-    """应用关闭时释放所有缓存的 LLMClient（lifespan shutdown 调用）。"""
+    """应用关闭时释放所有缓存的 LLMClient（lifespan shutdown 调用）。
+
+    P0-21：同时释放活跃缓存与被驱逐但未 close 的 client。
+    """
     for client in _clients.values():
         await client.close()
     _clients.clear()
+    for evicted in _evicted_clients:
+        await evicted.close()
+    _evicted_clients.clear()
 
 
 class _RetryableLLMError(LLMError):

@@ -97,9 +97,23 @@ async def tick() -> int:
 
     返回本轮选中的 agent 数。单 agent 失败由 ``_execute_one`` 内部隔离，
     ``gather(return_exceptions=True)`` 二次兜底，tick 本身不抛异常。
+
+    P0-17：tick 开始先调用 ``recover_stuck_agents`` 恢复上一轮 pod 崩溃 /
+    SIGKILL 遗留的卡死 agent（``last_run_status="running"`` 超 lease），
+    恢复后按正常流程查询 due agent。
     """
     now = datetime.now(UTC)
     async with AsyncSessionLocal() as session:
+        # P0-17：恢复卡死 agent（lease 过期）。失败不阻塞 tick——最坏情况是
+        # 卡死 agent 多停一轮，下一轮 tick 再恢复。
+        try:
+            recovered = await service.recover_stuck_agents(
+                session, now, settings.agent_scheduler_lease_seconds
+            )
+            if recovered:
+                logger.warning("P0-17 recovered %d stuck agent(s)", recovered)
+        except Exception:  # noqa: BLE001
+            logger.exception("P0-17 recover_stuck_agents failed, skip")
         due = await service.list_due_agents(session, now)
         if not due:
             return 0

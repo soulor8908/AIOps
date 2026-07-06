@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_session
 from app.core.deps import get_current_admin, get_current_user
-from app.core.exceptions import ValidationError
+from app.core.exceptions import GatewayTimeoutError, ValidationError
 from app.domains.auth.models import User
 from app.domains.knowledge import service
 from app.domains.knowledge.models import (
@@ -27,6 +30,18 @@ from app.domains.knowledge.service import MAX_DOC_BYTES
 logger = logging.getLogger("app.audit.knowledge")
 
 router = APIRouter(prefix="/knowledge-bases", tags=["knowledge"])
+
+
+async def _with_request_timeout(coro: Any) -> Any:
+    """P0-20：请求级超时包裹（rag_query 用）。超时抛 504 gateway_timeout。"""
+    try:
+        return await asyncio.wait_for(
+            coro, timeout=settings.agent_execute_timeout_seconds
+        )
+    except TimeoutError as exc:
+        raise GatewayTimeoutError(
+            f"请求超 {settings.agent_execute_timeout_seconds}s 超时"
+        ) from exc
 
 # security.spec.md§7.2 — 文件上传 content-type 白名单。
 # 文本类直接 UTF-8 decode；PDF/DOCX 由 parser 模块走专用提取器
@@ -184,4 +199,5 @@ async def rag_query(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, object]:
-    return await service.rag_query(session, kb_id, payload)
+    # P0-20：请求级超时，超时抛 504 gateway_timeout
+    return await _with_request_timeout(service.rag_query(session, kb_id, payload))

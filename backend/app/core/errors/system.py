@@ -32,3 +32,16 @@ class EmbeddingError(AppError):
     status_code = 502
     error_code = "embedding_error"
     message = "向量化失败"
+
+
+class GatewayTimeoutError(AppError):
+    """P0-20：请求级超时 (504)。
+
+    长耗时端点（execute_agent / execute_workflow / rag_query）超
+    ``agent_execute_timeout_seconds`` 时抛出。客户端已断开或等待过久，
+    服务端继续跑只会产生 LLM 成本但结果丢弃。
+    """
+
+    status_code = 504
+    error_code = "gateway_timeout"
+    message = "请求处理超时，请稍后重试或缩小请求范围"

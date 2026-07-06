@@ -6,7 +6,9 @@
 - LLM 端点（/chat /execute /run /rag）：20 req/min
 
 超限返回 ``429 rate_limited`` + ``X-RateLimit-Limit/Remaining/Reset`` 响应头。
-Redis 不可用时降级放行（log warning），不阻断请求。
+Redis 不可用时降级到本地滑动窗口桶（P0-18），避免 Redis 故障期间限流失效
+导致 LLM 端点被滥用。本地桶是 per-pod 的，多 pod 部署时实际限额为
+``limit * pod_count``——降级模式下的可接受妥协。
 
 滑动窗口算法使用 Redis ZSET：每个请求时间戳作为 member+score，
 先清除窗口外过期条目，再添加当前请求，最后计数判断是否超限。
@@ -14,6 +16,7 @@ Redis 不可用时降级放行（log warning），不阻断请求。
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -37,6 +40,16 @@ WINDOW_SECONDS = 60
 # LLM 推理端点路径后缀（security.spec.md§5.1「调用模型推理的端点」）。
 # 命中这些后缀的请求使用更严格的 20/min 配额（成本与资源敏感）。
 _LLM_PATH_SUFFIXES = frozenset({"/chat", "/execute", "/run", "/rag"})
+
+
+# P0-18：本地降级桶。Redis 故障时启用，避免限流失效。
+# per-pod 滑动窗口：每个 key 维护窗口内时间戳列表，超限返回 429。
+# 多 pod 部署时每个 pod 独立计数，实际限额 = limit * pod_count（降级妥协）。
+_local_buckets: dict[str, list[float]] = {}
+_local_buckets_lock = asyncio.Lock()
+# 本地桶 key 数量上限，防止 key 无限增长（每个 key 一个 list）。
+# 超限时清空最旧的 key（简单 LRU 近似——dict 保序，clear 全量重置）。
+_LOCAL_BUCKETS_MAX_KEYS = 10000
 
 
 def _is_llm_endpoint(path: str) -> bool:
@@ -114,6 +127,36 @@ async def _check_sliding_window(
     return allowed, remaining, reset
 
 
+async def _check_local_sliding_window(
+    key: str, limit: int, window: int
+) -> tuple[bool, int, int]:
+    """P0-18：本地滑动窗口限流检查（Redis 故障降级用）。
+
+    与 ``_check_sliding_window`` 算法一致，但状态存进程内存 ``_local_buckets``。
+    加锁保护"清除+添加+计数"原子性（asyncio 单线程但 await 间可切换）。
+    key 数量超 ``_LOCAL_BUCKETS_MAX_KEYS`` 时全量清空，防内存泄漏。
+    """
+    now = time.time()
+    window_start = now - window
+    async with _local_buckets_lock:
+        if len(_local_buckets) > _LOCAL_BUCKETS_MAX_KEYS:
+            # 简单清理：全量清空。降级路径下偶发重置可接受（最坏情况是
+            # 重置瞬间所有 key 配额刷新，短暂放宽——优于 OOM）。
+            _local_buckets.clear()
+        bucket = _local_buckets.get(key)
+        if bucket is None:
+            bucket = []
+            _local_buckets[key] = bucket
+        # 清除窗口外过期条目
+        bucket[:] = [ts for ts in bucket if ts > window_start]
+        bucket.append(now)
+        count = len(bucket)
+    allowed = count <= limit
+    remaining = max(0, limit - count)
+    reset = int(now + window)
+    return allowed, remaining, reset
+
+
 class RateLimitMiddleware:
     """纯 ASGI 限流中间件（security.spec.md§5）。
 
@@ -161,10 +204,18 @@ class RateLimitMiddleware:
                 redis_client, key, limit, self.window
             )
         except Exception:
-            # Redis 不可用 — 降级放行（不阻断请求，仅记录警告）
-            logger.warning("Redis 不可用，限流跳过", exc_info=True)
-            await self.app(scope, receive, send)
-            return
+            # P0-18：Redis 不可用 — 降级到本地滑动窗口桶，避免限流失效。
+            # 本地桶 per-pod 计数，多 pod 实际限额 = limit * pod_count（降级妥协）。
+            # 本地桶也失败（极端情况）才放行，确保不阻断请求。
+            logger.warning("Redis 不可用，降级到本地限流桶", exc_info=True)
+            try:
+                allowed, remaining, reset = await _check_local_sliding_window(
+                    key, limit, self.window
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("本地限流桶也失败，放行请求")
+                await self.app(scope, receive, send)
+                return
 
         if not allowed:
             # 超限 → 429 + 限流头（errors.spec.md§4 / security.spec.md§5.2）

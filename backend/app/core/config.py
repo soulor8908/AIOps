@@ -249,6 +249,28 @@ class Settings(BaseSettings):
     llm_stream_chunk_timeout_seconds: int = Field(
         default=30, alias="LLM_STREAM_CHUNK_TIMEOUT_SECONDS", ge=5, le=300
     )
+    # P0-17：scheduler lease 时长（秒）。agent 被 mark_agent_run_started 后
+    # next_run_at 推后 lease_seconds，防止本轮 tick 重复选中；若 last_run_status
+    # 停留在 "running" 超 lease_seconds（pod 崩溃 / SIGKILL），tick 开始时
+    # recover_stuck_agents 将其标记 failed 并立即重排。默认 = timeout * 2 + 60s
+    # buffer，覆盖单次执行最大时长 + 容错窗口。
+    agent_scheduler_lease_seconds: int = Field(
+        default=600, alias="AGENT_SCHEDULER_LEASE_SECONDS", ge=60, le=7200
+    )
+    # P0-21：LLMClient 应用级单例缓存上限。超此值按 LRU 驱逐最久未用的
+    # client（model_configs 表 alias 变更或动态配置时防止无限增长）。
+    llm_client_cache_max_size: int = Field(
+        default=32, alias="LLM_CLIENT_CACHE_MAX_SIZE", ge=1, le=256
+    )
+    # P0-21：httpx 连接池 limits。每个 LLMClient 的 httpx.AsyncClient 连接池
+    # 上限，防止突发并发打满 fd。默认 max_connections=100 覆盖单 pod 高 QPS，
+    # max_keepalive=20 复用热连接。
+    llm_client_max_connections: int = Field(
+        default=100, alias="LLM_CLIENT_MAX_CONNECTIONS", ge=1, le=1000
+    )
+    llm_client_max_keepalive_connections: int = Field(
+        default=20, alias="LLM_CLIENT_MAX_KEEPALIVE_CONNECTIONS", ge=0, le=500
+    )
 
     @property
     def access_token_expire_seconds(self) -> int:
