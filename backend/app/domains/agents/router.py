@@ -18,6 +18,7 @@ from app.domains.agents import service
 from app.domains.agents.models import (
     AgentCreate,
     AgentOut,
+    AgentUpdate,
     ExecuteRequest,
     ExecutionResult,
     WorkflowDef,
@@ -112,6 +113,60 @@ async def get_agent(
     owner_id = None if current_user.is_admin else current_user.id
     agent = await service.get_agent(session, agent_id, owner_id=owner_id)
     return AgentOut.model_validate(agent)
+
+
+@router.patch("/agents/{agent_id}", response_model=AgentOut)
+async def update_agent(
+    agent_id: uuid.UUID,
+    payload: AgentUpdate,
+    session: AsyncSession = Depends(get_session),
+    current_admin: User = Depends(get_current_admin),
+) -> AgentOut:
+    """更新 Agent 配置（E1：eval 反馈回写）。
+
+    PATCH 语义：仅传入字段被更新。admin-only——配置变更影响生产 Agent 行为。
+    E1 闭环：admin 通过 ``POST /agents/{id}/recommendations`` 查看 eval 反馈
+    推荐配置，审阅后用本端点回写。
+    """
+    agent = await service.update_agent(session, agent_id, payload)
+    return AgentOut.model_validate(agent)
+
+
+@router.post("/agents/{agent_id}/recommendations")
+async def get_agent_recommendations(
+    agent_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    current_admin: User = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """生成 agent 配置推荐（E1 闭环：eval 结果反馈到 agent 配置优化）。
+
+    聚合该 agent 的 judged EvalSample，按失败模式（SelfDiagnose 根因分类）
+    生成结构化配置推荐。admin 审阅 ``suggested_update`` 后通过
+    ``PATCH /agents/{id}`` 回写。
+
+    admin-only——推荐基于 eval 样本，含其他用户的输入文本（可能敏感）。
+    """
+    from app.domains.agents.tuning import recommend_agent_config
+
+    rec = await recommend_agent_config(session, agent_id)
+    return {
+        "agent_id": str(rec.agent_id),
+        "agent_name": rec.agent_name,
+        "total_samples": rec.total_samples,
+        "failed_samples": rec.failed_samples,
+        "avg_score": rec.avg_score,
+        "failure_patterns": [
+            {
+                "root_cause": p.root_cause.value,
+                "count": p.count,
+                "ratio": p.ratio,
+                "sample_reasons": p.sample_reasons,
+            }
+            for p in rec.failure_patterns
+        ],
+        "suggested_update": rec.suggested_update,
+        "rationale": rec.rationale,
+    }
 
 
 @router.post("/agents/{agent_id}/execute", response_model=ExecutionResult)

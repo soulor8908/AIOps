@@ -201,6 +201,51 @@ class AgentCreate(BaseModel):
         return v
 
 
+class AgentUpdate(BaseModel):
+    """更新 Agent 入参（E1：eval 反馈回写 agent 配置所需）。
+
+    所有字段 Optional——PATCH 语义，仅传入字段被更新（``model_dump(exclude_unset=True)``）。
+    字段约束与 ``AgentCreate`` 一致，确保更新值通过同口径校验。
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = None
+    system_prompt: str | None = None
+    model_alias: str | None = None
+    tools: list[ToolDef] | None = None
+    max_turns: int | None = Field(default=None, ge=1, le=50)
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    self_eval: bool | None = None
+    self_heal: bool | None = None
+    self_eval_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    self_heal_max_retries: int | None = Field(default=None, ge=0, le=3)
+    schedule: str | None = None
+    schedule_enabled: bool | None = None
+    is_active: bool | None = None
+
+    @field_validator("schedule")
+    @classmethod
+    def _validate_schedule_format(cls, v: str | None) -> str | None:
+        """与 ``AgentCreate`` 同口径校验。空字符串视为清除 schedule。"""
+        if v is None or v == "":
+            return None
+        if not v.startswith("interval:"):
+            raise PydanticCustomError(
+                "schedule_format", "schedule 必须为 'interval:<seconds>' 格式"
+            )
+        try:
+            secs = int(v[len("interval:"):])
+        except ValueError:
+            raise PydanticCustomError(
+                "schedule_seconds", "schedule 的 seconds 必须为整数"
+            ) from None
+        if secs <= 0:
+            raise PydanticCustomError(
+                "schedule_positive", "schedule 的 seconds 必须为正整数"
+            )
+        return v
+
+
 class AgentOut(BaseModel):
     model_config = {"from_attributes": True}
 

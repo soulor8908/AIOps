@@ -297,6 +297,27 @@ def test_get_counter_sum_tool_metrics() -> None:
     assert metrics.get_counter_sum("tool_errors") == 1.0
 
 
+# ===================== record_eval_regression (E3) =====================
+
+
+def test_record_eval_regression_increments_counter() -> None:
+    """E3：eval_regressions{eval_name} 按 eval 名计数。"""
+    metrics.record_eval_regression("smoke-test")
+    metrics.record_eval_regression("smoke-test")
+    metrics.record_eval_regression("regression-suite")
+
+    assert metrics.get_counter("eval_regressions", ("smoke-test",)) == 2.0
+    assert metrics.get_counter("eval_regressions", ("regression-suite",)) == 1.0
+
+
+def test_record_eval_regression_in_prometheus() -> None:
+    """E3：eval_regressions 出现在 Prometheus 导出，供 alerts.yml 告警规则消费。"""
+    metrics.record_eval_regression("online-eval-prod")
+    out = metrics.render_prometheus()
+    assert "# TYPE eval_regressions counter" in out
+    assert 'eval_regressions{eval_name="online-eval-prod"} 1' in out
+
+
 # ===================== 隔离性 =====================
 
 def test_metric_registry_isolation() -> None:

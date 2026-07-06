@@ -25,6 +25,7 @@ from app.domains.agents.model_router import ModelRouter
 from app.domains.agents.models import (
     Agent,
     AgentCreate,
+    AgentUpdate,
     ExecuteRequest,
     ExecutionResult,
     Workflow,
@@ -268,6 +269,44 @@ async def list_agents(
         stmt = stmt.where(Agent.owner_id == owner_id)
     stmt = stmt.order_by(Agent.created_at.desc()).limit(limit).offset(offset)
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def update_agent(
+    session: AsyncSession,
+    agent_id: uuid.UUID,
+    payload: AgentUpdate,
+    owner_id: uuid.UUID | None = None,
+) -> Agent:
+    """更新 Agent 配置（E1：eval 反馈回写 agent 配置所需）。
+
+    PATCH 语义：仅 ``payload`` 中显式设置的字段被更新
+    （``model_dump(exclude_unset=True)``）。``owner_id`` 走与 ``get_agent``
+    同口径的所有权校验。
+
+    E1 闭环：admin 通过 ``POST /agents/{id}/recommendations`` 查看 eval 反馈
+    推荐配置 → 用本端点 PATCH 回写。tools 字段需从 ``ToolDef`` 列表序列化为
+    dict 列表（与 ``create_agent`` 一致）。
+    """
+    agent = await get_agent(session, agent_id, owner_id=owner_id)
+    data = payload.model_dump(exclude_unset=True)
+    # tools 单独处理：ToolDef → dict（与 create_agent 一致）
+    if "tools" in data and payload.tools is not None:
+        data["tools"] = [t.model_dump() for t in payload.tools]
+    for key, value in data.items():
+        setattr(agent, key, value)
+    # 一致性校验：schedule_enabled=True 必须有有效 schedule
+    if agent.schedule_enabled and not agent.schedule:
+        raise ValidationError(
+            "schedule_enabled=True 时 schedule 不能为空（需 'interval:<seconds>' 格式）"
+        )
+    # schedule_enabled 从 False → True 时立即到期，worker 首轮即执行
+    if data.get("schedule_enabled") is True and agent.next_run_at is None:
+        agent.next_run_at = datetime.now(UTC)
+    await session.flush()
+    # refresh 拉取 server-side onupdate 生成的 updated_at，避免 async 懒加载
+    # 触发 MissingGreenlet（router 层 model_validate 访问 updated_at 时）
+    await session.refresh(agent)
+    return agent
 
 
 async def execute_agent(
@@ -875,4 +914,5 @@ __all__ = [
     "mark_agent_run_finished",
     "mark_agent_run_started",
     "recover_stuck_agents",
+    "update_agent",
 ]
