@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import Boolean, Float, Index, Integer, Numeric, String, Text, func
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, Numeric, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -67,6 +67,11 @@ class ModelConfig(Base):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    # P4-2：资源隔离。nullable 兼容旧数据（NULL 视为公共资源，仅 admin 可见）。
+    # ModelConfig 通常由 admin 维护，但绑定 owner_id 以支持未来「用户自带 model key」场景。
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
@@ -167,6 +172,8 @@ class ModelConfigOut(BaseModel):
     cost_per_1k_output: Decimal
     is_active: bool
     priority: int
+    # P4-2：资源隔离
+    owner_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
 

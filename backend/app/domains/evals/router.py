@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
-from app.core.deps import get_current_user
+from app.core.deps import get_current_admin, get_current_user
 from app.domains.auth.models import User
 from app.domains.evals import service
 from app.domains.evals.models import (
@@ -77,9 +77,12 @@ async def list_samples(
 async def create_sample(
     payload: EvalSampleCreate,
     session: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user),
+    admin: User = Depends(get_current_admin),
 ) -> EvalSampleOut:
-    """手动录入采样样本（生产自动采样由 execute_agent 钩子完成）。"""
+    """手动录入采样样本（生产自动采样由 execute_agent 钩子完成）。
+
+    P4-4：改 admin-only——手动录样影响 eval 数据质量,仅 admin 可操作。
+    """
     sample = await service.record_sample(session, payload)
     return EvalSampleOut.model_validate(sample)
 
@@ -88,12 +91,14 @@ async def create_sample(
 async def run_online_eval(
     payload: OnlineEvalRequest,
     session: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user),
+    admin: User = Depends(get_current_admin),
 ) -> EvalRunOut:
     """触发 online eval 闭环：取样本 → 匹配离线 golden → LLM judge → 写 EvalRun。
 
     同步执行（与 ``POST /evals/{id}/run`` 一致）。生产批量评估建议在低峰期
     或异步任务中调用，避免阻塞请求线程。
+
+    P4-4：改 admin-only——online eval 批量调用 LLM 产生成本,仅 admin 可触发。
     """
     run = await service.run_online_eval(session, payload)
     return EvalRunOut.model_validate(run)
@@ -113,8 +118,11 @@ async def get_eval(
 async def run_eval(
     eval_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user),
+    admin: User = Depends(get_current_admin),
 ) -> EvalRunOut:
-    """同步执行 eval。predict_fn 为 None 时用 case.expected 自比对。"""
+    """同步执行 eval。predict_fn 为 None 时用 case.expected 自比对。
+
+    P4-4：改 admin-only——执行 eval 批量调用 LLM 产生成本,仅 admin 可触发。
+    """
     run = await service.run_eval(session, eval_id)
     return EvalRunOut.model_validate(run)

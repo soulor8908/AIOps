@@ -26,7 +26,11 @@ EMBEDDING_DIM = 1536
 # ===================== ORM =====================
 
 class KnowledgeBase(Base):
-    """知识库。每个 KB 独立配置分块策略与 embedding 模型。"""
+    """知识库。每个 KB 独立配置分块策略与 embedding 模型。
+
+    P4-1：``owner_id`` 字段实现资源隔离——非 admin 仅能访问自己的 KB,
+    admin 可访问全部。旧数据 owner_id 为 NULL,仅 admin 可见(兼容)。
+    """
 
     __tablename__ = "knowledge_bases"
 
@@ -38,6 +42,10 @@ class KnowledgeBase(Base):
     )
     chunk_size: Mapped[int] = mapped_column(Integer, nullable=False, default=800)
     chunk_overlap: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    # P4-1：资源隔离。nullable 兼容旧数据(无 owner 的 KB 仅 admin 可见)。
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
@@ -133,6 +141,7 @@ class KnowledgeBaseOut(BaseModel):
     embedding_model: str
     chunk_size: int
     chunk_overlap: int
+    owner_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
 

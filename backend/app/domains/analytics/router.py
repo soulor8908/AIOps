@@ -31,9 +31,12 @@ async def list_conversations(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> list[ConversationOut]:
+    # P4-3：非 admin 强制只能查自己 user_id,防越权查看他人对话。
+    # admin 可传任意 user_id 或不传(查全部)用于运营分析。
+    effective_user_id = user_id if current_user.is_admin else current_user.id
     convs = await service.list_conversations(
         session,
-        user_id=user_id,
+        user_id=effective_user_id,
         limit=limit,
         offset=offset,
         start_date=start_date,

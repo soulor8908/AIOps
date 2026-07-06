@@ -85,17 +85,25 @@ def test_get_knowledge_base_not_found(client: TestClient) -> None:
 
 
 def test_upload_document(client: TestClient, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    # settings.openai_api_key="" 使 embed_text 直接返回 1536 维零向量（无网络调用），
-    # pgvector Vector(1536) 维度校验通过，SQLite 上以 JSON 字符串存储。
+    # A4 后 upload_document 用 embed_batch(strict=True)，OPENAI_API_KEY 未配置时
+    # 抛 EmbeddingError 导致 status=failed。此处 monkeypatch embed_batch 返回非零
+    # 向量，验证成功路径下 status=ready + chunk_count>=1 + 字段契约。
     #
     # SQLite/aiosqlite 不支持 onupdate=func.now() 的 RETURNING，
     # upload_document 在 flush 前修改 doc.status 触发 onupdate，导致 updated_at 过期，
     # router 的 DocumentOut.model_validate(doc) 同步访问触发 MissingGreenlet。
     # PostgreSQL 生产环境通过 RETURNING 自动填充，此处仅 SQLite 测试需要 refresh 补偿。
+    from app.domains.knowledge.models import EMBEDDING_DIM
+
+    async def _fake_embed_batch(texts, model=None, *, strict=False):  # type: ignore[no-untyped-def]
+        return [[0.1] * EMBEDDING_DIM for _ in texts]
+
+    monkeypatch.setattr(kb_service, "embed_batch", _fake_embed_batch)
+
     _original_upload = kb_service.upload_document
 
-    async def _refreshing_upload(session, kb_id, title, content, mime_type=None, source_uri=None):  # type: ignore[no-untyped-def]
-        doc = await _original_upload(session, kb_id, title, content, mime_type, source_uri)
+    async def _refreshing_upload(session, kb_id, title, content, mime_type=None, source_uri=None, owner_id=None):  # type: ignore[no-untyped-def]
+        doc = await _original_upload(session, kb_id, title, content, mime_type, source_uri, owner_id=owner_id)
         await session.refresh(doc)
         return doc
 
@@ -176,11 +184,19 @@ def test_upload_document_rejects_oversized_content_length(client: TestClient) ->
 
 def test_upload_document_source_uri_is_uuid(client: TestClient, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """§7.4 source_uri 为 UUID 重命名，不含用户原始文件名。"""
+    # A4 后需 mock embed_batch 避免 strict 模式抛 EmbeddingError（见 test_upload_document 注释）。
+    from app.domains.knowledge.models import EMBEDDING_DIM
+
+    async def _fake_embed_batch(texts, model=None, *, strict=False):  # type: ignore[no-untyped-def]
+        return [[0.1] * EMBEDDING_DIM for _ in texts]
+
+    monkeypatch.setattr(kb_service, "embed_batch", _fake_embed_batch)
+
     _original_upload = kb_service.upload_document
 
-    async def _refreshing_upload(session, kb_id, title, content, mime_type=None, source_uri=None):  # type: ignore[no-untyped-def]
+    async def _refreshing_upload(session, kb_id, title, content, mime_type=None, source_uri=None, owner_id=None):  # type: ignore[no-untyped-def]
         doc = await _original_upload(
-            session, kb_id, title, content, mime_type, source_uri
+            session, kb_id, title, content, mime_type, source_uri, owner_id=owner_id
         )
         await session.refresh(doc)
         return doc

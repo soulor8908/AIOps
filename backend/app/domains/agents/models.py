@@ -71,6 +71,11 @@ class Agent(Base):
     last_run_status: Mapped[str | None] = mapped_column(String(32))
     last_run_error: Mapped[str | None] = mapped_column(Text)
     next_run_at: Mapped[datetime | None] = mapped_column()
+    # P4-2：资源隔离。nullable 兼容旧数据（NULL 视为公共资源，仅 admin 可见）。
+    # router 层创建时绑定 current_user.id；service 层 get/list 校验所有权。
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
@@ -92,6 +97,10 @@ class Workflow(Base):
     nodes: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     edges: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     is_active: Mapped[bool] = mapped_column(default=True)
+    # P4-2：资源隔离。nullable 兼容旧数据（NULL 视为公共资源，仅 admin 可见）。
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
@@ -215,6 +224,8 @@ class AgentOut(BaseModel):
     last_run_status: str | None = None
     last_run_error: str | None = None
     next_run_at: datetime | None = None
+    # P4-2：资源隔离
+    owner_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -256,6 +267,8 @@ class WorkflowOut(BaseModel):
     nodes: list[dict[str, Any]]
     edges: list[dict[str, Any]]
     is_active: bool
+    # P4-2：资源隔离
+    owner_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
 

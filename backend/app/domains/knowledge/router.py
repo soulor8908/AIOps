@@ -60,7 +60,9 @@ async def list_kbs(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> list[KnowledgeBaseOut]:
-    kbs = await service.list_kbs(session, limit=limit, offset=offset)
+    # P4-1：非 admin 仅能查看自己的 KB
+    owner_id = None if current_user.is_admin else current_user.id
+    kbs = await service.list_kbs(session, limit=limit, offset=offset, owner_id=owner_id)
     return [KnowledgeBaseOut.model_validate(k) for k in kbs]
 
 
@@ -70,7 +72,8 @@ async def create_kb(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_admin),
 ) -> KnowledgeBaseOut:
-    kb = await service.create_kb(session, payload)
+    # P4-1：绑定当前 admin 为 owner
+    kb = await service.create_kb(session, payload, owner_id=current_user.id)
     return KnowledgeBaseOut.model_validate(kb)
 
 
@@ -80,7 +83,9 @@ async def get_kb(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> KnowledgeBaseOut:
-    kb = await service.get_kb(session, kb_id)
+    # P4-1：非 admin 校验所有权
+    owner_id = None if current_user.is_admin else current_user.id
+    kb = await service.get_kb(session, kb_id, owner_id=owner_id)
     return KnowledgeBaseOut.model_validate(kb)
 
 
@@ -157,6 +162,8 @@ async def upload_document(
         raise ValidationError("文档内容为空")
     # security.spec.md§7.4 — 文件名 UUID 重命名，禁止保留用户原始文件名（防目录穿越）。
     source_uri = str(uuid.uuid4())
+    # P4-1：非 admin 校验 KB 写权限(上传文档需拥有该 KB)
+    owner_id = None if current_user.is_admin else current_user.id
     doc = await service.upload_document(
         session,
         kb_id,
@@ -164,6 +171,7 @@ async def upload_document(
         content=content,
         mime_type=file.content_type,
         source_uri=source_uri,
+        owner_id=owner_id,
     )
     # 审计：上传成功，记录 user/kb/doc/title/mime/size 便于追溯（不记录原始文件名）。
     logger.info(
@@ -189,7 +197,9 @@ async def search_kb(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> list[SearchResult]:
-    return await service.search_kb(session, kb_id, payload)
+    # P4-1：非 admin 校验所有权
+    owner_id = None if current_user.is_admin else current_user.id
+    return await service.search_kb(session, kb_id, payload, owner_id=owner_id)
 
 
 @router.post("/{kb_id}/rag")
@@ -199,5 +209,9 @@ async def rag_query(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, object]:
+    # P4-1：非 admin 校验所有权
+    owner_id = None if current_user.is_admin else current_user.id
     # P0-20：请求级超时，超时抛 504 gateway_timeout
-    return await _with_request_timeout(service.rag_query(session, kb_id, payload))
+    return await _with_request_timeout(
+        service.rag_query(session, kb_id, payload, owner_id=owner_id)
+    )

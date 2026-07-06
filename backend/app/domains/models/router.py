@@ -29,8 +29,10 @@ async def list_models(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> list[ModelConfigOut]:
+    # P4-2：非 admin 仅能查看自己的 ModelConfig
+    owner_id = None if current_user.is_admin else current_user.id
     configs = await service.list_models(
-        session, active_only=active_only, limit=limit, offset=offset
+        session, active_only=active_only, limit=limit, offset=offset, owner_id=owner_id
     )
     return [ModelConfigOut.model_validate(c) for c in configs]
 
@@ -41,7 +43,8 @@ async def create_model(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_admin),
 ) -> ModelConfigOut:
-    config = await service.create_model(session, payload)
+    # P4-2：绑定当前 admin 为 owner
+    config = await service.create_model(session, payload, owner_id=current_user.id)
     return ModelConfigOut.model_validate(config)
 
 
@@ -51,7 +54,9 @@ async def get_model(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> ModelConfigOut:
-    config = await service.get_model(session, alias)
+    # P4-2：非 admin 校验所有权
+    owner_id = None if current_user.is_admin else current_user.id
+    config = await service.get_model(session, alias, owner_id=owner_id)
     return ModelConfigOut.model_validate(config)
 
 
@@ -82,7 +87,9 @@ async def chat(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> ChatResponse:
-    return await service.chat_completion(session, alias, payload)
+    # P4-2：非 admin 校验所有权（chat 需拥有该 ModelConfig）
+    owner_id = None if current_user.is_admin else current_user.id
+    return await service.chat_completion(session, alias, payload, owner_id=owner_id)
 
 
 @router.post("/{alias}/chat/stream")
@@ -93,7 +100,9 @@ async def chat_stream(
     current_user: User = Depends(get_current_user),
 ) -> StreamingResponse:
     """流式聊天补全（P0-1）。SSE 格式，供前端 EventSource 消费。"""
+    # P4-2：非 admin 校验所有权
+    owner_id = None if current_user.is_admin else current_user.id
     return StreamingResponse(
-        service.stream_chat_completion(session, alias, payload),
+        service.stream_chat_completion(session, alias, payload, owner_id=owner_id),
         media_type="text/event-stream",
     )

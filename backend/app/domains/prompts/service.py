@@ -32,9 +32,14 @@ if TYPE_CHECKING:
 MAX_VERSIONS = 100
 
 
-async def create_prompt(session: AsyncSession, payload: PromptCreate) -> Prompt:
-    """创建 Prompt 并写入初始版本（version_num=1）。"""
-    prompt = Prompt(name=payload.name, description=payload.description)
+async def create_prompt(
+    session: AsyncSession, payload: PromptCreate, owner_id: uuid.UUID | None = None
+) -> Prompt:
+    """创建 Prompt 并写入初始版本（version_num=1）。
+
+    P4-2：``owner_id`` 绑定创建者（router 层传 current_user.id）。
+    """
+    prompt = Prompt(name=payload.name, description=payload.description, owner_id=owner_id)
     session.add(prompt)
     await session.flush()
     v1 = PromptVersion(
@@ -51,8 +56,16 @@ async def create_prompt(session: AsyncSession, payload: PromptCreate) -> Prompt:
     return prompt
 
 
-async def get_prompt(session: AsyncSession, prompt_id: uuid.UUID) -> Prompt:
-    """获取 Prompt（含 versions 关系）。不存在抛 NotFoundError。"""
+async def get_prompt(
+    session: AsyncSession,
+    prompt_id: uuid.UUID,
+    owner_id: uuid.UUID | None = None,
+) -> Prompt:
+    """获取 Prompt（含 versions 关系）。不存在抛 NotFoundError。
+
+    P4-2：``owner_id`` 非 None 时校验所有权——不匹配抛 NotFoundError(404,
+    不泄露资源存在性)。``owner_id=None`` 表示 admin / 系统调用跳过校验。
+    """
     stmt = (
         select(Prompt)
         .options(selectinload(Prompt.versions))
@@ -61,18 +74,29 @@ async def get_prompt(session: AsyncSession, prompt_id: uuid.UUID) -> Prompt:
     prompt = (await session.execute(stmt)).scalar_one_or_none()
     if prompt is None:
         raise NotFoundError(f"Prompt {prompt_id} 不存在")
+    # P4-2：非 admin 校验所有权。owner_id 为 NULL 的旧 Prompt 仅 admin 可见。
+    if owner_id is not None and prompt.owner_id != owner_id:
+        raise NotFoundError(f"Prompt {prompt_id} 不存在")
     return prompt
 
 
 async def list_prompts(
-    session: AsyncSession, q: str | None = None, limit: int = 50, offset: int = 0
+    session: AsyncSession,
+    q: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    owner_id: uuid.UUID | None = None,
 ) -> list[Prompt]:
     """列出 Prompt，支持名称模糊搜索。
 
     搜索词中的 ``%`` / ``_`` / ``\\`` 被转义为字面量，避免通配符注入
     （如搜索 ``%`` 匹配全部、``_`` 匹配任意单字符）破坏搜索语义。
+
+    P4-2：``owner_id`` 非 None 时仅返回该用户的 Prompt。
     """
     stmt = select(Prompt).options(selectinload(Prompt.versions))
+    if owner_id is not None:
+        stmt = stmt.where(Prompt.owner_id == owner_id)
     if q:
         q_escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         stmt = stmt.where(Prompt.name.ilike(f"%{q_escaped}%", escape="\\"))
@@ -163,11 +187,15 @@ async def diff_versions(
     prompt_id: uuid.UUID,
     from_version: int,
     to_version: int,
+    owner_id: uuid.UUID | None = None,
 ) -> DiffResult:
-    """对两个版本号做行级 diff。"""
+    """对两个版本号做行级 diff。
+
+    P4-2：``owner_id`` 非 None 时校验所有权（透传给 get_prompt）。
+    """
     if from_version == to_version:
         raise ValidationError("from 与 to 不能相同")
-    prompt = await get_prompt(session, prompt_id)
+    prompt = await get_prompt(session, prompt_id, owner_id=owner_id)
     from_content = await _fetch_version_content(session, prompt.id, from_version)
     to_content = await _fetch_version_content(session, prompt.id, to_version)
     from_lines = from_content.splitlines(keepends=True)

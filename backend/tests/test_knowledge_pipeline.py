@@ -67,7 +67,8 @@ async def _seed_kb(session: AsyncSession, name: str = "kb") -> KnowledgeBase:
     from app.domains.knowledge.models import KnowledgeBaseCreate
 
     kb = await kb_service.create_kb(
-        session, KnowledgeBaseCreate(name=name, chunk_size=100, chunk_overlap=10)
+        session, KnowledgeBaseCreate(name=name, chunk_size=100, chunk_overlap=10),
+        owner_id=uuid.uuid4(),
     )
     await session.flush()
     return kb
@@ -434,6 +435,7 @@ def test_create_kb_rejects_unknown_embedding_model(client: TestClient) -> None:
                 KnowledgeBaseCreate(
                     name="bad-model-kb", embedding_model="unknown-model"
                 ),
+                owner_id=uuid.uuid4(),
             )
         assert "未登记" in str(exc_info.value)
 
@@ -456,6 +458,7 @@ def test_create_kb_rejects_dimension_mismatch(client: TestClient) -> None:
                 KnowledgeBaseCreate(
                     name="dim-mismatch-kb", embedding_model="text-embedding-3-large"
                 ),
+                owner_id=uuid.uuid4(),
             )
         assert "维度" in str(exc_info.value)
 
@@ -473,6 +476,7 @@ def test_create_kb_accepts_registered_dim_matching_model(client: TestClient) -> 
             KnowledgeBaseCreate(
                 name="ok-kb", embedding_model="text-embedding-3-small"
             ),
+            owner_id=uuid.uuid4(),
         )
         assert kb.embedding_model == "text-embedding-3-small"
 

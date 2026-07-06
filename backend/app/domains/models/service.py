@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from collections.abc import AsyncIterator
 from decimal import Decimal
 from typing import Any
@@ -41,8 +42,13 @@ _PROVIDER_MAP: dict[str, Provider] = {
 }
 
 
-async def create_model(session: AsyncSession, payload: ModelConfigCreate) -> ModelConfig:
-    """创建模型配置。alias 唯一冲突由 DB 约束保证。"""
+async def create_model(
+    session: AsyncSession, payload: ModelConfigCreate, owner_id: uuid.UUID | None = None
+) -> ModelConfig:
+    """创建模型配置。alias 唯一冲突由 DB 约束保证。
+
+    P4-2：``owner_id`` 绑定创建者（router 层传 current_user.id）。
+    """
     config = ModelConfig(
         alias=payload.alias,
         provider=payload.provider.value,
@@ -55,26 +61,47 @@ async def create_model(session: AsyncSession, payload: ModelConfigCreate) -> Mod
         cost_per_1k_output=payload.cost_per_1k_output,
         is_active=payload.is_active,
         priority=payload.priority,
+        # P4-2：资源隔离
+        owner_id=owner_id,
     )
     session.add(config)
     await session.flush()
     return config
 
 
-async def get_model(session: AsyncSession, alias: str) -> ModelConfig:
-    """按 alias 获取模型配置。"""
+async def get_model(
+    session: AsyncSession, alias: str, owner_id: uuid.UUID | None = None
+) -> ModelConfig:
+    """按 alias 获取模型配置。
+
+    P4-2：``owner_id`` 非 None 时校验所有权——不匹配抛 NotFoundError(404,
+    不泄露资源存在性)。``owner_id=None`` 表示 admin / 系统调用跳过校验。
+    """
     stmt = select(ModelConfig).where(ModelConfig.alias == alias)
     config = (await session.execute(stmt)).scalar_one_or_none()
     if config is None:
+        raise NotFoundError(f"模型配置 {alias} 不存在")
+    # P4-2：非 admin 校验所有权。owner_id 为 NULL 的旧 ModelConfig 仅 admin 可见。
+    if owner_id is not None and config.owner_id != owner_id:
         raise NotFoundError(f"模型配置 {alias} 不存在")
     return config
 
 
 async def list_models(
-    session: AsyncSession, active_only: bool = False, limit: int = 100, offset: int = 0
+    session: AsyncSession,
+    active_only: bool = False,
+    limit: int = 100,
+    offset: int = 0,
+    owner_id: uuid.UUID | None = None,
 ) -> list[ModelConfig]:
-    """列出模型配置，按 priority 升序。"""
-    stmt = select(ModelConfig).order_by(ModelConfig.priority.asc())
+    """列出模型配置，按 priority 升序。
+
+    P4-2：``owner_id`` 非 None 时仅返回该用户的 ModelConfig。
+    """
+    stmt = select(ModelConfig)
+    if owner_id is not None:
+        stmt = stmt.where(ModelConfig.owner_id == owner_id)
+    stmt = stmt.order_by(ModelConfig.priority.asc())
     if active_only:
         stmt = stmt.where(ModelConfig.is_active.is_(True))
     stmt = stmt.limit(limit).offset(offset)
@@ -101,10 +128,17 @@ async def delete_model(session: AsyncSession, alias: str) -> None:
 
 
 async def route_model(
-    session: AsyncSession, alias: str, strategy: RoutingStrategy
+    session: AsyncSession,
+    alias: str,
+    strategy: RoutingStrategy,
+    owner_id: uuid.UUID | None = None,
 ) -> list[ModelConfig]:
-    """按策略返回候选模型列表（含 primary + fallback）。"""
-    primary = await get_model(session, alias)
+    """按策略返回候选模型列表（含 primary + fallback）。
+
+    P4-2：``owner_id`` 非 None 时校验 primary 所有权。fallback 候选不校验
+    （公共模型可作降级目标，避免非 admin 因私有 primary 失败后无可用模型）。
+    """
+    primary = await get_model(session, alias, owner_id=owner_id)
     if strategy == RoutingStrategy.DIRECT:
         return [primary]
     stmt = (
@@ -149,10 +183,16 @@ _rr_fallback_index: dict[str, int] = {}
 
 
 async def chat_completion(
-    session: AsyncSession, alias: str, request: ChatRequest
+    session: AsyncSession,
+    alias: str,
+    request: ChatRequest,
+    owner_id: uuid.UUID | None = None,
 ) -> ChatResponse:
-    """聊天补全，含 fallback。primary 失败按候选列表降级。"""
-    candidates = await route_model(session, alias, request.strategy)
+    """聊天补全，含 fallback。primary 失败按候选列表降级。
+
+    P4-2：``owner_id`` 非 None 时校验 primary 所有权（透传给 route_model）。
+    """
+    candidates = await route_model(session, alias, request.strategy, owner_id=owner_id)
     if not candidates:
         raise LLMError("无可用模型")
     messages = [Message(role=m.role, content=m.content) for m in request.messages]
@@ -186,7 +226,10 @@ async def chat_completion(
 
 
 async def stream_chat_completion(
-    session: AsyncSession, alias: str, request: ChatRequest
+    session: AsyncSession,
+    alias: str,
+    request: ChatRequest,
+    owner_id: uuid.UUID | None = None,
 ) -> AsyncIterator[str]:
     """流式聊天补全（P0-1）。
 
@@ -197,8 +240,10 @@ async def stream_chat_completion(
     - 失败时 yield 一个 error 事件而非抛异常（流已开始，无法改 HTTP 状态码）。
 
     SSE 事件格式：``data: {"token": "..."}\\n\\n``，结束 ``data: [DONE]\\n\\n``。
+
+    P4-2：``owner_id`` 非 None 时校验 primary 所有权（透传给 route_model）。
     """
-    candidates = await route_model(session, alias, request.strategy)
+    candidates = await route_model(session, alias, request.strategy, owner_id=owner_id)
     if not candidates:
         yield _sse_event({"error": "无可用模型"})
         return

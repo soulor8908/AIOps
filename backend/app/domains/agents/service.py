@@ -199,8 +199,14 @@ _PROVIDER_MAP: dict[str, Provider] = {
 }
 
 
-async def create_agent(session: AsyncSession, payload: AgentCreate) -> Agent:
-    """创建 Agent。"""
+async def create_agent(
+    session: AsyncSession, payload: AgentCreate, owner_id: uuid.UUID | None = None
+) -> Agent:
+    """创建 Agent。
+
+    P4-2：``owner_id`` 绑定创建者（router 层传 current_user.id）。None 兼容
+    旧调用方（scheduler 内部创建 / 测试），NULL 视为公共资源仅 admin 可见。
+    """
     now = datetime.now(UTC)
     agent = Agent(
         name=payload.name,
@@ -219,35 +225,56 @@ async def create_agent(session: AsyncSession, payload: AgentCreate) -> Agent:
         schedule=payload.schedule,
         schedule_enabled=payload.schedule_enabled,
         next_run_at=now if payload.schedule_enabled else None,
+        # P4-2：资源隔离
+        owner_id=owner_id,
     )
     session.add(agent)
     await session.flush()
     return agent
 
 
-async def get_agent(session: AsyncSession, agent_id: uuid.UUID) -> Agent:
-    """获取 Agent。"""
+async def get_agent(
+    session: AsyncSession,
+    agent_id: uuid.UUID,
+    owner_id: uuid.UUID | None = None,
+) -> Agent:
+    """获取 Agent。
+
+    P4-2：``owner_id`` 非 None 时校验所有权——不匹配抛 NotFoundError(404,
+    不泄露资源存在性)。``owner_id=None`` 表示 admin / 系统调用跳过校验。
+    """
     agent = await session.get(Agent, agent_id)
     if agent is None:
+        raise NotFoundError(f"Agent {agent_id} 不存在")
+    # P4-1：非 admin 校验所有权。owner_id 为 NULL 的旧 Agent 仅 admin 可见。
+    if owner_id is not None and agent.owner_id != owner_id:
         raise NotFoundError(f"Agent {agent_id} 不存在")
     return agent
 
 
 async def list_agents(
-    session: AsyncSession, limit: int = 50, offset: int = 0
+    session: AsyncSession,
+    limit: int = 50,
+    offset: int = 0,
+    owner_id: uuid.UUID | None = None,
 ) -> list[Agent]:
-    """列出 Agent。"""
-    stmt = (
-        select(Agent)
-        .order_by(Agent.created_at.desc())
-        .limit(limit)
-        .offset(offset)
-    )
+    """列出 Agent。
+
+    P4-2：``owner_id`` 非 None 时仅返回该用户的 Agent。``owner_id=None`` (admin)
+    返回全部(含 owner_id 为 NULL 的旧 Agent)。
+    """
+    stmt = select(Agent)
+    if owner_id is not None:
+        stmt = stmt.where(Agent.owner_id == owner_id)
+    stmt = stmt.order_by(Agent.created_at.desc()).limit(limit).offset(offset)
     return list((await session.execute(stmt)).scalars().all())
 
 
 async def execute_agent(
-    session: AsyncSession, agent_id: uuid.UUID, request: ExecuteRequest
+    session: AsyncSession,
+    agent_id: uuid.UUID,
+    request: ExecuteRequest,
+    owner_id: uuid.UUID | None = None,
 ) -> ExecutionResult:
     """执行单个 Agent。
 
@@ -258,8 +285,10 @@ async def execute_agent(
     P3-12：若 Agent 配置了 ``agent_delegate`` 工具，构造 ``AgentDelegateExecutor``
     实现 A2A 消息传递 —— 执行时把 input 传给目标 Agent，返回其 final_answer。
     委托递归深度受限（``_MAX_DELEGATE_DEPTH``）防止 A→B→A 循环。
+
+    P4-2：``owner_id`` 非 None 时校验所有权（非 admin 隔离）。
     """
-    agent = await get_agent(session, agent_id)
+    agent = await get_agent(session, agent_id, owner_id=owner_id)
     # P1-6：成本感知模型路由。启用后按复杂度覆盖 model_alias，熔断降级 cheapest。
     routed_alias = agent.model_alias
     router: ModelRouter | None = None
@@ -406,7 +435,10 @@ async def _record_execution_sample(
 
 
 async def stream_agent(
-    session: AsyncSession, agent_id: uuid.UUID, request: ExecuteRequest
+    session: AsyncSession,
+    agent_id: uuid.UUID,
+    request: ExecuteRequest,
+    owner_id: uuid.UUID | None = None,
 ) -> AsyncIterator[str]:
     """P2-8：流式执行 Agent，yield SSE 事件。
 
@@ -414,10 +446,12 @@ async def stream_agent(
     渲染打字机效果。事务边界同 ``execute_agent``（commit 释放 DB 连接后流式）。
 
     SSE 事件格式见 ``AgentExecutor.run_stream`` 的 yield 事件类型。
+
+    P4-2：``owner_id`` 非 None 时校验所有权（非 admin 隔离）。
     """
     import json as _json
 
-    agent = await get_agent(session, agent_id)
+    agent = await get_agent(session, agent_id, owner_id=owner_id)
     config = await _build_llm_config(session, agent.model_alias, agent.temperature)
     await session.commit()
     client = LLMClient(config)
@@ -492,8 +526,13 @@ async def _preload_delegate_targets(
     return targets, configs
 
 
-async def create_workflow(session: AsyncSession, payload: WorkflowDef) -> Workflow:
-    """创建工作流。节点数超 50 抛 ValidationError（业务校验）。"""
+async def create_workflow(
+    session: AsyncSession, payload: WorkflowDef, owner_id: uuid.UUID | None = None
+) -> Workflow:
+    """创建工作流。节点数超 50 抛 ValidationError（业务校验）。
+
+    P4-2：``owner_id`` 绑定创建者（router 层传 current_user.id）。
+    """
     if len(payload.nodes) > MAX_NODES:
         raise ValidationError(f"DAG 节点数超 {MAX_NODES} 上限")
     wf = Workflow(
@@ -501,6 +540,8 @@ async def create_workflow(session: AsyncSession, payload: WorkflowDef) -> Workfl
         description=payload.description,
         nodes=[n.model_dump() for n in payload.nodes],
         edges=[e.model_dump() for e in payload.edges],
+        # P4-2：资源隔离
+        owner_id=owner_id,
     )
     session.add(wf)
     await session.flush()
@@ -508,24 +549,41 @@ async def create_workflow(session: AsyncSession, payload: WorkflowDef) -> Workfl
 
 
 async def list_workflows(
-    session: AsyncSession, limit: int = 50, offset: int = 0
+    session: AsyncSession,
+    limit: int = 50,
+    offset: int = 0,
+    owner_id: uuid.UUID | None = None,
 ) -> list[Workflow]:
-    """列出工作流。"""
-    stmt = select(Workflow).order_by(Workflow.created_at.desc()).limit(limit).offset(offset)
+    """列出工作流。
+
+    P4-2：``owner_id`` 非 None 时仅返回该用户的 Workflow。
+    """
+    stmt = select(Workflow)
+    if owner_id is not None:
+        stmt = stmt.where(Workflow.owner_id == owner_id)
+    stmt = stmt.order_by(Workflow.created_at.desc()).limit(limit).offset(offset)
     return list((await session.execute(stmt)).scalars().all())
 
 
 async def execute_workflow(
-    session: AsyncSession, workflow_id: uuid.UUID, request: ExecuteRequest
+    session: AsyncSession,
+    workflow_id: uuid.UUID,
+    request: ExecuteRequest,
+    owner_id: uuid.UUID | None = None,
 ) -> ExecutionResult:
     """执行工作流 DAG。按节点顺序逐个跑 Agent，传递上下文。
 
     P3：预取所有节点引用的 agent + model_config，避免 DAG 执行时每节点
     2 次 DB 查询（``get_agent`` + ``_build_llm_config``）的 N+1 问题。
     50 节点工作流：原 100 次串行 DB 往返 → 2 次批量查询。
+
+    P4-2：``owner_id`` 非 None 时校验 Workflow 所有权（非 admin 隔离）。
     """
     wf = await session.get(Workflow, workflow_id)
     if wf is None:
+        raise NotFoundError(f"Workflow {workflow_id} 不存在")
+    # P4-2：非 admin 校验所有权。owner_id 为 NULL 的旧 Workflow 仅 admin 可见。
+    if owner_id is not None and wf.owner_id != owner_id:
         raise NotFoundError(f"Workflow {workflow_id} 不存在")
 
     # 预取所有节点引用的 agent（去重后批量查）

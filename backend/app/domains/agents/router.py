@@ -55,7 +55,9 @@ async def list_agents(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> list[AgentOut]:
-    agents = await service.list_agents(session, limit=limit, offset=offset)
+    # P4-2：非 admin 仅能查看自己的 Agent
+    owner_id = None if current_user.is_admin else current_user.id
+    agents = await service.list_agents(session, limit=limit, offset=offset, owner_id=owner_id)
     return [AgentOut.model_validate(a) for a in agents]
 
 
@@ -65,7 +67,8 @@ async def create_agent(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_admin),
 ) -> AgentOut:
-    agent = await service.create_agent(session, payload)
+    # P4-2：绑定当前 admin 为 owner
+    agent = await service.create_agent(session, payload, owner_id=current_user.id)
     return AgentOut.model_validate(agent)
 
 
@@ -105,7 +108,9 @@ async def get_agent(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> AgentOut:
-    agent = await service.get_agent(session, agent_id)
+    # P4-2：非 admin 校验所有权
+    owner_id = None if current_user.is_admin else current_user.id
+    agent = await service.get_agent(session, agent_id, owner_id=owner_id)
     return AgentOut.model_validate(agent)
 
 
@@ -116,8 +121,12 @@ async def execute_agent(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> ExecutionResult:
+    # P4-2：非 admin 校验所有权（执行 Agent 需拥有该 Agent）
+    owner_id = None if current_user.is_admin else current_user.id
     # P0-20：请求级超时，超时抛 504 gateway_timeout
-    return await _with_request_timeout(service.execute_agent(session, agent_id, payload))
+    return await _with_request_timeout(
+        service.execute_agent(session, agent_id, payload, owner_id=owner_id)
+    )
 
 
 @router.post("/agents/{agent_id}/execute/stream")
@@ -132,8 +141,10 @@ async def execute_agent_stream(
     事件类型：token（逐 token）/ tool（工具调用）/ observation（观察）/ done / error。
     前端用 EventSource 消费，打字机效果即时渲染。
     """
+    # P4-2：非 admin 校验所有权
+    owner_id = None if current_user.is_admin else current_user.id
     return StreamingResponse(
-        service.stream_agent(session, agent_id, payload),
+        service.stream_agent(session, agent_id, payload, owner_id=owner_id),
         media_type="text/event-stream",
     )
 
@@ -147,7 +158,9 @@ async def list_workflows(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> list[WorkflowOut]:
-    wfs = await service.list_workflows(session, limit=limit, offset=offset)
+    # P4-2：非 admin 仅能查看自己的 Workflow
+    owner_id = None if current_user.is_admin else current_user.id
+    wfs = await service.list_workflows(session, limit=limit, offset=offset, owner_id=owner_id)
     return [WorkflowOut.model_validate(w) for w in wfs]
 
 
@@ -157,7 +170,8 @@ async def create_workflow(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_admin),
 ) -> WorkflowOut:
-    wf = await service.create_workflow(session, payload)
+    # P4-2：绑定当前 admin 为 owner
+    wf = await service.create_workflow(session, payload, owner_id=current_user.id)
     return WorkflowOut.model_validate(wf)
 
 
@@ -168,7 +182,9 @@ async def execute_workflow(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> ExecutionResult:
+    # P4-2：非 admin 校验所有权（执行 Workflow 需拥有该 Workflow）
+    owner_id = None if current_user.is_admin else current_user.id
     # P0-20：请求级超时，超时抛 504 gateway_timeout
     return await _with_request_timeout(
-        service.execute_workflow(session, workflow_id, payload)
+        service.execute_workflow(session, workflow_id, payload, owner_id=owner_id)
     )

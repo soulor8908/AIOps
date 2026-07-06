@@ -62,6 +62,10 @@ class Prompt(Base):
         UUID(as_uuid=True), ForeignKey("prompt_versions.id", ondelete="SET NULL")
     )
     is_active: Mapped[bool] = mapped_column(default=True)
+    # P4-2：资源隔离。nullable 兼容旧数据（NULL 视为公共资源，仅 admin 可见）。
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
@@ -123,6 +127,8 @@ class PromptOut(BaseModel):
     description: str | None = None
     current_version_id: uuid.UUID | None = None
     is_active: bool
+    # P4-2：资源隔离
+    owner_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
     versions: list[PromptVersionOut] = Field(default_factory=list)

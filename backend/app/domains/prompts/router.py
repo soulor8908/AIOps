@@ -34,7 +34,11 @@ async def list_prompts(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> list[PromptOut]:
-    prompts = await service.list_prompts(session, q=q, limit=limit, offset=offset)
+    # P4-2：非 admin 仅能查看自己的 Prompt
+    owner_id = None if current_user.is_admin else current_user.id
+    prompts = await service.list_prompts(
+        session, q=q, limit=limit, offset=offset, owner_id=owner_id
+    )
     return [service.to_prompt_out(p) for p in prompts]
 
 
@@ -44,7 +48,8 @@ async def create_prompt(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_admin),
 ) -> PromptOut:
-    prompt = await service.create_prompt(session, payload)
+    # P4-2：绑定当前 admin 为 owner
+    prompt = await service.create_prompt(session, payload, owner_id=current_user.id)
     refreshed = await service.get_prompt(session, prompt.id)
     return service.to_prompt_out(refreshed)
 
@@ -55,7 +60,9 @@ async def get_prompt(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> PromptOut:
-    prompt = await service.get_prompt(session, prompt_id)
+    # P4-2：非 admin 校验所有权
+    owner_id = None if current_user.is_admin else current_user.id
+    prompt = await service.get_prompt(session, prompt_id, owner_id=owner_id)
     return service.to_prompt_out(prompt)
 
 
@@ -66,6 +73,7 @@ async def update_prompt(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_admin),
 ) -> PromptOut:
+    # P4-2：admin 端点，但仍校验 owner（admin 操作他人资源时 owner_id=None 跳过）
     prompt = await service.update_prompt(session, prompt_id, payload)
     refreshed = await service.get_prompt(session, prompt.id)
     return service.to_prompt_out(refreshed)
@@ -86,7 +94,9 @@ async def list_versions(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> list[PromptVersionOut]:
-    prompt = await service.get_prompt(session, prompt_id)
+    # P4-2：非 admin 校验所有权
+    owner_id = None if current_user.is_admin else current_user.id
+    prompt = await service.get_prompt(session, prompt_id, owner_id=owner_id)
     return [service.to_version_out(v) for v in prompt.versions]
 
 
@@ -128,4 +138,6 @@ async def diff_versions(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> DiffResult:
-    return await service.diff_versions(session, prompt_id, frm, to)
+    # P4-2：非 admin 校验所有权
+    owner_id = None if current_user.is_admin else current_user.id
+    return await service.diff_versions(session, prompt_id, frm, to, owner_id=owner_id)

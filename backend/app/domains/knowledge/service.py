@@ -316,12 +316,16 @@ async def _hybrid_search(
     ]
 
 
-async def create_kb(session: AsyncSession, payload: KnowledgeBaseCreate) -> KnowledgeBase:
+async def create_kb(
+    session: AsyncSession, payload: KnowledgeBaseCreate, owner_id: uuid.UUID
+) -> KnowledgeBase:
     """创建知识库。
 
     P1-7：校验 ``embedding_model`` 已在注册表登记，并校验其维度与 chunks.embedding
     列维度（``EMBEDDING_DIM``）一致。维度不匹配会导致 pgvector 写入/检索崩溃，
     在创建阶段拦截给出明确错误，优于上传时才暴露。
+
+    P4-1：绑定 ``owner_id`` 实现资源隔离。
     """
     if payload.embedding_model not in EMBEDDING_MODEL_REGISTRY:
         raise ValidationError(
@@ -341,14 +345,23 @@ async def create_kb(session: AsyncSession, payload: KnowledgeBaseCreate) -> Know
         embedding_model=payload.embedding_model,
         chunk_size=payload.chunk_size,
         chunk_overlap=payload.chunk_overlap,
+        owner_id=owner_id,
     )
     session.add(kb)
     await session.flush()
     return kb
 
 
-async def get_kb(session: AsyncSession, kb_id: uuid.UUID) -> KnowledgeBase:
-    """获取知识库（含 documents 关系）。"""
+async def get_kb(
+    session: AsyncSession,
+    kb_id: uuid.UUID,
+    owner_id: uuid.UUID | None = None,
+) -> KnowledgeBase:
+    """获取知识库（含 documents 关系）。
+
+    P4-1：``owner_id`` 非 None 时校验所有权——不匹配抛 NotFoundError(404,
+    不泄露资源存在性)。``owner_id=None`` 表示 admin 跳过校验。
+    """
     stmt = (
         select(KnowledgeBase)
         .options(selectinload(KnowledgeBase.documents))
@@ -357,19 +370,27 @@ async def get_kb(session: AsyncSession, kb_id: uuid.UUID) -> KnowledgeBase:
     kb = (await session.execute(stmt)).scalar_one_or_none()
     if kb is None:
         raise NotFoundError(f"知识库 {kb_id} 不存在")
+    # P4-1：非 admin 校验所有权。owner_id 为 NULL 的旧 KB 仅 admin 可见。
+    if owner_id is not None and kb.owner_id != owner_id:
+        raise NotFoundError(f"知识库 {kb_id} 不存在")
     return kb
 
 
 async def list_kbs(
-    session: AsyncSession, limit: int = 50, offset: int = 0
+    session: AsyncSession,
+    limit: int = 50,
+    offset: int = 0,
+    owner_id: uuid.UUID | None = None,
 ) -> list[KnowledgeBase]:
-    """列出知识库。"""
-    stmt = (
-        select(KnowledgeBase)
-        .order_by(KnowledgeBase.created_at.desc())
-        .limit(limit)
-        .offset(offset)
-    )
+    """列出知识库。
+
+    P4-1：``owner_id`` 非 None 时仅返回该用户的 KB。``owner_id=None`` (admin)
+    返回全部(含 owner_id 为 NULL 的旧 KB)。
+    """
+    stmt = select(KnowledgeBase)
+    if owner_id is not None:
+        stmt = stmt.where(KnowledgeBase.owner_id == owner_id)
+    stmt = stmt.order_by(KnowledgeBase.created_at.desc()).limit(limit).offset(offset)
     return list((await session.execute(stmt)).scalars().all())
 
 
@@ -380,9 +401,13 @@ async def upload_document(
     content: str,
     mime_type: str | None = None,
     source_uri: str | None = None,
+    owner_id: uuid.UUID | None = None,
 ) -> Document:
-    """上传文档：分块 + 向量化 + 入库。"""
-    kb = await get_kb(session, kb_id)
+    """上传文档：分块 + 向量化 + 入库。
+
+    P4-1：``owner_id`` 透传给 ``get_kb`` 校验 KB 写权限。
+    """
+    kb = await get_kb(session, kb_id, owner_id=owner_id)
     size = len(content.encode("utf-8"))
     if size > MAX_DOC_BYTES:
         raise ValidationError(
@@ -451,10 +476,16 @@ async def upload_document(
 
 
 async def search_kb(
-    session: AsyncSession, kb_id: uuid.UUID, query: SearchQuery
+    session: AsyncSession,
+    kb_id: uuid.UUID,
+    query: SearchQuery,
+    owner_id: uuid.UUID | None = None,
 ) -> list[SearchResult]:
-    """向量检索 top_k。使用 pgvector 余弦距离算子。"""
-    kb = await get_kb(session, kb_id)
+    """向量检索 top_k。使用 pgvector 余弦距离算子。
+
+    P4-1：``owner_id`` 透传给 ``get_kb`` 校验所有权。
+    """
+    kb = await get_kb(session, kb_id, owner_id=owner_id)
     from app.domains.knowledge.embedder import embed_text
 
     q_vec = await embed_text(query.query, kb.embedding_model)
@@ -487,14 +518,19 @@ async def search_kb(
 
 
 async def rag_query(
-    session: AsyncSession, kb_id: uuid.UUID, query: RAGQuery
+    session: AsyncSession,
+    kb_id: uuid.UUID,
+    query: RAGQuery,
+    owner_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """RAG：hybrid 检索 + LLM 生成。
 
     检索流程：向量 + BM25 双路 → RRF 融合 → 可选 LLM reranker → LLM 生成答案。
     默认 ``rerank=False``（无额外 LLM 成本），hybrid + RRF 已显著优于纯向量。
+
+    P4-1：``owner_id`` 透传给 ``get_kb`` 校验所有权。
     """
-    kb = await get_kb(session, kb_id)
+    kb = await get_kb(session, kb_id, owner_id=owner_id)
     results = await _hybrid_search(
         session, kb, query.question, query.top_k, query.rerank
     )
