@@ -2,6 +2,7 @@ import { test as base, expect, type APIResponse, type Page } from "@playwright/t
 
 export { expect };
 export const test = base;
+export type { APIResponse, Page };
 
 /** 需要在正则中转义的特殊字符（反斜杠必须最先处理）。 */
 const REGEX_SPECIAL = [
@@ -41,14 +42,45 @@ function pathToRegExp(path: string): RegExp {
 }
 
 /**
- * 登录 helper（mock auth）。
- * 在页面首次加载前向 localStorage 写入 mock token，使应用以已认证状态启动。
- * 后续所有导航/重载都会复用该 init script。
+ * E2E 默认 mock 用户（与后端 UserOut 对齐，缺少的字段由 store normalize 补全）。
+ *
+ * Batch 6c：cookie 模式下前端不再持有 token 明文，router boot 首航会调
+ * /auth/me 探测 cookie 是否有效。E2E 没有 httpOnly cookie 通道（无真实后端），
+ * 改为 mock /auth/me 返回 200 + 用户对象，使应用以已认证状态启动。
  */
-export async function login(page: Page, token: string = MOCK_TOKEN): Promise<void> {
-  await page.addInitScript((t: string) => {
-    window.localStorage.setItem(TOKEN_KEY, t);
-  }, token);
+const MOCK_USER = {
+  id: "e2e-mock-user-00000000-0000-4000-8000-000000000001",
+  email: "e2e@test.local",
+  username: "e2e_user",
+  role: "user",
+  is_active: true,
+  created_at: "2026-06-29T10:00:00Z",
+};
+
+/**
+ * 登录 helper（mock auth）。
+ *
+ * Batch 6c：cookie 模式——不再向 localStorage 写 token（前端已不读 localStorage）。
+ * 改为注册 /auth/me GET 路由 mock，返回 200 + MOCK_USER，使 router boot 首航
+ * fetchMe 成功 → isAuthenticated=true → 路由守卫放行 requiresAuth 页面。
+ *
+ * 必须在 page.goto 之前调用（router beforeEach 在首航触发 fetchMe）。
+ * 后续导航/重载复用同一 route mock（page.route 在 page 生命周期内持续生效）。
+ */
+export async function login(page: Page): Promise<void> {
+  await page.route(
+    /\/api\/v1\/auth\/me(\?.*)?$/,
+    (route) => {
+      if (route.request().method() === "GET") {
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(MOCK_USER),
+        });
+      }
+      return route.fallback();
+    },
+  );
 }
 
 /**

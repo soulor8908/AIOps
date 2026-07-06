@@ -30,9 +30,11 @@ async function mockAllApi(page: Page): Promise<void> {
 }
 
 test.beforeEach(async ({ page }) => {
-  // 每个用例都以 mock 登录态启动，并兜底拦截 API 请求
-  await login(page);
+  // Batch 6c：cookie 模式下 login() 注册 /auth/me 路由。Playwright route
+  // 「最后注册的优先」，catch-all 必须先注册、login 后注册，否则 mockAllApi
+  // 会拦截 /auth/me 返回 [] 而非 MOCK_USER，导致 boot fetchMe 失败跳登录页。
   await mockAllApi(page);
+  await login(page);
 });
 
 test.describe("Smoke — 基本页面加载", () => {
