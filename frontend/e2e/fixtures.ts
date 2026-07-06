@@ -3,12 +3,6 @@ import { test as base, expect, type APIResponse, type Page } from "@playwright/t
 export { expect };
 export const test = base;
 
-/** Mock JWT token 写入 localStorage，模拟已登录会话。 */
-export const MOCK_TOKEN = "e2e-mock-jwt-token";
-
-/** 应用读取 auth token 的 localStorage key（与 shared/stores/user 对齐）。 */
-export const TOKEN_KEY = "token";
-
 /** 需要在正则中转义的特殊字符（反斜杠必须最先处理）。 */
 const REGEX_SPECIAL = [
   "\\",

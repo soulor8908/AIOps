@@ -313,3 +313,96 @@ def test_auth_error_response_format(anon_client: TestClient) -> None:
     assert "error" in body
     assert "message" in body
     assert body["error"] == "token_invalid"
+
+
+# ===================== cookie 模式（Batch 6c）=====================
+#
+# access/refresh token 同时以 httpOnly cookie 下发。前端 cookie 模式下
+# fetch credentials:include，浏览器自动携带 cookie；后端 _token_from_request
+# 优先读 Authorization header，回退 cookie。以下测试覆盖 cookie 端到端路径。
+
+
+def test_login_sets_httponly_cookies(anon_client: TestClient) -> None:
+    """登录成功后 Set-Cookie 下发 access/refresh token（httpOnly, samesite=lax, path=/api/v1）。"""
+    payload = UserFactory.build_create(email="cookie-login@test.example")
+    UserFactory.create_via_api(anon_client, **payload)
+    resp = anon_client.post(
+        "/api/v1/auth/token",
+        data={"username": payload["email"], "password": payload["password"]},
+    )
+    assert resp.status_code == 200
+    set_cookies = resp.headers.get_list("set-cookie")
+    cookie_str = "; ".join(set_cookies).lower()
+    assert "access_token=" in cookie_str
+    assert "refresh_token=" in cookie_str
+    assert "httponly" in cookie_str
+    assert "samesite=lax" in cookie_str
+    assert "path=/api/v1" in cookie_str
+
+
+def test_me_via_cookie_without_header(anon_client: TestClient) -> None:
+    """cookie 模式：登录后 cookie 自动存储，GET /me 无 Authorization header 也能通过认证。"""
+    payload = UserFactory.build_create(email="cookie-me@test.example")
+    UserFactory.create_via_api(anon_client, **payload)
+    login_resp = anon_client.post(
+        "/api/v1/auth/token",
+        data={"username": payload["email"], "password": payload["password"]},
+    )
+    assert login_resp.status_code == 200
+    # TestClient cookie jar 自动存储 Set-Cookie；后续请求自动携带（path=/api/v1 匹配）
+    me_resp = anon_client.get("/api/v1/auth/me")
+    assert me_resp.status_code == 200
+    assert me_resp.json()["email"] == payload["email"]
+
+
+def test_refresh_via_cookie(anon_client: TestClient) -> None:
+    """cookie 模式：refresh_token 取自 cookie（body 为空 {}），成功后重新 set cookie。"""
+    payload = UserFactory.build_create(email="cookie-refresh@test.example")
+    UserFactory.create_via_api(anon_client, **payload)
+    anon_client.post(
+        "/api/v1/auth/token",
+        data={"username": payload["email"], "password": payload["password"]},
+    )
+    # body 为空 {}，服务端从 cookie 读 refresh_token
+    resp = anon_client.post("/api/v1/auth/refresh", json={})
+    assert resp.status_code == 200
+    new_tokens = resp.json()
+    assert new_tokens["access_token"]
+    assert new_tokens["refresh_token"]
+    # 轮换后新 cookie 下发（Set-Cookie 覆盖旧值）
+    set_cookies = resp.headers.get_list("set-cookie")
+    assert any("access_token=" in c.lower() for c in set_cookies)
+    # 新 access token（cookie jar 已更新）可用于 /me
+    me_resp = anon_client.get("/api/v1/auth/me")
+    assert me_resp.status_code == 200
+
+
+def test_refresh_without_token_rejected(anon_client: TestClient) -> None:
+    """无 body 且无 refresh cookie → 401（未提供 refresh token）。"""
+    resp = anon_client.post("/api/v1/auth/refresh", json={})
+    assert resp.status_code == 401
+    assert resp.json()["error"] == "token_invalid"
+
+
+def test_logout_clears_cookies(anon_client: TestClient) -> None:
+    """登出后 Set-Cookie 清除 access/refresh cookie（Max-Age=0 / 空值）。"""
+    payload = UserFactory.build_create(email="cookie-logout@test.example")
+    UserFactory.create_via_api(anon_client, **payload)
+    anon_client.post(
+        "/api/v1/auth/token",
+        data={"username": payload["email"], "password": payload["password"]},
+    )
+    resp = anon_client.post("/api/v1/auth/logout")
+    assert resp.status_code == 204
+    set_cookies = resp.headers.get_list("set-cookie")
+    cookie_str = "; ".join(set_cookies).lower()
+    assert "access_token=" in cookie_str
+    assert "refresh_token=" in cookie_str
+    # delete_cookie 设 Max-Age=0 + 过期时间，使浏览器立即清除
+    assert "max-age=0" in cookie_str
+
+
+def test_logout_without_token_still_succeeds(anon_client: TestClient) -> None:
+    """无 token（未登录）也能登出 → 204（best-effort，确保前端总能清 cookie）。"""
+    resp = anon_client.post("/api/v1/auth/logout")
+    assert resp.status_code == 204

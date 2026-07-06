@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, watch } from "vue";
 import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
 import { useAppStore } from "@/shared/stores/app";
 import { useUserStore } from "@/shared/stores/user";
@@ -31,10 +31,23 @@ const navItems: NavItem[] = [
 // P3-UX-H3：登录页 / 404 走无侧边栏的 blank 布局，其余走 app 布局。
 const showChrome = computed(() => route.meta.public !== true);
 
+// Batch 6c：被动会话失效——client 在 401+refresh 失败时通过 unauthorized handler
+// 清空 user。此处 watch user 变 null 且当前在受保护页时跳登录页，避免用户停留
+// 在已失效的页面继续操作（主动登出走 onLogout，不重复跳）。
+watch(
+  () => userStore.user,
+  (u) => {
+    if (!u && route.meta.requiresAuth) {
+      router.push({ name: "login" });
+    }
+  },
+);
+
 // P1-1：登出后主动跳转登录页。vue-router beforeEach 仅在导航时触发，
 // 当前路由不变则守卫不执行，用户会停留在受保护页面（后续请求 401 但页面不跳）。
+// Batch 6c：logout 改为 async（调 /auth/logout 清 cookie），await 后再跳转。
 async function onLogout() {
-  userStore.logout();
+  await userStore.logout();
   await router.push({ name: "login" });
 }
 </script>

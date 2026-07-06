@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
-import { api, setToken } from "@/shared/api/client";
-import type { Token, UserOut } from "@/shared/api/types";
+import { api, setUnauthorizedHandler } from "@/shared/api/client";
+import type { UserOut } from "@/shared/api/types";
 
 export interface UserInfo {
   id: string;
@@ -20,31 +20,69 @@ function toUserInfo(u: UserOut): UserInfo {
   };
 }
 
+/**
+ * Batch 6c：多标签页会话同步频道。
+ *
+ * cookie 模式下不再有 localStorage storage 事件可监听。改用 BroadcastChannel
+ * 广播登出/登录事件：一个标签页登出时，其它标签页同步清空 user 状态，避免
+ * 残留已失效的会话继续操作。
+ */
+const CHANNEL_NAME = "aiops-auth";
+const MSG_LOGOUT = "logout";
+
+function createAuthChannel(): BroadcastChannel | null {
+  if (typeof window === "undefined") return null;
+  if (typeof BroadcastChannel === "undefined") return null;
+  return new BroadcastChannel(CHANNEL_NAME);
+}
+
 export const useUserStore = defineStore("user", () => {
-  const token = ref<string>(localStorage.getItem("token") || "");
-  const refreshToken = ref<string>(localStorage.getItem("refresh_token") || "");
+  // Batch 6c：token 不再存前端（httpOnly cookie 由浏览器管理）。会话状态以
+  // ``user`` 是否为 null 为准——login/fetchMe 成功后 set，logout/401 失败后 clear。
   const user = ref<UserInfo | null>(null);
   const loading = ref(false);
   const error = ref<string | null>(null);
 
-  const isAuthenticated = computed(() => Boolean(token.value));
+  const isAuthenticated = computed(() => user.value !== null);
+
+  const channel = createAuthChannel();
+  if (channel) {
+    channel.addEventListener("message", (e: MessageEvent) => {
+      if (e.data === MSG_LOGOUT) {
+        // 另一标签页登出 → 同步清空本标签页会话（不再调 /auth/logout，源头已调）
+        user.value = null;
+        error.value = null;
+      }
+    });
+  }
+
+  /**
+   * Batch 6c：清空本地会话状态（不调 /auth/logout）。
+   *
+   * 用于 unauthorized handler（401 + refresh 失败）与多标签页同步——此时
+   * httpOnly cookie 已无效/即将失效，仅需清前端状态让 UI 反映登出。
+   * cookie 的实际清除由 /auth/logout 端点完成（显式登出时调）或下次登录覆盖。
+   */
+  function _clearSession(): void {
+    user.value = null;
+    error.value = null;
+    channel?.postMessage(MSG_LOGOUT);
+  }
+
+  // Batch 6c：注册 unauthorized handler——client 在 401 + refresh 失败时触发，
+  // 清空本地会话状态。路由守卫/App.vue watch 会据此跳登录页。
+  setUnauthorizedHandler(() => {
+    _clearSession();
+  });
 
   // 后端登录端点为 OAuth2PasswordRequestForm（/auth/token），username 字段即邮箱。
   async function login(email: string, password: string): Promise<void> {
     loading.value = true;
     error.value = null;
     try {
-      const res = await api.postForm<Token>("/auth/token", {
-        username: email,
-        password,
-      });
-      token.value = res.access_token;
-      refreshToken.value = res.refresh_token;
-      setToken(res.access_token);
-      if (res.refresh_token) {
-        localStorage.setItem("refresh_token", res.refresh_token);
-      }
-      // Token 响应不含用户信息，需额外拉取 /auth/me。
+      // /auth/token 成功后服务端 set httpOnly cookie，前端无需感知 token 明文。
+      await api.postForm("/auth/token", { username: email, password });
+      // cookie 已下发，拉取用户信息确认会话建立成功。
       // P1：fetchMe 失败时必须抛出，否则 login() resolve 成功 → 路由守卫
       // 发现 !isAuthenticated 跳回 /login，形成登录死循环且无错误提示。
       try {
@@ -67,43 +105,30 @@ export const useUserStore = defineStore("user", () => {
   }
 
   async function fetchMe(): Promise<void> {
-    if (!token.value) return;
-    // P1：失败时抛出而非静默 logout，让调用方（login / 路由守卫）感知并处理。
-    // 路由守卫的 try/catch 会捕获并保持未认证态跳转登录页。
+    // Batch 6c：cookie 模式下无本地 token 标志，直接调 /auth/me。
+    // 401 由 client 层 refresh 重试处理；refresh 也失败则 unauthorized handler
+    // 清空状态，fetchMe 抛 401 让调用方（login/router）感知。
     const me = await api.get<UserOut>("/auth/me");
     user.value = toUserInfo(me);
   }
 
-  function logout(): void {
-    token.value = "";
-    refreshToken.value = "";
-    user.value = null;
-    // P2：登出时清空 error，避免残留上次登录失败信息在重新进入登录页时仍显示。
-    error.value = null;
-    setToken("");
-    localStorage.removeItem("refresh_token");
-  }
-
-  // P3：多标签页 token 同步。当另一个标签页登出/换 token 时，
-  // 本标签页内存中的 token 仍是旧值，会持续 401。监听 storage 事件同步状态。
-  if (typeof window !== "undefined") {
-    window.addEventListener("storage", (e: StorageEvent) => {
-      if (e.key !== "token") return;
-      const newToken = e.newValue || "";
-      if (newToken === token.value) return;
-      token.value = newToken;
-      setToken(newToken);
-      if (!newToken) {
-        // 另一标签页登出 → 同步登出本标签页（不清 localStorage，源头已清）
-        user.value = null;
-        refreshToken.value = "";
-      }
-    });
+  /**
+   * Batch 6c：登出——调 /auth/logout 清除 httpOnly cookie + 撤销 token，
+   * 然后清空本地状态并广播给其它标签页。
+   *
+   * /auth/logout 不要求有效 token（access token 可能已过期），尽力撤销 + 清 cookie。
+   * 网络失败也清本地状态（确保 UI 一致），cookie 残留会在下次登录时被覆盖。
+   */
+  async function logout(): Promise<void> {
+    try {
+      await api.post("/auth/logout", {});
+    } catch {
+      // 网络错误等——仍清本地状态，确保 UI 一致
+    }
+    _clearSession();
   }
 
   return {
-    token,
-    refreshToken,
     user,
     loading,
     error,

@@ -64,28 +64,33 @@ export const router = createRouter({
   routes,
 });
 
-// P3-UX-H3：路由守卫。受保护页未登录 → 跳 /login（带 redirect 参数）；
-// 已登录访问 /login → 跳首页。首次进入受保护页时补拉 /auth/me 校验 token
-// 有效性。P1：fetchMe 现在会抛错（token 过期），此处需 try/catch 捕获并
-// logout，随后 requiresAuth 判定失败跳登录页，避免未捕获 Promise rejection。
+// P3-UX-H3 + Batch 6c：路由守卫。受保护页未登录 → 跳 /login（带 redirect 参数）；
+// 已登录访问 /login → 跳首页。
+//
+// Batch 6c：cookie 模式下页面刷新会丢失内存中的 user 状态（isAuthenticated=false），
+// 但 httpOnly cookie 可能仍有效。故首次导航时主动调一次 /auth/me 探测会话：
+// - cookie 有效 → fetchMe 成功 set user → isAuthenticated=true
+// - cookie 无效 → 401 由 client 层 refresh 重试；refresh 也失败则 unauthorized handler
+//   清空状态，fetchMe 抛错，下方 requiresAuth 判定跳登录页
+let _bootChecked = false;
+
 router.beforeEach(async (to) => {
   const userStore = useUserStore();
 
-  if (to.name === "login" && userStore.isAuthenticated) {
-    return { name: "dashboard" };
+  // 首次导航：尝试从 httpOnly cookie 恢复会话（仅一次，避免每次导航都打 /auth/me）
+  if (!_bootChecked) {
+    _bootChecked = true;
+    if (!userStore.user) {
+      try {
+        await userStore.fetchMe();
+      } catch {
+        // 无有效会话——下方 requiresAuth 判定会跳登录页
+      }
+    }
   }
 
-  if (
-    to.meta.requiresAuth &&
-    userStore.isAuthenticated &&
-    !userStore.user
-  ) {
-    try {
-      await userStore.fetchMe();
-    } catch {
-      // token 无效（401）→ fetchMe 抛错，logout 保持未认证态
-      userStore.logout();
-    }
+  if (to.name === "login" && userStore.isAuthenticated) {
+    return { name: "dashboard" };
   }
 
   if (to.meta.requiresAuth && !userStore.isAuthenticated) {

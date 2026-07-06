@@ -1,5 +1,10 @@
 // Karpathy style: ~80 lines, no axios, no black box.
 // All HTTP calls go through this single function.
+//
+// Batch 6c：cookie 模式——token 存 httpOnly cookie（JS 不可读 → 防 XSS 偷取），
+// fetch 全部 credentials:include 让浏览器自动携带 cookie。不再手动加
+// Authorization header / 不再读写 localStorage。refresh 单飞锁改为返回
+// boolean（成功后服务端已 set 新 cookie，前端无需感知 token 明文）。
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api/v1";
 
@@ -23,58 +28,46 @@ export class ApiError extends Error {
   }
 }
 
-function getToken(): string {
-  return localStorage.getItem("token") || "";
-}
+/**
+ * Batch 6c：401 且 refresh 失败时的回调——由 user store 注册，触发登出 +
+ * 跳登录页。client 不直接依赖 store（避免循环依赖），通过此注入解耦。
+ *
+ * refresh 失败意味着 refresh_token cookie 也无效/过期，前端无法继续认证，
+ * 必须清空本地会话状态（httpOnly cookie 只能由 /auth/logout 端点清除）。
+ */
+let _unauthorizedHandler: (() => void) | null = null;
 
-function getRefreshToken(): string {
-  return localStorage.getItem("refresh_token") || "";
-}
-
-export function setToken(token: string): void {
-  if (token) {
-    localStorage.setItem("token", token);
-  } else {
-    localStorage.removeItem("token");
-  }
-}
-
-function setRefreshToken(token: string): void {
-  if (token) {
-    localStorage.setItem("refresh_token", token);
-  } else {
-    localStorage.removeItem("refresh_token");
-  }
+export function setUnauthorizedHandler(cb: (() => void) | null): void {
+  _unauthorizedHandler = cb;
 }
 
 // P1：refresh token 单飞锁。并发请求同时 401 时，仅第一个发起 /auth/refresh，
-// 其余请求 await 同一个 Promise，避免 N 个 401 各自刷新导致旧 token 被多次轮换。
-let _refreshPromise: Promise<string | null> | null = null;
+// 其余请求 await 同一个 Promise，避免 N 个 401 各自刷新导致旧 refresh token
+// 被多次轮换（轮换是一次性的，第二次会用已被 revoke 的 token → 401）。
+let _refreshPromise: Promise<boolean> | null = null;
 
 /**
- * 用 refresh token 换新 access token（单飞）。
+ * Batch 6c：用 refresh_token cookie 换新 access_token（单飞）。
  *
- * 成功返回新 access token 并写入 localStorage；失败返回 null（调用方应 logout）。
- * 并发调用复用同一个 Promise，避免重复刷新。
+ * 服务端从 httpOnly cookie 读取 refresh_token，校验+轮换后 set 新 cookie。
+ * 前端无需（也无法）读取 token 明文，仅感知成功/失败。
+ *
+ * @returns true=刷新成功（新 cookie 已下发）；false=失败（调用方应触发登出）
  */
-async function refreshAccessToken(): Promise<string | null> {
+async function refreshAccessToken(): Promise<boolean> {
   if (_refreshPromise) return _refreshPromise;
-  const refreshToken = getRefreshToken();
-  if (!refreshToken) return null;
   _refreshPromise = (async () => {
     try {
-      const res = await fetch(`${API_BASE}/auth/refresh`, {
+      const res = await fetchWithTimeout(`${API_BASE}/auth/refresh`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refresh_token: refreshToken }),
+        credentials: "include",
+        // body 留空：服务端优先读 cookie，body 仅 API 客户端兼容用
+        body: JSON.stringify({}),
       });
-      if (!res.ok) return null;
-      const data = (await res.json()) as { access_token: string; refresh_token: string };
-      setToken(data.access_token);
-      setRefreshToken(data.refresh_token);
-      return data.access_token;
+      return res.ok;
     } catch {
-      return null;
+      return false;
     } finally {
       _refreshPromise = null;
     }
@@ -85,14 +78,10 @@ async function refreshAccessToken(): Promise<string | null> {
 /**
  * 统一响应处理：非 2xx 抛 ApiError、204 返回 undefined。
  *
- * 抽离自 request/upload 共享，确保两条路径错误处理一致——之前 upload 不清 401 token、
- * 不处理网络/超时错误，导致文件上传失败时 token 残留 + 错误信息不一致。
+ * 抽离自 request/upload 共享，确保两条路径错误处理一致。
  *
  * P1：成功分支也兜底 JSON 解析——反代返回 200+HTML 错误页或空体时 res.json()
  * 抛 SyntaxError，调用方 ``e instanceof ApiError`` 判断失效且丢失 status。
- *
- * 注意：401 不在此清 token，由 request 层负责尝试 refresh 后再决定是否清除，
- * 避免可刷新的 401 误清 token 导致用户被登出。
  */
 async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -117,22 +106,24 @@ async function handleResponse<T>(res: Response): Promise<T> {
 }
 
 /**
- * P1：401 单次重试。access token 过期时用 refresh token 换新 token 并重试原请求。
- * refresh 失败（无 refresh token / refresh 端点拒绝）则清 token 并抛原 401。
+ * P1 + Batch 6c：401 单次重试。access token 过期时调 /auth/refresh（服务端
+ * 从 cookie 读 refresh_token 并 set 新 cookie），成功后重试原请求。
  *
- * 仅重试一次，避免 refresh 端点本身 401 引发无限循环。
+ * refresh 失败 → 触发 unauthorized handler（user store 登出 + 跳登录），
+ * 并抛原 401。仅重试一次，避免 refresh 端点本身 401 引发无限循环。
  */
 async function requestWithRefreshRetry<T>(
   path: string,
   options: RequestInit,
 ): Promise<T> {
   const url = `${API_BASE}${path}`;
+  // Batch 6c：credentials:include 携带 httpOnly cookie；不再加 Authorization header
   const doFetch = (init: RequestInit) =>
     fetchWithTimeout(url, {
       ...init,
+      credentials: "include",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${getToken()}`,
         ...init.headers,
       },
     });
@@ -140,15 +131,14 @@ async function requestWithRefreshRetry<T>(
     return await handleResponse<T>(await doFetch(options));
   } catch (err) {
     if (!(err instanceof ApiError) || err.status !== 401) throw err;
-    // 401 → 尝试 refresh
-    const newToken = await refreshAccessToken();
-    if (!newToken) {
-      // refresh 失败 → 清 token，触发路由守卫跳登录
-      setToken("");
-      setRefreshToken("");
+    // 401 → 尝试 refresh（服务端 set 新 cookie）
+    const ok = await refreshAccessToken();
+    if (!ok) {
+      // refresh 失败 → 通知 user store 登出（清本地状态 + 跳登录）
+      _unauthorizedHandler?.();
       throw err;
     }
-    // refresh 成功 → 用新 token 重试一次
+    // refresh 成功 → 重试一次（新 cookie 已由浏览器存储）
     return handleResponse<T>(await doFetch(options));
   }
 }
@@ -205,9 +195,9 @@ export const api = {
 // Upload helper for multipart/form-data (file uploads bypass JSON content-type).
 // 后端 /knowledge-bases/{kb_id}/documents 要求 Form 字段 title + file。
 //
-// 与 request 共享 handleResponse/fetchWithTimeout：401 清 token、超时/网络错误
-// 抛 ApiError(status=0)、非 2xx 抛 ApiError(status, payload)。不手动设置
-// Content-Type——浏览器为 FormData 自动补充 boundary。
+// 与 request 共享 handleResponse/fetchWithTimeout + 401 refresh 重试。
+// Batch 6c：credentials:include 携带 cookie；不手动设 Content-Type——浏览器
+// 为 FormData 自动补充 boundary。
 export async function upload<T>(path: string, file: File, title: string): Promise<T> {
   const form = new FormData();
   form.append("title", title);
@@ -215,7 +205,7 @@ export async function upload<T>(path: string, file: File, title: string): Promis
   const doFetch = () =>
     fetchWithTimeout(`${API_BASE}${path}`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${getToken()}` },
+      credentials: "include",
       body: form,
     });
   try {
@@ -223,10 +213,9 @@ export async function upload<T>(path: string, file: File, title: string): Promis
   } catch (err) {
     if (!(err instanceof ApiError) || err.status !== 401) throw err;
     // P1：401 尝试 refresh 后重试（与 request 一致）
-    const newToken = await refreshAccessToken();
-    if (!newToken) {
-      setToken("");
-      setRefreshToken("");
+    const ok = await refreshAccessToken();
+    if (!ok) {
+      _unauthorizedHandler?.();
       throw err;
     }
     return handleResponse<T>(await doFetch());
@@ -240,6 +229,9 @@ export async function upload<T>(path: string, file: File, title: string): Promis
 //
 // SSE 帧格式：`data: <payload>\n\n`（以双换行分隔）。payload 为 JSON 或字面量 `[DONE]`。
 // 错误处理：服务端 error 事件转为 ApiError 抛出；连接异常断开由 reader.read() done 标志识别。
+//
+// Batch 6c：credentials:include 携带 cookie；移除 Authorization header。
+// 初始 fetch 若 401，尝试一次 refresh（与 request 一致），失败则触发 unauthorized handler。
 
 export type SSEEventHandler = (event: import("@/shared/api/types").SSEEvent) => void;
 
@@ -259,16 +251,29 @@ export async function streamSSE(
   signal?: AbortSignal,
 ): Promise<void> {
   const url = `${API_BASE}${path}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${getToken()}`,
-      Accept: "text/event-stream",
-    },
-    body: JSON.stringify(body),
-    signal,
-  });
+  const doFetch = () =>
+    fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      credentials: "include",
+      body: JSON.stringify(body),
+      signal,
+    });
+
+  let res = await doFetch();
+  // Batch 6c：初始 401 → 单次 refresh 重试（access token 可能刚过期）
+  if (res.status === 401) {
+    const ok = await refreshAccessToken();
+    if (!ok) {
+      _unauthorizedHandler?.();
+      await handleResponse<unknown>(res); // 抛出 401 ApiError
+      return;
+    }
+    res = await doFetch();
+  }
   if (!res.ok) {
     // 非 2xx：复用 handleResponse 的错误解析逻辑（会抛 ApiError）
     await handleResponse<unknown>(res);

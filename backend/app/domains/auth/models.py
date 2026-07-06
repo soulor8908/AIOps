@@ -115,6 +115,11 @@ class Token(BaseModel):
 
 
 class RefreshRequest(BaseModel):
-    """刷新请求体。"""
+    """刷新请求体。
 
-    refresh_token: str = Field(min_length=1)
+    Batch 6c：refresh_token 改为可选——cookie 模式下前端发空 body ``{}``，
+    服务端从 httpOnly cookie 读取 refresh_token。仍接受 body 显式传入
+    （API 客户端兼容），min_length=1 仅在显式提供非 None 值时生效。
+    """
+
+    refresh_token: str | None = Field(default=None, min_length=1)

@@ -2,6 +2,8 @@
 
 - ``oauth2_scheme``：Bearer token 提取器（auto_error=False，缺失时由
   ``get_current_user`` 统一抛 ``AuthenticationError``，避免 FastAPI 默认格式）
+- ``_token_from_request``：优先 Authorization header，回退 httpOnly cookie
+  （前端 cookie 模式 / API 客户端 header 模式均支持）
 - ``get_current_user``：解析 token → 查 users 表 → 返回 User
 - ``get_current_admin``：在 ``get_current_user`` 基础上校验 ``is_admin``
 """
@@ -12,7 +14,7 @@ import uuid
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,12 +29,32 @@ if TYPE_CHECKING:
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token", auto_error=False)
 
+# httpOnly cookie 名（与 auth/router.py 的 _set_auth_cookies 对齐）。
+# 前端 cookie 模式下 access_token 由浏览器自动随请求携带，JS 不可读 → 防 XSS 偷 token。
+_ACCESS_COOKIE = "access_token"
+
+
+async def _token_from_request(
+    request: Request,
+    token: str | None = Depends(oauth2_scheme),
+) -> str | None:
+    """读取 access token：优先 Authorization header，回退 httpOnly cookie。
+
+    - header 模式：API 客户端（curl / Prometheus scraper）走 ``Authorization: Bearer``
+    - cookie 模式：浏览器前端走 httpOnly cookie（``/auth/token`` 端点 set-cookie）
+
+    两者均支持，便于迁移期混用与 API 客户端免 cookie。
+    """
+    if token:
+        return token
+    return request.cookies.get(_ACCESS_COOKIE)
+
 
 async def get_current_user(
-    token: str | None = Depends(oauth2_scheme),
+    token: str | None = Depends(_token_from_request),
     session: AsyncSession = Depends(get_session),
 ) -> User:
-    """解析 Bearer token → 查 users 表 → 返回 User。延迟导入避免循环。
+    """解析 token → 查 users 表 → 返回 User。延迟导入避免循环。
 
     P0-1：使用 ``verify_token_with_blacklist`` 检查 token 黑名单（已登出 token 拒绝）。
     """
