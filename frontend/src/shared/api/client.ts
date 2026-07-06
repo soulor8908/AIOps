@@ -7,6 +7,11 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api/v1";
 // 上层包装为 ApiError(status=0) 便于统一处理。
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+// SSE 流式读取单次 read() 超时（毫秒）。SSE 是长连接，整体不能设固定超时，
+// 但单次 reader.read() 若长时间无数据可能意味着连接挂起，给一个兜底超时。
+// token 事件通常 < 5s 间隔，10s 无数据视为连接异常。
+const SSE_READ_TIMEOUT_MS = 10_000;
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -225,5 +230,100 @@ export async function upload<T>(path: string, file: File, title: string): Promis
       throw err;
     }
     return handleResponse<T>(await doFetch());
+  }
+}
+
+// ===================== SSE 流式客户端 =====================
+//
+// EventSource 只支持 GET，后端 /agents/{id}/execute/stream 是 POST（带 ExecuteRequest body），
+// 故用 fetch + ReadableStream + 手写 SSE 分帧解析。
+//
+// SSE 帧格式：`data: <payload>\n\n`（以双换行分隔）。payload 为 JSON 或字面量 `[DONE]`。
+// 错误处理：服务端 error 事件转为 ApiError 抛出；连接异常断开由 reader.read() done 标志识别。
+
+export type SSEEventHandler = (event: import("@/shared/api/types").SSEEvent) => void;
+
+/**
+ * 流式 POST 请求，按 SSE 分帧解析事件并回调 onEvent。
+ *
+ * @param path API 路径（不含 API_BASE）
+ * @param body JSON 请求体
+ * @param onEvent 每个事件的回调
+ * @param signal 可选 AbortSignal，调用方可取消流
+ * @returns Promise<void>，正常结束（收到 done/[DONE]）resolve，服务端 error 事件 reject ApiError
+ */
+export async function streamSSE(
+  path: string,
+  body: unknown,
+  onEvent: SSEEventHandler,
+  signal?: AbortSignal,
+): Promise<void> {
+  const url = `${API_BASE}${path}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${getToken()}`,
+      Accept: "text/event-stream",
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok) {
+    // 非 2xx：复用 handleResponse 的错误解析逻辑（会抛 ApiError）
+    await handleResponse<unknown>(res);
+    return;
+  }
+  if (!res.body) {
+    throw new ApiError("SSE 响应无 body", res.status, { kind: "no-body" });
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  try {
+    while (true) {
+      // 单次 read 超时兜底：SSE 长连接若 10s 无任何数据视为挂起
+      const readPromise = reader.read();
+      const timeoutPromise = new Promise<{ done: true; value?: undefined }>(
+        (resolve) => setTimeout(() => resolve({ done: true }), SSE_READ_TIMEOUT_MS),
+      );
+      const { done, value } = await Promise.race([readPromise, timeoutPromise]);
+      if (done) break;
+      if (!value) continue;
+
+      buffer += decoder.decode(value, { stream: true });
+      // SSE 帧以 \n\n 分隔，可能一次 read 包含多帧或不完整帧
+      const frames = buffer.split("\n\n");
+      // 最后一段可能不完整，保留到下次
+      buffer = frames.pop() || "";
+
+      for (const frame of frames) {
+        const line = frame.trim();
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (payload === "[DONE]") return; // 终止标记
+        try {
+          const event = JSON.parse(payload) as import("@/shared/api/types").SSEEvent;
+          if (event.type === "error") {
+            throw new ApiError(
+              event.message || "SSE 服务端错误",
+              0,
+              { kind: "sse-error", event },
+            );
+          }
+          onEvent(event);
+          if (event.type === "done") return; // done 事件后服务端会发 [DONE]，但提前退出也无妨
+        } catch (err) {
+          if (err instanceof ApiError) throw err;
+          // JSON 解析失败：跳过该帧（容错，避免单帧损坏中断整个流）
+          console.warn("SSE 帧解析失败:", payload, err);
+        }
+      }
+    }
+  } finally {
+    // 确保释放 reader（即使提前 return / 抛错）
+    reader.releaseLock();
   }
 }

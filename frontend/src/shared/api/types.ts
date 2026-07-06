@@ -176,6 +176,46 @@ export interface ExecutionResult {
   error: string | null;
 }
 
+// ---------- SSE 流式执行事件（POST /agents/{id}/execute/stream） ----------
+
+/** SSE token 事件：逐 token 输出最终答案片段。 */
+export interface SSETokenEvent {
+  type: "token";
+  content: string;
+}
+
+/** SSE tool 事件：工具调用（name + args）。 */
+export interface SSEToolEvent {
+  type: "tool";
+  name: string;
+  args: Record<string, unknown>;
+}
+
+/** SSE observation 事件：工具执行观察结果。 */
+export interface SSEObservationEvent {
+  type: "observation";
+  content: string;
+}
+
+/** SSE done 事件：执行完成，携带完整 ExecutionResult。 */
+export interface SSEDoneEvent {
+  type: "done";
+  result: ExecutionResult;
+}
+
+/** SSE error 事件：服务端流式执行异常。 */
+export interface SSEErrorEvent {
+  type: "error";
+  message: string;
+}
+
+export type SSEEvent =
+  | SSETokenEvent
+  | SSEToolEvent
+  | SSEObservationEvent
+  | SSEDoneEvent
+  | SSEErrorEvent;
+
 // ---------- Workflows ----------
 
 export interface AgentNode {
