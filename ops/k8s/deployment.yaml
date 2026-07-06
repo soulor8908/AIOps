@@ -25,6 +25,9 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+      # 优雅关闭宽限期（P0-12）：>= LIFESPAN_SHUTDOWN_TIMEOUT_SECONDS(20s) + 10s buffer。
+      # SIGTERM 后 lifespan 在 20s 内完成 in-flight 请求与连接清理，超时才强制 SIGKILL。
+      terminationGracePeriodSeconds: 30
       # 反亲和：2 replicas 尽量分布到不同节点，节点故障不全挂（§4.2 高可用）。
       affinity:
         podAntiAffinity:
@@ -393,6 +396,7 @@ spec:
 # ConfigMap — 非敏感配置（deployment.spec.md§4.1 配置与密钥分离）
 # 敏感值（JWT_SECRET / OPENAI_API_KEY / ANTHROPIC_API_KEY / DB 密码 / Redis 密码）
 # 必须放入 aiops-secrets Secret，禁止写入本 ConfigMap。
+# 完整变量清单见 .env.example 与 backend/app/core/config.py。
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -409,12 +413,44 @@ data:
   REFRESH_TOKEN_EXPIRE_DAYS: "7"
   # CORS（security.spec.md§4 禁 "*"，显式列举允许 Origin）
   CORS_ORIGINS: '["https://aiops.local"]'
+  # 安全 — token 黑名单 + 登录失败锁定（P0-1/P0-2）
+  TOKEN_BLACKLIST_ENABLED: "true"
+  LOGIN_MAX_FAILURES: "5"
+  LOGIN_LOCKOUT_MINUTES: "15"
   # LLM 默认（仅 provider/model，API Key 走 Secret）
   DEFAULT_LLM_PROVIDER: "openai"
   DEFAULT_LLM_MODEL: "gpt-4o-mini"
+  # LLM 连接池 + 流式 chunk 超时（P0-21/P0-14）
+  LLM_CLIENT_MAX_CONNECTIONS: "100"
+  LLM_CLIENT_MAX_KEEPALIVE_CONNECTIONS: "20"
+  LLM_STREAM_CHUNK_TIMEOUT_SECONDS: "30"
+  # 数据库连接池（P0-11/P0-22）：recycle 主动回收避开 LB idle 超时，
+  # statement_timeout 让 PG 主动 kill 慢查询防连接池耗尽。
+  DB_POOL_RECYCLE_SECONDS: "1800"
+  DB_POOL_TIMEOUT_SECONDS: "10"
+  DB_STATEMENT_TIMEOUT_MS: "30000"
   # 限流阈值（security.spec.md§5）
   RATE_LIMIT_DEFAULT_PER_MIN: "100"
   RATE_LIMIT_LLM_PER_MIN: "20"
+  # fire-and-forget task 背压上限（P0-10）：生产建议 50~200，0=不限。
+  TASK_REGISTRY_MAX_CONCURRENCY: "100"
+  # Agent 执行超时（P0-20）：HTTP 请求级整体超时，超时抛 504。
+  AGENT_EXECUTE_TIMEOUT_SECONDS: "180"
+  # Agent autonomous loop worker（P0-2）：默认关闭，按需启用。
+  # 启用时 lease_seconds 应 >= timeout_seconds*2 + buffer（崩溃恢复阈值）。
+  AGENT_SCHEDULER_ENABLED: "false"
+  AGENT_SCHEDULER_INTERVAL_SECONDS: "60"
+  AGENT_SCHEDULER_CONCURRENCY: "5"
+  AGENT_SCHEDULER_TIMEOUT_SECONDS: "300"
+  AGENT_SCHEDULER_LEASE_SECONDS: "600"
+  # Online eval 生产采样率（P0-3/C5）：0=关闭，0.05=5% 流量采样。
+  # 生产建议 0.01~0.1 按流量与 LLM judge 成本权衡。
+  ONLINE_EVAL_SAMPLE_RATE: "0.05"
+  ONLINE_EVAL_SAMPLE_RATE_BOOST: "5.0"
+  ONLINE_EVAL_PRIORITY_INPUT_LEN_THRESHOLD: "200"
+  # lifespan 优雅关闭整体超时（P0-12）：K8s terminationGracePeriodSeconds
+  # 应 >= 此值 + 10s buffer（见 backend Deployment spec）。
+  LIFESPAN_SHUTDOWN_TIMEOUT_SECONDS: "20"
   # A1：多副本共享预算。HPA 2-6 replicas 下内存版预算失效（每 pod 独立计数），
   # 启用 Redis ZSET 实现保证熔断判定基于全局真实 token 消耗。
   AGENT_COST_BUDGET_REDIS_ENABLED: "true"

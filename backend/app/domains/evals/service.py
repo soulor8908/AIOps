@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import (
 from app.core.config import settings
 from app.core.exceptions import LLMError, NotFoundError, ValidationError
 from app.core.llm_client import LLMClient, LLMConfig, get_llm_client
+from app.core.metrics import metrics
 from app.domains.evals.judge import (
     JudgeResult,
     judge_contains,
@@ -129,6 +130,9 @@ async def run_eval(
     run.status = EvalStatus.PASSED.value if run.score >= 0.85 else EvalStatus.FAILED.value
     # P1-6：regression 检测。score 低于 baseline 超阈值则标回归。
     run.is_regression = _detect_regression(run.score, baseline)
+    # E3：回归检测命中时推 metrics，触发 prometheus 告警。
+    if run.is_regression:
+        metrics.record_eval_regression(run.name)
     run.finished_at = datetime.now(UTC)
     await session.flush()
     return run
@@ -481,6 +485,9 @@ async def run_online_eval(
         EvalStatus.PASSED.value if run.score >= _ONLINE_PASS_THRESHOLD else EvalStatus.FAILED.value
     )
     run.is_regression = _detect_regression(run.score, baseline)
+    # E3：回归检测命中时推 metrics，触发 prometheus 告警。
+    if run.is_regression:
+        metrics.record_eval_regression(run.name)
     run.finished_at = datetime.now(UTC)
     await session.commit()
     await session.refresh(run)

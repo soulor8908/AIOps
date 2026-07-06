@@ -16,6 +16,7 @@ P1 阶段。多 worker 部署时可通过外挂 Prometheus pushgateway 或替换
 - ``llm_ttft`` (histogram): labels=[model]，首 token 延迟（P2-9 TTFT 采集）
 - ``tool_calls`` (counter): labels=[tool_name]，工具调用计数（P2-9 工具成功率）
 - ``tool_errors`` (counter): labels=[tool_name, error_type]，工具失败计数（P2-9 失败模式聚类）
+- ``eval_regressions`` (counter): labels=[eval_name]，eval 回归计数（E3 告警）
 
 采集不阻塞请求路径（``record_*`` 仅内存写入 + lock，微秒级开销）。
 """
@@ -77,6 +78,9 @@ class MetricRegistry:
             "tool_errors": ("tool_name", "error_type"),
             # P0-2：autonomous loop 运行计数，status ∈ {success, failed, timeout}
             "agent_runs": ("agent_name", "status"),
+            # E3：eval 回归计数。run_eval / run_online_eval 检测到 is_regression=True
+            # 时累加。label=eval_name（EvalRun.name），告警规则据此触发。
+            "eval_regressions": ("eval_name",),
         }
         self._histogram_label_names: dict[str, tuple[str, ...]] = {
             "request_latency": ("endpoint",),
@@ -236,6 +240,19 @@ class MetricRegistry:
             for i, threshold in enumerate(_LATENCY_BUCKETS_WITH_INF):
                 if duration_ms <= threshold:
                     hist.buckets[i] += 1
+
+    def record_eval_regression(self, eval_name: str) -> None:
+        """E3：记录一次 eval 回归检测。
+
+        - ``eval_regressions{eval_name}`` += 1
+
+        由 ``run_eval`` / ``run_online_eval`` 在 ``is_regression=True`` 时调用。
+        与 alerts.yml 的 ``AIOpsEvalRegression`` 规则配合：任一 eval_name 在窗口内
+        出现回归即告警，提示 golden dataset 或 agent 配置出现回归需介入。
+        """
+        key = ("eval_regressions", (eval_name,))
+        with self._lock:
+            self._counters[key] += 1.0
 
     def get_counter_sum(self, name: str) -> float:
         """读取某 counter 跨所有 label 组合的累计总和（P2-9 健康度聚合用）。

@@ -70,3 +70,21 @@ groups:
         annotations:
           summary: "AIOps LLM 小时成本超阈值"
           description: "LLM 小时成本估算 ${{ $value }}（阈值 $50/h），持续 10 分钟。检查异常调用或配额配置。"
+
+  - name: aiops-eval
+    interval: 60s
+    rules:
+      # E3：eval 回归告警。run_eval / run_online_eval 检测到 is_regression=True 时
+      # 累加 eval_regressions{eval_name}（app/core/metrics.py）。
+      # increase() 取窗口内增量，>0 即至少一次回归。15 分钟窗口平衡灵敏度与噪声——
+      # 单次回归即告警（提示 golden dataset 或 agent 配置需介入），但避免瞬时尖刺。
+      - alert: AIOpsEvalRegression
+        expr: |
+          sum by (eval_name) (increase(eval_regressions[15m])) > 0
+        for: 0m
+        labels:
+          severity: high
+          team: aiops
+        annotations:
+          summary: "AIOps eval 回归：{{ $labels.eval_name }}"
+          description: "eval '{{ $labels.eval_name }}' 在过去 15 分钟检测到回归（当前 score 低于 baseline 超过 0.05 阈值）。检查近期 agent 配置变更、golden dataset 更新或 LLM provider 异常。"
