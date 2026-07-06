@@ -5,3 +5,4 @@ export { default as Badge } from "./badge.vue";
 export { default as Alert } from "./alert.vue";
 export { default as Skeleton } from "./skeleton.vue";
 export { default as AlertDialog } from "./alert-dialog.vue";
+export { default as Toast } from "./toast.vue";

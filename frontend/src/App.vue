@@ -3,9 +3,12 @@ import { computed } from "vue";
 import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
 import { useAppStore } from "@/shared/stores/app";
 import { useUserStore } from "@/shared/stores/user";
+import { useToastStore } from "@/shared/stores/toast";
+import { Toast } from "@/shared/ui";
 
 const appStore = useAppStore();
 const userStore = useUserStore();
+const toastStore = useToastStore();
 const route = useRoute();
 const router = useRouter();
 
@@ -119,5 +122,21 @@ async function onLogout() {
         <RouterView />
       </main>
     </div>
+  </div>
+
+  <!-- 全局 toast 容器：固定右上角堆叠，两个布局分支都可见 -->
+  <div
+    v-if="toastStore.toasts.length"
+    class="pointer-events-none fixed right-4 top-4 z-[100] flex w-96 max-w-[calc(100vw-2rem)] flex-col gap-2"
+    aria-live="polite"
+    aria-atomic="true"
+  >
+    <Toast
+      v-for="t in toastStore.toasts"
+      :key="t.id"
+      :variant="t.variant"
+      :message="t.message"
+      @close="toastStore.removeToast(t.id)"
+    />
   </div>
 </template>
