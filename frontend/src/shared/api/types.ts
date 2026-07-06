@@ -436,8 +436,63 @@ export interface EvalRunOut {
   pass_count: number;
   fail_count: number;
   score: number | null;
+  // E2：online eval 回归检测字段（后端 EvalRunOut 已有）
+  baseline_score: number | null;
+  is_regression: boolean;
   started_at: string | null;
   finished_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+// ---------- E2: EvalSample / OnlineEval ----------
+
+/** 采样样本触发来源（与后端 trigger_source 字段对齐）。 */
+export type EvalSampleTrigger = "http" | "scheduled" | "a2a" | "workflow";
+
+/** 采样样本录入入参（POST /evals/samples）。 */
+export interface EvalSampleCreate {
+  agent_id?: UUID | null;
+  workflow_id?: UUID | null;
+  trigger_source?: EvalSampleTrigger;
+  input: string;
+  actual_output: string;
+  expected_output?: string | null;
+  metadata?: Record<string, unknown>;
+  priority?: number;
+}
+
+/** 采样样本出参（GET /evals/samples）。 */
+export interface EvalSampleOut {
+  id: UUID;
+  agent_id: UUID | null;
+  workflow_id: UUID | null;
+  trigger_source: string;
+  input: string;
+  actual_output: string;
+  expected_output: string | null;
+  metadata: Record<string, unknown>;
+  sampled_at: string;
+  judged: boolean;
+  judge_score: number | null;
+  judge_reason: string | null;
+  eval_run_id: UUID | null;
+  priority: number;
+}
+
+/** /evals/samples 查询参数。 */
+export interface EvalSampleQuery {
+  judged?: boolean;
+  agent_id?: UUID;
+  priority_min?: number;
+  limit?: number;
+  offset?: number;
+}
+
+/** 触发 online eval 闭环请求（POST /evals/online-eval）。 */
+export interface OnlineEvalRequest {
+  sample_ids?: UUID[];
+  golden_run_name: string;
+  judge_type?: JudgeType;
+  run_name?: string | null;
 }

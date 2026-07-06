@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { onMounted } from "vue";
+import { computed, onMounted } from "vue";
 import { useEvalStore } from "../store";
+import { useUserStore } from "@/shared/stores/user";
 import { Button, Badge, Alert, Skeleton } from "@/shared/ui";
 import { Card, CardHeader, CardTitle, CardContent } from "@/shared/ui";
 import { formatDate, formatPercent } from "@/shared/utils";
@@ -9,6 +10,10 @@ import type { EvalRunOut } from "@/shared/api/types";
 type BadgeVariant = "default" | "secondary" | "destructive" | "outline";
 
 const store = useEvalStore();
+const userStore = useUserStore();
+
+// E2：admin-only 端点（POST /evals/{id}/run）按 role 隐藏 Run 按钮
+const isAdmin = computed(() => userStore.user?.role === "admin");
 
 function statusVariant(status: EvalRunOut["status"]): BadgeVariant {
   if (status === "passed") return "default";
@@ -51,9 +56,11 @@ onMounted(() => store.fetchList());
             <div class="flex items-center gap-2">
               <CardTitle class="font-mono text-sm">{{ run.id }}</CardTitle>
               <Badge :variant="statusVariant(run.status)">{{ run.status }}</Badge>
+              <!-- E2：回归标记（is_regression=true 时高亮） -->
+              <Badge v-if="run.is_regression" variant="destructive">regression</Badge>
             </div>
             <Button
-              v-if="run.status === 'pending'"
+              v-if="run.status === 'pending' && isAdmin"
               size="sm"
               :disabled="store.running"
               @click="onRun(run.id)"
@@ -79,6 +86,13 @@ onMounted(() => store.fetchList());
             <div>
               <div class="text-xs text-muted-foreground">Score</div>
               <div>{{ run.score != null ? run.score.toFixed(2) : "-" }}</div>
+            </div>
+            <!-- E2：baseline + 回归对比 -->
+            <div v-if="run.baseline_score != null">
+              <div class="text-xs text-muted-foreground">Baseline</div>
+              <div :class="run.is_regression ? 'text-destructive font-medium' : ''">
+                {{ run.baseline_score.toFixed(2) }}
+              </div>
             </div>
           </div>
           <div class="mt-2 text-xs text-muted-foreground">
