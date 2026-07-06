@@ -35,6 +35,7 @@ event_uuid 关联，evict 时同步清理。
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -206,7 +207,7 @@ class RedisBudgetTracker:
         return self.remaining(now=now) <= 0
 
 
-def build_budget_tracker_from_settings() -> BudgetTrackerProtocol:
+async def build_budget_tracker_from_settings() -> BudgetTrackerProtocol:
     """根据 settings 选择 budget 跟踪器实现。
 
     - ``agent_cost_budget_redis_enabled=True``：尝试 Redis，失败回退内存（带 warning）
@@ -214,6 +215,9 @@ def build_budget_tracker_from_settings() -> BudgetTrackerProtocol:
 
     工厂在 ``service._get_budget_tracker`` 调用，单测 monkeypatch 此函数或
     ``_budget_tracker`` 单例即可覆盖。
+
+    P3-4：``client.ping()`` 是同步阻塞调用,用 ``asyncio.to_thread`` 包装
+    避免阻塞 event loop（socket_timeout=2s 最坏阻塞 2s）。
     """
     from app.core.config import settings
 
@@ -238,7 +242,8 @@ def build_budget_tracker_from_settings() -> BudgetTrackerProtocol:
             socket_timeout=2.0,  # 短超时：请求路径不能等 Redis 慢查询
             socket_connect_timeout=2.0,
         )
-        client.ping()  # 提前验证连接，失败立即回退
+        # P3-4：同步 ping 放线程池,避免阻塞 event loop
+        await asyncio.to_thread(client.ping)
         return RedisBudgetTracker(
             budget=settings.agent_cost_token_budget,
             window_seconds=settings.agent_cost_budget_window_seconds,

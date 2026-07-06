@@ -24,7 +24,7 @@ from app.core.jwt import (
     decode_token,
 )
 from app.core.security import hash_password, verify_password
-from app.core.token_blacklist import revoke_token
+from app.core.token_blacklist import is_revoked, revoke_token
 from app.domains.auth.models import Token, User, UserCreate, UserOut
 
 
@@ -117,6 +117,11 @@ async def refresh_access_token(refresh_token_str: str) -> Token:
 
     P0-5：轮换时把旧 refresh token 的 jti 加入黑名单（一次性使用），防止
     重放攻击——攻击者拿到旧 refresh token 后无法重复换新 token。
+
+    P3-5：调用 revoke_token 前先 ``is_revoked(jti)`` 校验，拒绝已使用的
+    refresh token。防竞态/并发重放——两个请求同时用同一 refresh token 时,
+    先到的 revoke 写入黑名单,后到的 is_revoked 命中拒绝。无此校验时,
+    黑名单写入前的窗口内并发重放可成功(竞态)。
     """
     payload = decode_token(refresh_token_str)
     sub = payload.get("sub")
@@ -125,10 +130,12 @@ async def refresh_access_token(refresh_token_str: str) -> Token:
     token_type = payload.get("type")
     if token_type != TOKEN_TYPE_REFRESH:
         raise AuthenticationError("token 类型错误：需要 refresh token")
-    # P0-5：旧 refresh token 吊销（一次性使用）。
+    # P0-5 + P3-5：旧 refresh token 一次性使用——先校验未 revoked,再 revoke。
     jti = payload.get("jti")
     exp = payload.get("exp")
     if isinstance(jti, str):
+        if await is_revoked(jti):
+            raise AuthenticationError("refresh token 已被使用，请重新登录")
         await revoke_token(jti, int(exp) if isinstance(exp, (int, float)) else None)
     return Token(
         access_token=create_access_token(sub),

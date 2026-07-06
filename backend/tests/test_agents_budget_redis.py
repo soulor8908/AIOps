@@ -135,18 +135,18 @@ def test_redis_remaining_failure_returns_zero_triggers_break() -> None:
 # ===================== 7. 工厂函数 =====================
 
 
-def test_factory_default_uses_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_factory_default_uses_memory(monkeypatch: pytest.MonkeyPatch) -> None:
     """agent_cost_budget_redis_enabled=False → 内存版（默认路径）。"""
     from app.domains.agents.model_router import BudgetTracker
 
     monkeypatch.setattr(
         "app.core.config.settings.agent_cost_budget_redis_enabled", False
     )
-    tracker = build_budget_tracker_from_settings()
+    tracker = await build_budget_tracker_from_settings()
     assert isinstance(tracker, BudgetTracker)
 
 
-def test_factory_redis_enabled_uses_redis(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_factory_redis_enabled_uses_redis(monkeypatch: pytest.MonkeyPatch) -> None:
     """agent_cost_budget_redis_enabled=True + Redis 可达 → RedisBudgetTracker。
 
     用 monkeypatch 替换 redis.from_url 返回 fakeredis，模拟生产 Redis 可达。
@@ -163,11 +163,11 @@ def test_factory_redis_enabled_uses_redis(monkeypatch: pytest.MonkeyPatch) -> No
     fake_module.from_url = lambda *args, **kwargs: fake
     monkeypatch.setitem(sys.modules, "redis", fake_module)
 
-    tracker = build_budget_tracker_from_settings()
+    tracker = await build_budget_tracker_from_settings()
     assert isinstance(tracker, RedisBudgetTracker)
 
 
-def test_factory_redis_unreachable_falls_back_to_memory(
+async def test_factory_redis_unreachable_falls_back_to_memory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """agent_cost_budget_redis_enabled=True + Redis 不可达 → 回退内存版（带 warning）。"""
@@ -186,5 +186,5 @@ def test_factory_redis_unreachable_falls_back_to_memory(
     fake_module.from_url = _raise
     monkeypatch.setitem(sys.modules, "redis", fake_module)
 
-    tracker = build_budget_tracker_from_settings()
+    tracker = await build_budget_tracker_from_settings()
     assert isinstance(tracker, BudgetTracker)

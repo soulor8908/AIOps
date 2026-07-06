@@ -99,30 +99,41 @@ def _build_memory_backend(client: LLMClient) -> PgMemoryBackend | MultiQueryMemo
 # 否则走内存版（与历史行为一致，单测/CI 默认路径）。budget=0 时 is_exhausted
 # 永远返回 False，等价于不限制。
 _budget_tracker: BudgetTrackerProtocol | None = None
+# P3-4：单例懒初始化的 asyncio.Lock。防止并发请求同时触发 build_budget_tracker
+# 产生多个 tracker 实例（内存版无共享预算语义；Redis 版多个 client 连接浪费）。
+_budget_tracker_lock = asyncio.Lock()
 
 
-def _get_budget_tracker() -> BudgetTrackerProtocol:
-    """惰性构造进程级 budget 跟踪器单例。
+async def _get_budget_tracker() -> BudgetTrackerProtocol:
+    """惰性构造进程级 budget 跟踪器单例（P3-4 线程安全）。
 
     实现选择由 ``settings.agent_cost_budget_redis_enabled`` 决定：
     - True：Redis ZSET（多 pod 共享），Redis 不可达时回退内存版（带 warning）
     - False：内存版（默认）
+
+    P3-4：用 ``asyncio.Lock`` 保护懒初始化,防止并发请求同时构造多个实例。
     """
     global _budget_tracker
     if _budget_tracker is None:
-        from app.domains.agents.budget_redis import build_budget_tracker_from_settings
+        async with _budget_tracker_lock:
+            # double-checked locking：拿到锁后再检查一次,防止排队等待期间
+            # 前一个 holder 已完成初始化
+            if _budget_tracker is None:
+                from app.domains.agents.budget_redis import (
+                    build_budget_tracker_from_settings,
+                )
 
-        _budget_tracker = build_budget_tracker_from_settings()
+                _budget_tracker = await build_budget_tracker_from_settings()
     return _budget_tracker
 
 
-def _build_model_router() -> ModelRouter:
+async def _build_model_router() -> ModelRouter:
     """构造模型路由器（复用 budget 单例）。budget=0 时不限制（永不熔断）。"""
     return ModelRouter(
         cheap_alias=settings.agent_cost_cheap_model_alias,
         default_alias=settings.default_llm_model,
         premium_alias=settings.agent_cost_premium_model_alias,
-        budget=_get_budget_tracker(),
+        budget=await _get_budget_tracker(),
     )
 
 
@@ -253,7 +264,7 @@ async def execute_agent(
     routed_alias = agent.model_alias
     router: ModelRouter | None = None
     if settings.agent_cost_routing_enabled:
-        router = _build_model_router()
+        router = await _build_model_router()
         routed_alias, complexity, broken = router.route(request.input, agent.tools)
         if routed_alias != agent.model_alias:
             logger.info(

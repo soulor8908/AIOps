@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.llm_client import LLMClient, LLMResponse, Message
+from app.core.prompt_safety import sanitize_user_input
 
 logger = logging.getLogger("app.agents.planning")
 
@@ -134,7 +135,7 @@ class Planner:
             f"返回 JSON："
             f'{{"goal": str, "steps": [{{"description": str, "suggested_tools": [str]}}]}}\n'
             f"仅返回 JSON，不要其他文本。\n\n"
-            f"任务: {user_input}\n"
+            f"任务: {sanitize_user_input(user_input)}\n"
             f"{tool_hint}"
         )
         try:
@@ -224,7 +225,7 @@ class Reflector:
             f'{{"plan_coverage": str, "strengths": [str], '
             f'"weaknesses": [str], "suggestions": [str]}}\n'
             f"仅返回 JSON，不要其他文本。\n\n"
-            f"原始任务: {user_input}\n"
+            f"原始任务: {sanitize_user_input(user_input)}\n"
             f"{plan_text}\n\n"
             f"执行 traces:\n{traces_text}\n\n"
             f"最终答案: {final_answer[:_REFLECT_ANSWER_LIMIT]}"

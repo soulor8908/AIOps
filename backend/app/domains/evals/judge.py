@@ -24,6 +24,7 @@ from typing import Any
 
 from app.core.exceptions import LLMError
 from app.core.llm_client import LLMClient, Message
+from app.core.prompt_safety import sanitize_user_input
 
 
 @dataclass(slots=True)
@@ -86,8 +87,8 @@ async def judge_llm(
     prompt = (
         f"你是严格判官。根据准则判断回答质量。\n"
         f"准则：{criteria}\n"
-        f"期望：{expected}\n"
-        f"实际：{actual}\n"
+        f"期望：{sanitize_user_input(expected)}\n"
+        f"实际：{sanitize_user_input(actual)}\n"
         f"只输出 JSON: {{\"score\": 0.0-1.0, \"reason\": \"...\"}}"
     )
     try:

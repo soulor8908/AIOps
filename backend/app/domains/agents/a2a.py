@@ -55,11 +55,19 @@ _MAX_STREAM_LEN = 10000
 _MAX_CONSUME_FAILURES = 20
 _MAX_BACKOFF_SECONDS = 30.0
 _BASE_BACKOFF_SECONDS = 1.0
+# P3-2：A2A 异步消息递归深度上限。A→B→C→A 形成异步委托链时,每跳 depth+1,
+# 超此值拒绝(防 A→B→A 无限循环耗尽资源)。与同步 delegate 的 _MAX_DELEGATE_DEPTH=3
+# 独立——异步链路更长(可跨 pod),放宽到 5。
+_MAX_A2A_DEPTH = 5
 
 
 @dataclass(slots=True)
 class A2AMessage:
-    """A2A 消息信封。"""
+    """A2A 消息信封。
+
+    P3-2：``depth`` 字段追踪异步委托链深度。每跳 send_and_wait 递增,
+    超限拒绝(防 A→B→A 无限循环)。
+    """
 
     from_agent: str
     to_agent: str
@@ -67,6 +75,7 @@ class A2AMessage:
     correlation_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     reply_to: str | None = None
     timestamp: float = field(default_factory=time.time)
+    depth: int = 0
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -235,13 +244,26 @@ class A2ABus:
         *,
         from_agent: str = "system",
         timeout: float = _DEFAULT_TIMEOUT,
+        depth: int = 0,
     ) -> A2AMessage | None:
         """发布消息并等待响应（请求-响应模式）。
 
         在 ``a2a:reply:{correlation_id}`` 流上等待响应。超时返回 None。
         适用于需要结果但可异步等待的场景。生产应在目标 agent 的 consume
         handler 中 publish reply 到 reply_to 流。
+
+        P3-2：``depth`` 参数追踪异步委托链深度。调用方应传入当前请求消息的
+        depth(如 consume handler 收到 msg.depth),本方法构造新消息时 depth+1。
+        超 ``_MAX_A2A_DEPTH`` 拒绝(返回 None + 记 warning),防 A→B→A 无限循环。
+        顶层调用不传 depth(默认 0),首跳消息 depth=1。
         """
+        new_depth = depth + 1
+        if new_depth > _MAX_A2A_DEPTH:
+            logger.warning(
+                "A2A send_and_wait rejected: depth %d > max %d (target=%s, from=%s)",
+                new_depth, _MAX_A2A_DEPTH, target_agent, from_agent,
+            )
+            return None
         correlation_id = str(uuid.uuid4())
         reply_stream = f"{_REPLY_PREFIX}{correlation_id}"
         msg = A2AMessage(
@@ -250,6 +272,7 @@ class A2ABus:
             content=content,
             correlation_id=correlation_id,
             reply_to=reply_stream,
+            depth=new_depth,
         )
         published = await self.publish(msg)
         if published is None:

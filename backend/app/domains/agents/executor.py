@@ -699,6 +699,14 @@ class AgentExecutor:
         tail = messages[-tail_size:]
         if not middle:
             return messages
+        # P3-3：校验 tail 结构——tail[0] 不能是孤立的 tool 消息。
+        # tool 消息(role="tool")必须跟在 assistant(tool_calls) 之后,否则
+        # OpenAI/Anthropic API 报 "tool message must follow assistant with tool_calls"。
+        # 压缩后 tail[0] 前变成 summary_msg(system)或 head[0](system),孤立 tool
+        # 会导致下一轮 LLM 调用 400。修复:从 middle 末尾前移一条到 tail 开头
+        # (按 ReAct 结构,tool 消息前必是 assistant(tool_calls))。
+        if tail and tail[0].role == "tool":
+            tail.insert(0, middle.pop())
         summary_text = "\n".join(f"[{m.role}] {m.content[:200]}" for m in middle)
         summary_tokens = 0
         try:
