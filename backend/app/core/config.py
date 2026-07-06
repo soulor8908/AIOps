@@ -64,6 +64,21 @@ class Settings(BaseSettings):
         alias="DATABASE_URL",
     )
     redis_url: str = Field(default="redis://localhost:6379", alias="REDIS_URL")
+    # P0-11：连接池配置。``pool_recycle`` 主动回收长连接避开 LB idle 超时；
+    # ``pool_timeout`` 池耗尽时快速失败。生产默认 1800s/10s，测试环境用 SQLite
+    # 不走 pool_size/max_overflow 但这两个参数仍合法（QueuePool 接受）。
+    db_pool_recycle_seconds: int = Field(
+        default=1800, alias="DB_POOL_RECYCLE_SECONDS", ge=60, le=86400
+    )
+    db_pool_timeout_seconds: float = Field(
+        default=10.0, alias="DB_POOL_TIMEOUT_SECONDS", ge=1.0, le=120.0
+    )
+    # P0-22：PG statement_timeout（毫秒）。慢查询超此值被 PG 主动 kill，
+    # 防止占满连接池。仅 PostgreSQL 后端生效（SQLite 忽略）。默认 30s
+    # 对齐 LLMClient timeout，避免 DB 慢查询比 LLM 调用还慢拖垮请求。
+    db_statement_timeout_ms: int = Field(
+        default=30000, alias="DB_STATEMENT_TIMEOUT_MS", ge=1000, le=300000
+    )
 
     # 安全 — JWT
     # `JWT_SECRET` 为真源（`security.spec.md`§2.3），`SECRET_KEY` 作为兼容别名。
@@ -215,6 +230,25 @@ class Settings(BaseSettings):
     agent_self_eval_samples: int = Field(
         default=3, alias="AGENT_SELF_EVAL_SAMPLES", ge=1, le=10
     )
+    # P0-20：HTTP 请求级整体超时（秒）。覆盖 execute_agent / execute_workflow
+    # / rag_query 等长耗时端点。默认 180s（3min），覆盖单轮 LLM 60s × max_turns
+    # 的合理上限；超时抛 504 gateway_timeout，避免客户端断开后服务端继续跑
+    # 产生 LLM 成本但结果丢弃。scheduled agent 走 scheduler 自有 timeout
+    # （agent_scheduler_timeout_seconds），不受此限制。
+    agent_execute_timeout_seconds: int = Field(
+        default=180, alias="AGENT_EXECUTE_TIMEOUT_SECONDS", ge=10, le=3600
+    )
+    # P0-12：lifespan 优雅关闭整体超时（秒）。shutdown 序列超此值则记 CRITICAL
+    # 后强制退出。K8s terminationGracePeriodSeconds 应 >= 此值 + 10s buffer。
+    lifespan_shutdown_timeout_seconds: int = Field(
+        default=20, alias="LIFESPAN_SHUTDOWN_TIMEOUT_SECONDS", ge=5, le=120
+    )
+    # P0-14：LLM 流式逐 chunk 超时（秒）。两个 chunk 之间间隔超此值视为 provider
+    # 卡死，抛 _RetryableLLMError 进入重试。默认 30s——LLM 首 token 延迟通常
+    # < 5s，30s 足以覆盖 provider 拥塞，又能及时发现卡死。
+    llm_stream_chunk_timeout_seconds: int = Field(
+        default=30, alias="LLM_STREAM_CHUNK_TIMEOUT_SECONDS", ge=5, le=300
+    )
 
     @property
     def access_token_expire_seconds(self) -> int:
@@ -270,6 +304,36 @@ class Settings(BaseSettings):
             raise ValueError(
                 "生产环境必须 DEBUG=false（errors.spec.md§5.4）："
                 "debug=True 会导致异常时返回明文 traceback 泄漏内部信息"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_required_prod_vars(self) -> Settings:
+        """P0-13：生产环境 fail-fast 校验必需环境变量（deployment.spec.md§5）。
+
+        生产/staging 环境必须显式注入以下变量,缺失则启动直接报错,避免
+        app 启动成功但首次请求即 500 的"静默不可用"状态:
+
+        - ``OPENAI_API_KEY``:为空时 embedder 静默返回零向量(KB 检索全零分,
+          数据腐败)、LLMClient 调用 401(所有 agent/chat 端点 500)。
+        - ``DATABASE_URL`` / ``REDIS_URL``:为默认占位值时仅本地可达,生产
+          K8s 部署必注入真实地址。
+
+        开发/测试环境放宽——本地启动无 API key 也能跑(单元测试 mock LLM)。
+        """
+        if self.environment.lower() not in _PROD_ENVS:
+            return self
+        if not self.openai_api_key:
+            raise ValueError(
+                "OPENAI_API_KEY 必须在生产环境通过环境变量显式设置:"
+                "为空时 embedder 静默返回零向量污染索引、LLMClient 返回 401"
+                "导致所有 AI 端点 500(deployment.spec.md§5 fail-fast)"
+            )
+        if not self.anthropic_api_key and self.default_llm_provider == "anthropic":
+            # 仅当默认 provider 为 anthropic 时才强制——避免强制全量 provider key
+            raise ValueError(
+                "default_llm_provider=anthropic 但 ANTHROPIC_API_KEY 未设置"
+                "(deployment.spec.md§5 fail-fast)"
             )
         return self
 

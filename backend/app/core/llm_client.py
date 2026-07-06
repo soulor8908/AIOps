@@ -42,6 +42,26 @@ _DEFAULT_MAX_RETRIES = 2
 _BASE_BACKOFF_SECONDS = 0.5
 
 
+async def _iter_lines_with_timeout(
+    resp: httpx.Response, timeout: float
+) -> AsyncIterator[str]:
+    """P0-14：逐行读取 SSE 流，每行带独立超时。
+
+    httpx 的 ``timeout`` 对 streaming 响应的逐次 read 不生效（仅覆盖建连 +
+    首字节）。LLM provider 卡死（持续发心跳但不发 data）时 ``aiter_lines()``
+    会无限阻塞，占用 httpx 连接 + uvicorn worker。
+
+    本包装对每次 ``aiter_lines()`` 迭代加 ``asyncio.wait_for`` 超时，超时
+    抛 ``TimeoutError``——调用方的 ``except`` 块应将其转为 ``_RetryableLLMError``
+    进入既有重试逻辑。
+    """
+    aiter = resp.aiter_lines().__aiter__()
+    while True:
+        # StopAsyncIteration 透传（正常结束）；TimeoutError 透传（卡死）
+        line = await asyncio.wait_for(aiter.__anext__(), timeout=timeout)
+        yield line
+
+
 @dataclass(slots=True)
 class Message:
     """对话消息。role ∈ system/user/assistant/tool。
@@ -346,7 +366,13 @@ class LLMClient:
                             f"LLM 流式返回可重试状态 {resp.status_code}: {body[:200]!r}"
                         )
                     raise LLMError(f"LLM 流式 HTTP {resp.status_code}: {body[:200]!r}")
-                async for line in resp.aiter_lines():
+                # P0-14：逐 chunk 超时——provider 卡死（心跳不发 data）时
+                # ``aiter_lines`` 会无限阻塞，此处每行加超时强制进入重试。
+                from app.core.config import settings as _settings
+
+                async for line in _iter_lines_with_timeout(
+                    resp, _settings.llm_stream_chunk_timeout_seconds
+                ):
                     if not line or not line.startswith("data:"):
                         continue
                     data = line[len("data:"):].strip()
@@ -388,6 +414,9 @@ class LLMClient:
                             )
         except httpx.HTTPError as exc:
             raise _RetryableLLMError(f"LLM 流式网络错误: {exc}") from exc
+        except TimeoutError as exc:
+            # P0-14：逐 chunk 超时——provider 卡死，转为可重试错误进入重试循环
+            raise _RetryableLLMError(f"LLM 流式 chunk 超时: {exc}") from exc
         yield StreamEvent(
             type="finish",
             content="".join(text_parts),
@@ -429,7 +458,12 @@ class LLMClient:
                     raise LLMError(
                         f"Anthropic 流式 HTTP {resp.status_code}: {body[:200]!r}"
                     )
-                async for line in resp.aiter_lines():
+                # P0-14：逐 chunk 超时（同 OpenAI 路径）
+                from app.core.config import settings as _settings
+
+                async for line in _iter_lines_with_timeout(
+                    resp, _settings.llm_stream_chunk_timeout_seconds
+                ):
                     if not line or not line.startswith("data:"):
                         continue
                     data = line[len("data:"):].strip()
@@ -482,6 +516,9 @@ class LLMClient:
                             usage["output_tokens"] = u["output_tokens"]
         except httpx.HTTPError as exc:
             raise _RetryableLLMError(f"Anthropic 流式网络错误: {exc}") from exc
+        except TimeoutError as exc:
+            # P0-14：逐 chunk 超时——provider 卡死，转为可重试错误进入重试循环
+            raise _RetryableLLMError(f"Anthropic 流式 chunk 超时: {exc}") from exc
         yield StreamEvent(
             type="finish",
             content="".join(text_parts),

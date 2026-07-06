@@ -76,19 +76,48 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         scheduler_task = asyncio.create_task(run_scheduler_loop())
     yield
-    if scheduler_task is not None:
-        scheduler_task.cancel()
-        await asyncio.gather(scheduler_task, return_exceptions=True)
-    # P0-10：取消所有 fire-and-forget task 并等待退出，防止 event loop 关闭后
-    # task 还尝试运行（``Event loop is closed`` 错误）+ 释放强引用。
-    from app.core.task_registry import get_task_registry
+    # P0-12：shutdown 序列用整体超时包裹，超时记 CRITICAL 后强制退出。
+    # K8s terminationGracePeriodSeconds 默认 30s，此处 20s + 10s buffer 对齐。
+    # 单步阻塞（scheduler cancel 等待 LLM 调用 / engine.dispose 等长事务）
+    # 累计超阈值则放弃等待，避免 pod 被 SIGKILL 时 in-flight 状态丢失无日志。
+    async def _shutdown_seq() -> None:
+        if scheduler_task is not None:
+            scheduler_task.cancel()
+            # 二次保护：scheduler tick 内 LLM 调用最多 60s，15s 内必须退出
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(scheduler_task, return_exceptions=True),
+                    timeout=15.0,
+                )
+            except TimeoutError:
+                logger.critical(
+                    "scheduler_task shutdown timeout, force exit",
+                    extra={"event": "shutdown", "outcome": "timeout", "component": "scheduler"},
+                )
+        # P0-10：取消所有 fire-and-forget task 并等待退出，防止 event loop 关闭后
+        # task 还尝试运行（``Event loop is closed`` 错误）+ 释放强引用。
+        from app.core.task_registry import get_task_registry
 
-    await get_task_registry().shutdown()
-    await engine.dispose()
-    await close_redis()
-    await close_embedder_client()
-    # P1-5：释放 LLMClient 连接池单例（evals judge 等应用级 client）。
-    await close_all_clients()
+        await get_task_registry().shutdown()
+        await engine.dispose()
+        await close_redis()
+        await close_embedder_client()
+        # P1-5：释放 LLMClient 连接池单例（evals judge 等应用级 client）。
+        await close_all_clients()
+
+    try:
+        await asyncio.wait_for(
+            _shutdown_seq(), timeout=settings.lifespan_shutdown_timeout_seconds
+        )
+    except TimeoutError:
+        logger.critical(
+            "lifespan shutdown exceeded timeout, force exit (in-flight state may be lost)",
+            extra={
+                "event": "shutdown",
+                "outcome": "timeout",
+                "timeout_seconds": settings.lifespan_shutdown_timeout_seconds,
+            },
+        )
 
 
 app = FastAPI(
