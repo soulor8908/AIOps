@@ -22,7 +22,7 @@ RUN npm run build
 
 # ---------- Stage 2: runtime ----------
 # nginx-unprivileged 以 UID 101 非 root 运行，监听非特权端口 8080（deployment.spec.md §2.2）。
-FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime
+FROM nginxinc/nginx-unprivileged:1.31-alpine AS runtime
 
 # OCI 标准标签（deployment.spec.md §可观测性 / 供应链安全）
 ARG GIT_SHA=""
